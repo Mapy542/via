@@ -68,8 +68,11 @@ void GoogleAuthManager::setupOAuth() {
 
     // Set OAuth parameters
     m_oauth->setAuthorizationUrl(QUrl(AUTH_URL));
-    m_oauth->setTokenUrl(
-        QUrl(TOKEN_URL));  // Use setTokenUrl instead of deprecated setAccessTokenUrl
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    m_oauth->setTokenUrl(QUrl(TOKEN_URL));
+#else
+    m_oauth->setAccessTokenUrl(QUrl(TOKEN_URL));
+#endif
 
     // Set scope - use the scope setter which accepts a space-separated string
     m_oauth->setScope(SCOPE);
@@ -104,11 +107,17 @@ void GoogleAuthManager::setupOAuth() {
     connect(m_oauth, &QOAuth2AuthorizationCodeFlow::refreshTokenChanged, this,
             &GoogleAuthManager::onRefreshTokenChanged);
 
-    // Use serverReportedErrorOccurred instead of deprecated error signal
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     connect(m_oauth, &QAbstractOAuth2::serverReportedErrorOccurred, this,
             [this](const QString& error, const QString& errorDescription, const QUrl&) {
                 onError(error, errorDescription, QUrl());
             });
+#else
+    connect(m_oauth, &QAbstractOAuth2::error, this,
+            [this](const QString& error, const QString& errorDescription, const QUrl&) {
+                onError(error, errorDescription, QUrl());
+            });
+#endif
 }
 
 void GoogleAuthManager::loadStoredTokens() {

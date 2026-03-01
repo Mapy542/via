@@ -93,6 +93,7 @@ set(HEADERS
     src/utils/LogManager.h
     src/utils/FileInUseChecker.h
     src/utils/AutostartManager.h
+    src/utils/UpdateChecker.h
 )
 
 # Resource files

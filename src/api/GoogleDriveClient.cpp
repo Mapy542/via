@@ -6,6 +6,7 @@
 #include "GoogleDriveClient.h"
 
 #include <QDebug>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QHttpMultiPart>
 #include <QMimeDatabase>

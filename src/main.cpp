@@ -34,9 +34,11 @@
 #include "sync/SyncDatabase.h"
 #include "ui/MainWindow.h"
 #include "ui/SystemTrayManager.h"
+#include "utils/AutostartManager.h"
 #include "utils/LogManager.h"
 #include "utils/NotificationManager.h"
 #include "utils/ThemeHelper.h"
+#include "utils/UpdateChecker.h"
 
 /**
  * @brief Initialize application directories
@@ -193,6 +195,9 @@ int main(int argc, char* argv[]) {
         qInfo() << "Log file:" << LogManager::instance().currentLogPath();
     }
 
+    // Install desktop integration (desktop file, icon, autostart sync)
+    AutostartManager::installDesktopIntegration();
+
     // Initialize token storage
     TokenStorage tokenStorage;
 
@@ -213,6 +218,10 @@ int main(int argc, char* argv[]) {
 
     // Initialize notification manager
     NotificationManager notificationManager;
+
+    // Check for updates (runs asynchronously, shows dialog if update found)
+    UpdateChecker updateChecker;
+    updateChecker.checkForUpdates(/* silent = */ true);
 
     QSettings settings;
 

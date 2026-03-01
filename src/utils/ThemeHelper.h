@@ -58,8 +58,13 @@ class ThemeHelper {
         if (override == ThemeOverride::Dark) {
             return true;
         }
-        // Auto: use Qt's color scheme detection
+        // Auto: use Qt's color scheme detection (Qt 6.5+), fall back to palette
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+#else
+        // Fallback: use palette luminance (same logic as isGuiDarkTheme)
+        return isGuiDarkTheme();
+#endif
     }
 
     /**
@@ -72,9 +77,8 @@ class ThemeHelper {
         QPalette palette = QApplication::palette();
         QColor windowColor = palette.color(QPalette::Window);
         // Calculate perceived luminance (standard formula)
-        int luminance = (windowColor.red() * 299 + windowColor.green() * 587 +
-                         windowColor.blue() * 114) /
-                        1000;
+        int luminance =
+            (windowColor.red() * 299 + windowColor.green() * 587 + windowColor.blue() * 114) / 1000;
         return luminance < 128;
     }
 
