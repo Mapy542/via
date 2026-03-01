@@ -241,7 +241,8 @@ void MainWindow::setupMenuBar() {
             this, "About Via",
             "<h2>Via</h2>"
             "<p>Version 1.0.0</p>"
-            "<p>A Google Drive desktop client for Linux.</p>"
+            "<p>A Google Drive desktop client for Linux. Not affiliated with Google or Google "
+            "Drive.</p>"
             "<p>Features:</p>"
             "<ul>"
             "<li>Bidirectional file synchronization</li>"

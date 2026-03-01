@@ -68,7 +68,7 @@ void GoogleAuthManager::setupOAuth() {
 
     // Set OAuth parameters
     m_oauth->setAuthorizationUrl(QUrl(AUTH_URL));
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
     m_oauth->setTokenUrl(QUrl(TOKEN_URL));
 #else
     m_oauth->setAccessTokenUrl(QUrl(TOKEN_URL));
@@ -107,7 +107,7 @@ void GoogleAuthManager::setupOAuth() {
     connect(m_oauth, &QOAuth2AuthorizationCodeFlow::refreshTokenChanged, this,
             &GoogleAuthManager::onRefreshTokenChanged);
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
     connect(m_oauth, &QAbstractOAuth2::serverReportedErrorOccurred, this,
             [this](const QString& error, const QString& errorDescription, const QUrl&) {
                 onError(error, errorDescription, QUrl());

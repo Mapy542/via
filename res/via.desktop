@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Via
 GenericName=Cloud Storage Client
-Comment=Google Drive desktop client for Linux
+Comment=A Google Drive desktop client for Linux
 Exec=via
 Icon=via
 Terminal=false

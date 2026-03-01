@@ -1,6 +1,7 @@
 # Via
 
 A Google Drive desktop client for Linux, providing seamless synchronization and virtual file system access to your Google Drive files.
+Not affiliated with Google or Google Drive.
 
 ![Build Status](https://github.com/Mapy542/Via/actions/workflows/build.yml/badge.svg)
 
