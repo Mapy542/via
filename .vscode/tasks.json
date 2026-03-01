@@ -71,6 +71,18 @@
             "args": ["--test-dir", "build", "-N"],
             "group": "test",
             "problemMatcher": []
+        },
+        {
+            "label": "Make AppImage",
+            "type": "shell",
+            "command": "${workspaceFolder}/scripts/make-appimage.sh",
+            "group": "build",
+            "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
         }
     ]
 }

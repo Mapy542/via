@@ -48,8 +48,8 @@ jobs:
             - name: Install to AppDir
               run: |
                   DESTDIR=AppDir cmake --install build
-                  mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-                  cp res/icons/via.svg AppDir/usr/share/icons/hicolor/256x256/apps/via.svg
+                  mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
+                  cp res/icons/via.svg AppDir/usr/share/icons/hicolor/scalable/apps/via.svg
                   mkdir -p AppDir/usr/share/applications
                   cp res/via.desktop AppDir/usr/share/applications/
 

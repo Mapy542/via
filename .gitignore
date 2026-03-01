@@ -24,6 +24,7 @@ via
 # AppImage
 *.AppImage
 AppDir/
+*-appimage/
 
 # CodeQL
 _codeql*/

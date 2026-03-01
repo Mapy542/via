@@ -18,6 +18,7 @@
 #include "auth/TokenStorage.h"
 #include "sync/ChangeProcessor.h"
 #include "sync/SyncActionQueue.h"
+#include "utils/AutostartManager.h"
 
 SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
                                ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
@@ -572,6 +573,7 @@ void SettingsWindow::saveSettings() {
 
     // Advanced settings
     m_settings.setValue("advanced/startOnLogin", m_startOnLoginCheck->isChecked());
+    AutostartManager::setAutostart(m_startOnLoginCheck->isChecked());
     m_settings.setValue("advanced/showNotifications", m_showNotificationsCheck->isChecked());
     m_settings.setValue("advanced/themeOverride", m_themeOverrideCombo->currentData().toInt());
     m_settings.setValue("advanced/syncSystem", m_syncSystemCombo->currentData().toString());

@@ -92,6 +92,7 @@ set(HEADERS
     src/utils/NotificationManager.h
     src/utils/LogManager.h
     src/utils/FileInUseChecker.h
+    src/utils/AutostartManager.h
 )
 
 # Resource files
@@ -140,8 +141,8 @@ install(FILES res/via.desktop
     DESTINATION share/applications
 )
 
-install(FILES res/icons/via.png
-    DESTINATION share/icons/hicolor/256x256/apps
+install(FILES res/icons/via.svg
+    DESTINATION share/icons/hicolor/scalable/apps
 )
 
 # ==============================================================================
