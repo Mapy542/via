@@ -1,0 +1,29 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <!-- Dark theme icons (white content, for dark backgrounds) -->
+        <file>icons/dark/drive-idle.svg</file>
+        <file>icons/dark/sync-active.svg</file>
+        <file>icons/dark/paused.svg</file>
+        <file>icons/dark/error.svg</file>
+        <file>icons/dark/warn.svg</file>
+        <file>icons/dark/no-connection.svg</file>
+        <file>icons/dark/low-storage.svg</file>
+        <file>icons/dark/critical-low-storage.svg</file>
+        <file>icons/dark/auth-expired.svg</file>
+        <file>icons/dark/auth.svg</file>
+        <file>icons/dark/conflict.svg</file>
+        <!-- Light theme icons (dark content, for light backgrounds) -->
+        <file>icons/light/drive-idle.svg</file>
+        <file>icons/light/sync-active.svg</file>
+        <file>icons/light/paused.svg</file>
+        <file>icons/light/error.svg</file>
+        <file>icons/light/warn.svg</file>
+        <file>icons/light/no-connection.svg</file>
+        <file>icons/light/low-storage.svg</file>
+        <file>icons/light/critical-low-storage.svg</file>
+        <file>icons/light/auth-expired.svg</file>
+        <file>icons/light/auth.svg</file>
+        <file>icons/light/conflict.svg</file>
+    </qresource>
+</RCC>

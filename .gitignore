@@ -1,0 +1,31 @@
+# Build directories
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Qt generated files
+*_automoc.cpp
+*_autogen/
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.qm
+
+# Compiled Object files
+*.o
+*.obj
+
+# Executable files
+via
+
+# AppImage
+*.AppImage
+AppDir/
+
+# CodeQL
+_codeql*/
+_codeql_detected_source_root
+

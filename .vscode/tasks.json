@@ -1,0 +1,76 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-B",
+                "build",
+                //"-S",
+                //".",
+                //"-G", "Ninja",
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DBUILD_TESTS=ON"
+                //"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Build",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--parallel"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$gcc",
+            "dependsOn": "CMake: Configure"
+        },
+        {
+            "label": "CMake: Clean",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--target", "clean"],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Rebuild",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--clean-first", "--parallel"],
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Run All Tests",
+            "type": "shell",
+            "command": "ctest",
+            "args": ["--test-dir", "build", "--output-on-failure"],
+            "group": "test",
+            "problemMatcher": [],
+            "dependsOn": "CMake: Build"
+        },
+        {
+            "label": "Run All Tests (Verbose)",
+            "type": "shell",
+            "command": "ctest",
+            "args": ["--test-dir", "build", "--output-on-failure", "-V"],
+            "group": "test",
+            "problemMatcher": [],
+            "dependsOn": "CMake: Build"
+        },
+        {
+            "label": "List Available Tests",
+            "type": "shell",
+            "command": "ctest",
+            "args": ["--test-dir", "build", "-N"],
+            "group": "test",
+            "problemMatcher": []
+        }
+    ]
+}

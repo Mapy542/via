@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Via
+GenericName=Cloud Storage Client
+Comment=Google Drive desktop client for Linux
+Exec=via
+Icon=via
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;
+Keywords=google;drive;cloud;sync;storage;
+StartupWMClass=via
