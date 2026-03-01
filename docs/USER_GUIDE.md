@@ -143,28 +143,10 @@ When the same file is modified in two places:
 | **Keep Remote** | Google Drive version overwrites local       |
 | **Keep Both**   | Local file renamed with "(conflict)" suffix |
 
-### Bandwidth Management
-
-Control how much bandwidth Via uses:
-
-1. Go to **Settings > Bandwidth**
-2. Enable limits for uploads and/or downloads
-3. Set the speed in KB/s
-4. Optionally set a schedule
-
-#### Schedule Options
-
-- **Always** - Limit applies all the time
-- **9 AM - 5 PM** - Limit during work hours only
-- **5 PM - 9 AM** - Limit during off-hours only
-- **Weekends only** - Limit on Saturday and Sunday
-
 ### Notifications
 
 Via keeps you informed with desktop notifications:
 
-- File uploads completed
-- File downloads completed
 - Sync conflicts detected
 - Errors encountered
 
@@ -186,19 +168,13 @@ To disable notifications:
 - **Sync Folder** - Where Google Drive files are stored locally
 - **Selective Sync** - Choose which folders to sync
 
-### Bandwidth Tab
-
-- **Upload Limit** - Maximum upload speed
-- **Download Limit** - Maximum download speed
-- **Schedule** - When limits apply
-
 ### Advanced Tab
 
 - **Start on Login** - Launch Via when you log in
 - **Notifications** - Enable/disable desktop notifications
 - **FUSE** - Enable virtual file system
 - **Cache Size** - Maximum local cache size
-- **Debug Mode** - Enable detailed logging
+- **Debug Mode** - Enable detailed logging (./local/share/Via/logs/)
 
 ## Troubleshooting
 
@@ -221,7 +197,7 @@ To disable notifications:
 **Causes:**
 
 - Sync is paused
-- File is in an ignored pattern
+- File is in an ignored pattern (.git..., drive native files (docs), etc)
 - Network issues
 
 **Solutions:**
@@ -244,20 +220,20 @@ To disable notifications:
 2. Add user to fuse group: `sudo usermod -a -G fuse $USER`
 3. Ensure mount point directory is empty
 
-### Slow Performance
+### Unable to Mount FUSE
 
 **Causes:**
 
-- Large number of files syncing
-- Bandwidth limits too restrictive
-- Cache full
+- FUSE not installed
+- User not in fuse group
+- Mount point already exists and is not empty
 
 **Solutions:**
 
-1. Wait for initial sync to complete
-2. Adjust bandwidth limits
-3. Increase cache size in settings
-4. Use selective sync to reduce file count
+1. Install FUSE: `sudo apt-get install fuse3`
+2. Add user to fuse group: `sudo usermod -a -G fuse $USER`
+3. Ensure the mount point directory (default `~/GoogleDriveFuse`) is empty or does not exist before enabling FUSE in settings
+4. `fusermount3 -u ~/GoogleDriveFuse` to unmount if it's stuck
 
 ### Conflicts Keep Occurring
 
@@ -265,12 +241,20 @@ To disable notifications:
 
 - Editing same file on multiple devices
 - Poor sync timing
+- Database issues
 
 **Solutions:**
 
 1. Wait for sync to complete before editing
 2. Use "Keep Both" to preserve all changes
 3. Enable notifications to know when sync completes
+
+or
+
+1. Stop Via
+2. Backup and delete the sync database (`~/.local/share/Via/sync.db`)
+3. Clear the sync folder (after backing up important files)
+4. Restart Via and let it resync everything
 
 ## Keyboard Shortcuts
 
@@ -283,9 +267,8 @@ To disable notifications:
 
 ### Getting Help
 
-1. Check this user guide
-2. Review the [API documentation](API.md)
-3. File an issue on [GitHub](https://github.com/Mapy542/Via/issues)
+1. Check this user guide for common questions
+2. File an issue on [GitHub](https://github.com/Mapy542/Via/issues)
 
 ### Debug Logs
 

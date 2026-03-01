@@ -10,6 +10,7 @@
 #ifndef METADATACACHE_H
 #define METADATACACHE_H
 
+#include <QAtomicInteger>
 #include <QDateTime>
 #include <QHash>
 #include <QList>
@@ -29,17 +30,17 @@ class GoogleDriveClient;
  * including stat attributes and Google Drive specific information.
  */
 struct FuseFileMetadata {
-    QString fileId;           ///< Google Drive file ID
-    QString path;             ///< Full path relative to mount point
-    QString name;             ///< File/folder name
-    QString parentId;         ///< Parent folder's Google Drive file ID
-    bool isFolder = false;    ///< Whether this is a folder
-    qint64 size = 0;          ///< File size in bytes (0 for folders)
-    QString mimeType;         ///< MIME type
-    QDateTime createdTime;    ///< Creation timestamp
-    QDateTime modifiedTime;   ///< Last modification timestamp
-    QDateTime cachedAt;       ///< When this metadata was cached
-    QDateTime lastAccessed;   ///< When this entry was last accessed
+    QString fileId;          ///< Google Drive file ID
+    QString path;            ///< Full path relative to mount point
+    QString name;            ///< File/folder name
+    QString parentId;        ///< Parent folder's Google Drive file ID
+    bool isFolder = false;   ///< Whether this is a folder
+    qint64 size = 0;         ///< File size in bytes (0 for folders)
+    QString mimeType;        ///< MIME type
+    QDateTime createdTime;   ///< Creation timestamp
+    QDateTime modifiedTime;  ///< Last modification timestamp
+    QDateTime cachedAt;      ///< When this metadata was cached
+    QDateTime lastAccessed;  ///< When this entry was last accessed
 
     /**
      * @brief Check if this metadata entry is valid
@@ -424,10 +425,10 @@ class MetadataCache : public QObject {
     GoogleDriveClient* m_driveClient;
 
     // In-memory caches with thread-safe access
-    QHash<QString, FuseFileMetadata> m_pathToMetadata;   ///< Path -> Metadata
-    QHash<QString, QString> m_fileIdToPath;              ///< FileId -> Path
-    QHash<QString, QList<QString>> m_parentToChildren;   ///< ParentPath -> Child paths
-    QHash<QString, QDateTime> m_childrenCacheTime;       ///< When children were cached
+    QHash<QString, FuseFileMetadata> m_pathToMetadata;  ///< Path -> Metadata
+    QHash<QString, QString> m_fileIdToPath;             ///< FileId -> Path
+    QHash<QString, QList<QString>> m_parentToChildren;  ///< ParentPath -> Child paths
+    QHash<QString, QDateTime> m_childrenCacheTime;      ///< When children were cached
 
     // Root folder ID for path resolution
     QString m_rootFolderId;
@@ -436,15 +437,15 @@ class MetadataCache : public QObject {
     int m_maxCacheAgeSeconds;  ///< Default: 300 (5 minutes)
 
     // Statistics
-    mutable qint64 m_cacheHits;
-    mutable qint64 m_cacheMisses;
+    mutable QAtomicInteger<qint64> m_cacheHits;
+    mutable QAtomicInteger<qint64> m_cacheMisses;
 
     // Thread safety
     mutable QReadWriteLock m_lock;
 
     // Constants
     static const int DEFAULT_MAX_CACHE_AGE_SECONDS = 300;  // 5 minutes
-    static const char* DB_CONNECTION_NAME;  // Database connection name
+    static const char* DB_CONNECTION_NAME;                 // Database connection name
 };
 
 #endif  // METADATACACHE_H

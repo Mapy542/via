@@ -6,8 +6,10 @@
 #ifndef SYNCDATABASE_H
 #define SYNCDATABASE_H
 
+#include <QAtomicInteger>
 #include <QDateTime>
 #include <QList>
+#include <QMutex>
 #include <QObject>
 #include <QSqlDatabase>
 #include <QString>
@@ -141,6 +143,12 @@ class SyncDatabase : public QObject {
      * @return true if database is open
      */
     bool isOpen() const;
+
+    /**
+     * @brief Get the peak concurrent access count (thread-safety telemetry)
+     * @return Peak number of threads that attempted concurrent database access
+     */
+    int peakConcurrentAccess() const { return m_concurrentAccessCount.loadRelaxed(); }
 
     // File operations
 
@@ -510,6 +518,8 @@ class SyncDatabase : public QObject {
 
     QSqlDatabase m_db;
     QString m_dbPath;
+    mutable QRecursiveMutex m_mutex;                      ///< Thread-safe access to database
+    mutable QAtomicInteger<int> m_concurrentAccessCount;  ///< Track concurrent access attempts
     static const QString DB_NAME;
     static const int DB_VERSION;
 };

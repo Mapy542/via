@@ -35,6 +35,7 @@
 #include <QObject>
 #include <QString>
 #include <QThread>
+#include <optional>
 
 #define FUSE_USE_VERSION 35
 #include <fuse3/fuse.h>
@@ -629,11 +630,18 @@ class FuseDriver : public QObject {
     uint64_t registerOpenFile(const FuseOpenFile& openFile);
 
     /**
-     * @brief Get open file by handle
+     * @brief Get open file by handle (returns a copy for thread safety)
      * @param fh File handle from FUSE
-     * @return Pointer to FuseOpenFile or nullptr if not found
+     * @return Copy of FuseOpenFile or std::nullopt if not found
      */
-    FuseOpenFile* getOpenFile(uint64_t fh);
+    std::optional<FuseOpenFile> getOpenFile(uint64_t fh);
+
+    /**
+     * @brief Mark an open file as dirty (modified)
+     * @param fh File handle from FUSE
+     * @return true if the file was found and marked dirty
+     */
+    bool markOpenFileDirty(uint64_t fh);
 
     /**
      * @brief Unregister an open file handle

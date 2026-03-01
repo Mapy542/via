@@ -21,6 +21,8 @@
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThread>
+#include <QtConcurrent>
 #include <QtTest/QtTest>
 #include <stdexcept>
 
@@ -147,6 +149,8 @@ class TestSyncDatabase : public QObject {
     // Concurrent Access and Integrity
     // ==========================================================================
     void testMultipleRapidWrites();
+    void testConcurrentReadWrite_NoCorruption();
+    void testConcurrentFuseMetadata_NoCorruption();
     void testDatabaseNotOpen_OperationsGraceful();
 
    private:
@@ -1355,6 +1359,149 @@ void TestSyncDatabase::testMultipleRapidWrites() {
     for (int i = 0; i < 100; i++) {
         FileSyncState retrieved = m_db->getFileState(QString("rapid/file%1.txt").arg(i));
         QCOMPARE(retrieved.fileId, QString("RAPID_ID_%1").arg(i));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent Access Stress Tests
+// ---------------------------------------------------------------------------
+
+void TestSyncDatabase::testConcurrentReadWrite_NoCorruption() {
+    // Pre-populate some records
+    for (int i = 0; i < 20; i++) {
+        FileSyncState state;
+        state.localPath = QString("concurrent/file%1.txt").arg(i);
+        state.fileId = QString("CONC_ID_%1").arg(i);
+        m_db->saveFileState(state);
+    }
+
+    const int numThreads = 4;
+    const int opsPerThread = 50;
+    QAtomicInt errors(0);
+
+    // Spawn threads doing concurrent reads and writes
+    QList<QFuture<void>> futures;
+    for (int t = 0; t < numThreads; t++) {
+        futures.append(QtConcurrent::run([this, t, opsPerThread, &errors]() {
+            for (int i = 0; i < opsPerThread; i++) {
+                // Alternate between reads and writes
+                if (i % 3 == 0) {
+                    // Write: save a new file state
+                    FileSyncState state;
+                    state.localPath = QString("concurrent/t%1_file%2.txt").arg(t).arg(i);
+                    state.fileId = QString("T%1_ID_%2").arg(t).arg(i);
+                    m_db->saveFileState(state);
+                } else if (i % 3 == 1) {
+                    // Read: retrieve an existing record
+                    int idx = i % 20;
+                    FileSyncState s = m_db->getFileState(QString("concurrent/file%1.txt").arg(idx));
+                    // Must find the pre-populated record
+                    if (s.fileId != QString("CONC_ID_%1").arg(idx)) {
+                        errors.fetchAndAddRelaxed(1);
+                    }
+                } else {
+                    // Read: file count (exercises a different query)
+                    int count = m_db->fileCount();
+                    if (count < 20) {
+                        errors.fetchAndAddRelaxed(1);
+                    }
+                }
+            }
+        }));
+    }
+
+    // Wait for all threads to complete
+    for (auto& f : futures) {
+        f.waitForFinished();
+    }
+
+    QCOMPARE(errors.loadRelaxed(), 0);
+
+    // Verify pre-populated records are still intact
+    for (int i = 0; i < 20; i++) {
+        FileSyncState retrieved = m_db->getFileState(QString("concurrent/file%1.txt").arg(i));
+        QCOMPARE(retrieved.fileId, QString("CONC_ID_%1").arg(i));
+    }
+}
+
+void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
+    // Stress test FUSE metadata operations concurrently
+    const int numThreads = 4;
+    const int opsPerThread = 40;
+    QAtomicInt errors(0);
+
+    // Pre-populate FUSE metadata
+    for (int i = 0; i < 10; i++) {
+        FuseMetadata meta;
+        meta.fileId = QString("FUSE_ID_%1").arg(i);
+        meta.path = QString("/fuse/file%1.txt").arg(i);
+        meta.name = QString("file%1.txt").arg(i);
+        meta.parentId = "root";
+        meta.isFolder = false;
+        meta.size = 1024 * (i + 1);
+        meta.mimeType = "text/plain";
+        meta.createdTime = QDateTime::currentDateTimeUtc();
+        meta.modifiedTime = QDateTime::currentDateTimeUtc();
+        meta.cachedAt = QDateTime::currentDateTimeUtc();
+        meta.lastAccessed = QDateTime::currentDateTimeUtc();
+        m_db->saveFuseMetadata(meta);
+    }
+
+    QList<QFuture<void>> futures;
+    for (int t = 0; t < numThreads; t++) {
+        futures.append(QtConcurrent::run([this, t, opsPerThread, &errors]() {
+            for (int i = 0; i < opsPerThread; i++) {
+                if (i % 4 == 0) {
+                    // Write new FUSE metadata
+                    FuseMetadata meta;
+                    meta.fileId = QString("FUSE_T%1_%2").arg(t).arg(i);
+                    meta.path = QString("/fuse/t%1/file%2.txt").arg(t).arg(i);
+                    meta.name = QString("file%1.txt").arg(i);
+                    meta.parentId = "root";
+                    meta.isFolder = false;
+                    meta.size = 512;
+                    meta.mimeType = "text/plain";
+                    meta.createdTime = QDateTime::currentDateTimeUtc();
+                    meta.modifiedTime = QDateTime::currentDateTimeUtc();
+                    meta.cachedAt = QDateTime::currentDateTimeUtc();
+                    meta.lastAccessed = QDateTime::currentDateTimeUtc();
+                    m_db->saveFuseMetadata(meta);
+                } else if (i % 4 == 1) {
+                    // Read by file ID
+                    int idx = i % 10;
+                    FuseMetadata meta = m_db->getFuseMetadata(QString("FUSE_ID_%1").arg(idx));
+                    if (meta.fileId.isEmpty()) {
+                        errors.fetchAndAddRelaxed(1);
+                    }
+                } else if (i % 4 == 2) {
+                    // Read by path
+                    int idx = i % 10;
+                    FuseMetadata meta =
+                        m_db->getFuseMetadataByPath(QString("/fuse/file%1.txt").arg(idx));
+                    if (meta.fileId.isEmpty()) {
+                        errors.fetchAndAddRelaxed(1);
+                    }
+                } else {
+                    // Get children
+                    QList<FuseMetadata> children = m_db->getFuseChildren("root");
+                    if (children.isEmpty()) {
+                        errors.fetchAndAddRelaxed(1);
+                    }
+                }
+            }
+        }));
+    }
+
+    for (auto& f : futures) {
+        f.waitForFinished();
+    }
+
+    QCOMPARE(errors.loadRelaxed(), 0);
+
+    // Verify pre-populated records survived
+    for (int i = 0; i < 10; i++) {
+        FuseMetadata meta = m_db->getFuseMetadata(QString("FUSE_ID_%1").arg(i));
+        QCOMPARE(meta.path, QString("/fuse/file%1.txt").arg(i));
     }
 }
 

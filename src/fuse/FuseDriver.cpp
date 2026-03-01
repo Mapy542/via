@@ -1281,18 +1281,19 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
         return -EIO;
     }
 
-    FuseOpenFile* openFile = s_instance->getOpenFile(fi->fh);
-    if (!openFile) {
+    auto openFileOpt = s_instance->getOpenFile(fi->fh);
+    if (!openFileOpt) {
         return -EBADF;
     }
+    FuseOpenFile openFile = *openFileOpt;
 
     // Update access time
     if (s_instance->m_fileCache) {
-        s_instance->m_fileCache->updateAccessTime(openFile->fileId);
+        s_instance->m_fileCache->updateAccessTime(openFile.fileId);
     }
 
     // Read from cached file
-    QFile file(openFile->cachePath);
+    QFile file(openFile.cachePath);
     if (!file.open(QIODevice::ReadOnly)) {
         return -EIO;
     }
@@ -1315,17 +1316,18 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
         return -EIO;
     }
 
-    FuseOpenFile* openFile = s_instance->getOpenFile(fi->fh);
-    if (!openFile) {
+    auto openFileOpt = s_instance->getOpenFile(fi->fh);
+    if (!openFileOpt) {
         return -EBADF;
     }
+    FuseOpenFile openFile = *openFileOpt;
 
-    if (!openFile->writable) {
+    if (!openFile.writable) {
         return -EACCES;
     }
 
     // Write to cached file
-    QFile file(openFile->cachePath);
+    QFile file(openFile.cachePath);
     if (!file.open(QIODevice::ReadWrite)) {
         return -EIO;
     }
@@ -1342,14 +1344,14 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
     }
 
     // Mark file as dirty (for DirtySyncWorker to upload)
-    if (!openFile->dirty) {
-        openFile->dirty = true;
+    if (!openFile.dirty) {
+        s_instance->markOpenFileDirty(fi->fh);
         if (s_instance->m_fileCache) {
             QString lookupPath =
-                openFile->path.startsWith("/") ? openFile->path.mid(1) : openFile->path;
-            s_instance->m_fileCache->markDirty(openFile->fileId, lookupPath);
+                openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
+            s_instance->m_fileCache->markDirty(openFile.fileId, lookupPath);
         }
-        emit s_instance->fileModified(openFile->path);
+        emit s_instance->fileModified(openFile.path);
     }
 
     return written;
@@ -1359,33 +1361,34 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
     Q_UNUSED(path)
 
     if (s_instance) {
-        FuseOpenFile* openFile = s_instance->getOpenFile(fi->fh);
+        auto openFileOpt = s_instance->getOpenFile(fi->fh);
 
-        if (openFile && openFile->dirty && !openFile->fileId.isEmpty() &&
+        if (openFileOpt && openFileOpt->dirty && !openFileOpt->fileId.isEmpty() &&
             s_instance->m_driveClient) {
+            FuseOpenFile openFile = *openFileOpt;
             QString error;
             DriveFile updatedFile;
             bool authFailure = false;
 
             if (waitForUpdate(
-                    s_instance->m_driveClient, openFile->fileId, &updatedFile,
+                    s_instance->m_driveClient, openFile.fileId, &updatedFile,
                     [&]() {
                         return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                            s_instance->m_driveClient->updateFile(openFile->fileId,
-                                                                  openFile->cachePath);
+                            s_instance->m_driveClient->updateFile(openFile.fileId,
+                                                                  openFile.cachePath);
                         });
                     },
                     &error, &authFailure)) {
                 if (s_instance->m_fileCache) {
-                    s_instance->m_fileCache->clearDirty(openFile->fileId);
+                    s_instance->m_fileCache->clearDirty(openFile.fileId);
                 }
 
                 if (s_instance->m_database) {
                     QString lookupPath =
-                        openFile->path.startsWith("/") ? openFile->path.mid(1) : openFile->path;
+                        openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
                     FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
                     if (!meta.fileId.isEmpty()) {
-                        meta.size = QFileInfo(openFile->cachePath).size();
+                        meta.size = QFileInfo(openFile.cachePath).size();
                         if (updatedFile.modifiedTime.isValid()) {
                             meta.modifiedTime = updatedFile.modifiedTime;
                         }
@@ -1396,9 +1399,9 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
                 }
             } else {
                 if (s_instance->m_fileCache) {
-                    s_instance->m_fileCache->markUploadFailed(openFile->fileId);
+                    s_instance->m_fileCache->markUploadFailed(openFile.fileId);
                 }
-                qWarning() << "FuseDriver: Upload-on-close failed for" << openFile->path << ":"
+                qWarning() << "FuseDriver: Upload-on-close failed for" << openFile.path << ":"
                            << error << "authFailure=" << authFailure;
 
                 if (s_instance->m_dirtySyncWorker) {
@@ -2025,12 +2028,21 @@ uint64_t FuseDriver::registerOpenFile(const FuseOpenFile& openFile) {
     return handle;
 }
 
-FuseOpenFile* FuseDriver::getOpenFile(uint64_t fh) {
+std::optional<FuseOpenFile> FuseDriver::getOpenFile(uint64_t fh) {
     QMutexLocker locker(&m_openFilesMutex);
     if (m_openFiles.contains(fh)) {
-        return &m_openFiles[fh];
+        return m_openFiles[fh];
     }
-    return nullptr;
+    return std::nullopt;
+}
+
+bool FuseDriver::markOpenFileDirty(uint64_t fh) {
+    QMutexLocker locker(&m_openFilesMutex);
+    if (m_openFiles.contains(fh)) {
+        m_openFiles[fh].dirty = true;
+        return true;
+    }
+    return false;
 }
 
 void FuseDriver::unregisterOpenFile(uint64_t fh) {

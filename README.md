@@ -8,21 +8,22 @@ Not affiliated with Google or Google Drive.
 ## Features
 
 - **Bidirectional Synchronization**: Keep your local files in sync with Google Drive automatically
-- **Virtual File System (FUSE)**: Access Google Drive files as if they were on your local disk
+- **Virtual File System (FUSE)**: Access Google Drive files as if they were on your local disk without allocating local storage
+- **Mirror Mode**: Optionally keep a full local copy of your Google Drive for offline access and performant read/write operations
 - **On-Demand Access**: Files are downloaded only when you need them
-- **Offline Access**: Mark files for offline access to use without internet
+- **Offline Access**: Cached FUSE files are available offline and sync back when you're online, and mirror mode allows full local copies
 - **Conflict Resolution**: Automatic detection and handling of file conflicts
-- **Bandwidth Management**: Control upload/download speeds with scheduling
-- **System Tray Integration**: Quick access to sync status and common actions
-- **Desktop Notifications**: Stay informed about sync activity
+- **Native Filesystem Integration**: Works with file system for access in all applications or cli
+- **Interface**: Easy to use GUI with system tray integration for quick access and notifications
 
 ## Installation
 
 ### AppImage (Recommended)
 
 1. Download the latest AppImage from the [Releases](https://github.com/Mapy542/Via/releases) page
-2. Make it executable: `chmod +x Via-*.AppImage`
-3. Run: `./Via-*.AppImage`
+2. Place it in your desired location (e.g., `~/Applications`)
+3. Make it executable: `chmod +x Via-*.AppImage`
+4. Run: `./Via-*.AppImage` (Will install .desktop file)
 
 ### Building from Source
 
@@ -75,76 +76,10 @@ Access settings through the main window or system tray menu:
 - **Notifications**: Configure desktop notifications
 - **Startup**: Set to start on system login
 
-## Usage
+## Other Information
 
-### Basic Usage
-
-1. Launch Via
-2. Sign in with your Google account
-3. Your Google Drive files will sync to `~/GoogleDrive`
-
-### System Tray
-
-The system tray icon provides quick access to:
-
-- Open Google Drive folder
-- Pause/Resume sync
-- Sync now
-- Recent changes
-- Settings
-- Quit
-
-### Virtual File System (FUSE)
-
-When FUSE is enabled, your Google Drive is mounted at `~/GoogleDriveFuse`:
-
-- Files appear instantly but are downloaded on-demand
-- Changes are synced back to Google Drive
-- Files are cached locally for faster access
-
-### Offline Access
-
-To make files available offline:
-
-1. Right-click the file in your file manager
-2. Select "Available Offline" (if integrated)
-3. Or use the Via settings to manage offline files
-
-## Architecture
-
-```
-Via/
-├── src/
-│   ├── main.cpp              # Application entry point
-│   ├── ui/                   # User interface components
-│   │   ├── MainWindow        # Main application window
-│   │   ├── SettingsWindow    # Settings dialog
-│   │   ├── SystemTrayManager # System tray icon and menu
-│   │   └── ConflictDialog    # Conflict resolution UI
-│   ├── auth/                 # Authentication
-│   │   ├── GoogleAuthManager # OAuth 2.0 flow
-│   │   └── TokenStorage      # Secure token storage
-│   ├── api/                  # Google Drive API client
-│   │   ├── GoogleDriveClient # REST API wrapper
-│   │   ├── DriveFile         # File metadata structure
-│   │   └── DriveChange       # Change notification structure
-│   ├── sync/                 # Synchronization engine
-│   │   ├── SyncEngine        # Main sync logic
-│   │   ├── SyncDatabase      # SQLite state tracking
-│   │   ├── FileWatcher       # Local file monitoring
-│   │   ├── SyncQueue         # Operation queue
-│   │   └── ConflictResolver  # Conflict handling
-│   ├── fuse/                 # Virtual file system
-│   │   ├── FuseDriver        # FUSE implementation
-│   │   └── FileCache         # Local file cache
-│   └── utils/                # Utilities
-│       ├── NotificationManager
-│       ├── OfflineManager
-│       └── BandwidthManager
-├── res/                      # Resources
-├── docs/                     # Documentation
-└── .github/workflows/        # CI/CD
-```
+- [Detailed User Guide](docs/USER_GUIDE.md)
+- [Developer Guide](docs/DEVELOPER_GUIDE.md)
 
 ## Troubleshooting
 

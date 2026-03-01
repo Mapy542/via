@@ -41,7 +41,7 @@ bool addColumnIfMissing(QSqlDatabase& db, const QString& tableName, const QStrin
 }
 }  // namespace
 
-SyncDatabase::SyncDatabase(QObject* parent) : QObject(parent) {
+SyncDatabase::SyncDatabase(QObject* parent) : QObject(parent), m_concurrentAccessCount(0) {
     // Set database path
     QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     m_dbPath = dataPath + "/" + DB_NAME;
@@ -50,6 +50,7 @@ SyncDatabase::SyncDatabase(QObject* parent) : QObject(parent) {
 SyncDatabase::~SyncDatabase() { close(); }
 
 bool SyncDatabase::initialize() {
+    QMutexLocker locker(&m_mutex);
     // Ensure data directory exists
     QDir dir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
     if (!dir.exists()) {
@@ -63,6 +64,14 @@ bool SyncDatabase::initialize() {
     if (!m_db.open()) {
         logError("initialize", m_db.lastError().text());
         return false;
+    }
+
+    // Enable WAL mode for better concurrent read/write performance
+    {
+        QSqlQuery walQuery(m_db);
+        if (!walQuery.exec("PRAGMA journal_mode=WAL")) {
+            qWarning() << "Failed to enable WAL mode:" << walQuery.lastError().text();
+        }
     }
 
     if (!ensureSettingsTable()) {
@@ -102,6 +111,7 @@ bool SyncDatabase::initialize() {
 }
 
 void SyncDatabase::close() {
+    QMutexLocker locker(&m_mutex);
     if (m_db.isOpen()) {
         m_db.close();
     }
@@ -113,7 +123,10 @@ void SyncDatabase::close() {
     }
 }
 
-bool SyncDatabase::isOpen() const { return m_db.isOpen(); }
+bool SyncDatabase::isOpen() const {
+    QMutexLocker locker(&m_mutex);
+    return m_db.isOpen();
+}
 
 bool SyncDatabase::ensureSettingsTable() {
     QSqlQuery query(m_db);
@@ -388,6 +401,7 @@ bool SyncDatabase::createTables() {
 }
 
 void SyncDatabase::saveFileState(const FileSyncState& state) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(state.localPath, "saveFileState");
     requireFileId(state.fileId, "saveFileState");
     QSqlQuery query(m_db);
@@ -419,6 +433,7 @@ void SyncDatabase::saveFileState(const FileSyncState& state) {
 }
 
 FileSyncState SyncDatabase::getFileState(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getFileState");
     FileSyncState state{};
 
@@ -441,6 +456,7 @@ FileSyncState SyncDatabase::getFileState(const QString& localPath) const {
 }
 
 FileSyncState SyncDatabase::getFileStateById(const QString& fileId) const {
+    QMutexLocker locker(&m_mutex);
     FileSyncState state{};
     if (fileId.isEmpty()) {
         return state;
@@ -464,6 +480,7 @@ FileSyncState SyncDatabase::getFileStateById(const QString& fileId) const {
 }
 
 QString SyncDatabase::getFileId(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getFileId");
     QSqlQuery query(m_db);
     query.prepare("SELECT file_id FROM files WHERE local_path = ?");
@@ -477,6 +494,7 @@ QString SyncDatabase::getFileId(const QString& localPath) const {
 }
 
 QString SyncDatabase::getLocalPath(const QString& fileId) const {
+    QMutexLocker locker(&m_mutex);
     if (fileId.isEmpty()) {
         return QString();
     }
@@ -492,6 +510,7 @@ QString SyncDatabase::getLocalPath(const QString& fileId) const {
 }
 
 void SyncDatabase::setFileId(const QString& localPath, const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setFileId");
     requireFileId(fileId, "setFileId");
     QSqlQuery query(m_db);
@@ -554,6 +573,7 @@ void SyncDatabase::setFileId(const QString& localPath, const QString& fileId) {
 }
 
 void SyncDatabase::setLocalPath(const QString& fileId, const QString& localPath) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setLocalPath");
     requireFileId(fileId, "setLocalPath");
     QSqlQuery query(m_db);
@@ -598,6 +618,7 @@ void SyncDatabase::setLocalPath(const QString& fileId, const QString& localPath)
 }
 
 QDateTime SyncDatabase::getModifiedTimeAtSync(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getModifiedTimeAtSync");
     QSqlQuery query(m_db);
     query.prepare("SELECT modified_time_at_sync FROM files WHERE local_path = ?");
@@ -611,6 +632,7 @@ QDateTime SyncDatabase::getModifiedTimeAtSync(const QString& localPath) const {
 }
 
 void SyncDatabase::setModifiedTimeAtSync(const QString& localPath, const QDateTime& time) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setModifiedTimeAtSync");
     QSqlQuery query(m_db);
     query.prepare("UPDATE files SET modified_time_at_sync = ? WHERE local_path = ?");
@@ -623,6 +645,7 @@ void SyncDatabase::setModifiedTimeAtSync(const QString& localPath, const QDateTi
 }
 
 QString SyncDatabase::getRemoteMd5AtSync(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getRemoteMd5AtSync");
     QSqlQuery query(m_db);
     query.prepare("SELECT remote_md5_at_sync FROM files WHERE local_path = ?");
@@ -636,6 +659,7 @@ QString SyncDatabase::getRemoteMd5AtSync(const QString& localPath) const {
 }
 
 void SyncDatabase::setRemoteMd5AtSync(const QString& localPath, const QString& remoteMd5) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setRemoteMd5AtSync");
     QSqlQuery query(m_db);
     query.prepare("UPDATE files SET remote_md5_at_sync = ? WHERE local_path = ?");
@@ -648,6 +672,7 @@ void SyncDatabase::setRemoteMd5AtSync(const QString& localPath, const QString& r
 }
 
 QString SyncDatabase::getLocalHashAtSync(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getLocalHashAtSync");
     QSqlQuery query(m_db);
     query.prepare("SELECT local_hash_at_sync FROM files WHERE local_path = ?");
@@ -661,6 +686,7 @@ QString SyncDatabase::getLocalHashAtSync(const QString& localPath) const {
 }
 
 void SyncDatabase::setLocalHashAtSync(const QString& localPath, const QString& localHash) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setLocalHashAtSync");
     QSqlQuery query(m_db);
     query.prepare("UPDATE files SET local_hash_at_sync = ? WHERE local_path = ?");
@@ -674,6 +700,7 @@ void SyncDatabase::setLocalHashAtSync(const QString& localPath, const QString& l
 
 void SyncDatabase::setContentHashesAtSync(const QString& localPath, const QString& remoteMd5,
                                           const QString& localHash) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setContentHashesAtSync");
     QSqlQuery query(m_db);
     query.prepare(
@@ -688,6 +715,7 @@ void SyncDatabase::setContentHashesAtSync(const QString& localPath, const QStrin
 }
 
 QList<FileSyncState> SyncDatabase::getAllFiles() const {
+    QMutexLocker locker(&m_mutex);
     QList<FileSyncState> files;
 
     QSqlQuery query(m_db);
@@ -711,6 +739,7 @@ QList<FileSyncState> SyncDatabase::getAllFiles() const {
 }
 
 QList<FileSyncState> SyncDatabase::getFileStatesByPrefix(const QString& pathPrefix) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(pathPrefix, "getFileStatesByPrefix");
 
     QList<FileSyncState> files;
@@ -750,6 +779,7 @@ QList<FileSyncState> SyncDatabase::getFileStatesByPrefix(const QString& pathPref
 }
 
 QString SyncDatabase::getChangeToken() const {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("SELECT value FROM settings WHERE key = 'change_token'");
 
@@ -762,6 +792,7 @@ QString SyncDatabase::getChangeToken() const {
 }
 
 void SyncDatabase::setChangeToken(const QString& token) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('change_token', ?)");
     query.addBindValue(token);
@@ -772,6 +803,7 @@ void SyncDatabase::setChangeToken(const QString& token) {
 }
 
 int SyncDatabase::fileCount() const {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("SELECT COUNT(*) FROM files");
 
@@ -823,6 +855,7 @@ void SyncDatabase::requireFileId(const QString& fileId, const char* operation) c
 }
 
 void SyncDatabase::markFileDeleted(const QString& localPath, const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "markFileDeleted");
     QSqlQuery query(m_db);
     query.prepare(R"(
@@ -839,6 +872,7 @@ void SyncDatabase::markFileDeleted(const QString& localPath, const QString& file
 }
 
 bool SyncDatabase::wasFileDeleted(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "wasFileDeleted");
     QSqlQuery query(m_db);
     query.prepare("SELECT id FROM deleted_files WHERE local_path = ?");
@@ -851,6 +885,7 @@ bool SyncDatabase::wasFileDeleted(const QString& localPath) const {
 }
 
 void SyncDatabase::clearDeletedFile(const QString& localPath) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "clearDeletedFile");
     QSqlQuery query(m_db);
     query.prepare("DELETE FROM deleted_files WHERE local_path = ?");
@@ -862,6 +897,7 @@ void SyncDatabase::clearDeletedFile(const QString& localPath) {
 }
 
 int SyncDatabase::purgeOldDeletedRecords(int maxAgeDays) {
+    QMutexLocker locker(&m_mutex);
     QDateTime cutoffDate = QDateTime::currentDateTime().addDays(-maxAgeDays);
 
     // Query file records to clean. To be removed from files table as well
@@ -904,6 +940,7 @@ int SyncDatabase::purgeOldDeletedRecords(int maxAgeDays) {
 
 int SyncDatabase::upsertConflictRecord(const QString& localPath, const QString& fileId,
                                        const QString& conflictPath) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "upsertConflictRecord");
     QSqlQuery query(m_db);
     query.prepare(
@@ -945,6 +982,7 @@ int SyncDatabase::upsertConflictRecord(const QString& localPath, const QString& 
 }
 
 void SyncDatabase::addConflictVersion(int conflictId, const ConflictVersion& version) {
+    QMutexLocker locker(&m_mutex);
     if (conflictId <= 0) {
         return;
     }
@@ -968,6 +1006,7 @@ void SyncDatabase::addConflictVersion(int conflictId, const ConflictVersion& ver
 }
 
 bool SyncDatabase::hasUnresolvedConflict(const QString& localPath) const {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "hasUnresolvedConflict");
     QSqlQuery query(m_db);
     query.prepare("SELECT id FROM conflicts WHERE local_path = ? AND resolved = 0 LIMIT 1");
@@ -980,6 +1019,7 @@ bool SyncDatabase::hasUnresolvedConflict(const QString& localPath) const {
 }
 
 QList<ConflictRecord> SyncDatabase::getUnresolvedConflicts() {
+    QMutexLocker locker(&m_mutex);
     QList<ConflictRecord> records;
     QSqlQuery query(m_db);
     query.prepare(
@@ -1032,6 +1072,7 @@ QList<ConflictRecord> SyncDatabase::getUnresolvedConflicts() {
 }
 
 void SyncDatabase::markConflictResolved(const QString& localPath) {
+    QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "markConflictResolved");
     QSqlQuery query(m_db);
     query.prepare("UPDATE conflicts SET resolved = 1 WHERE local_path = ? AND resolved = 0");
@@ -1042,6 +1083,7 @@ void SyncDatabase::markConflictResolved(const QString& localPath) {
 }
 
 void SyncDatabase::markConflictResolved(int conflictId) {
+    QMutexLocker locker(&m_mutex);
     if (conflictId <= 0) {
         return;
     }
@@ -1139,6 +1181,7 @@ bool SyncDatabase::createFuseTables() {
 }
 
 FuseMetadata SyncDatabase::getFuseMetadata(const QString& fileId) const {
+    QMutexLocker locker(&m_mutex);
     FuseMetadata metadata{};
 
     QSqlQuery query(m_db);
@@ -1166,6 +1209,7 @@ FuseMetadata SyncDatabase::getFuseMetadata(const QString& fileId) const {
 }
 
 FuseMetadata SyncDatabase::getFuseMetadataByPath(const QString& path) const {
+    QMutexLocker locker(&m_mutex);
     FuseMetadata metadata{};
 
     QSqlQuery query(m_db);
@@ -1193,6 +1237,7 @@ FuseMetadata SyncDatabase::getFuseMetadataByPath(const QString& path) const {
 }
 
 bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
     query.prepare(R"(
@@ -1223,6 +1268,7 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
 }
 
 bool SyncDatabase::deleteFuseMetadata(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("DELETE FROM fuse_metadata WHERE file_id = ?");
     query.addBindValue(fileId);
@@ -1236,6 +1282,7 @@ bool SyncDatabase::deleteFuseMetadata(const QString& fileId) {
 }
 
 QList<FuseMetadata> SyncDatabase::getFuseChildren(const QString& parentId) const {
+    QMutexLocker locker(&m_mutex);
     QList<FuseMetadata> children;
 
     QSqlQuery query(m_db);
@@ -1268,6 +1315,7 @@ QList<FuseMetadata> SyncDatabase::getFuseChildren(const QString& parentId) const
 }
 
 QList<FuseMetadata> SyncDatabase::getAllFuseMetadata() const {
+    QMutexLocker locker(&m_mutex);
     QList<FuseMetadata> result;
 
     QSqlQuery query(m_db);
@@ -1298,6 +1346,7 @@ QList<FuseMetadata> SyncDatabase::getAllFuseMetadata() const {
 
 int SyncDatabase::updateFuseChildrenPaths(const QString& parentFileId, const QString& oldParentPath,
                                           const QString& newParentPath) {
+    QMutexLocker locker(&m_mutex);
     // Recursively update paths of all descendants
     int updated = 0;
     QList<FuseMetadata> children = getFuseChildren(parentFileId);
@@ -1326,6 +1375,7 @@ int SyncDatabase::updateFuseChildrenPaths(const QString& parentFileId, const QSt
 }
 
 QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
+    QMutexLocker locker(&m_mutex);
     QList<FuseDirtyFile> dirtyFiles;
 
     QSqlQuery query(m_db);
@@ -1349,6 +1399,7 @@ QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
 }
 
 bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
     // Use INSERT OR IGNORE to avoid overwriting existing entries
@@ -1390,6 +1441,7 @@ bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path) {
 }
 
 bool SyncDatabase::clearFuseDirty(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("DELETE FROM fuse_dirty_files WHERE file_id = ?");
     query.addBindValue(fileId);
@@ -1403,6 +1455,7 @@ bool SyncDatabase::clearFuseDirty(const QString& fileId) {
 }
 
 bool SyncDatabase::markFuseUploadFailed(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare(R"(
         UPDATE fuse_dirty_files 
@@ -1421,6 +1474,7 @@ bool SyncDatabase::markFuseUploadFailed(const QString& fileId) {
 }
 
 bool SyncDatabase::clearAllFuseCacheEntries() {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
     if (!query.exec("DELETE FROM fuse_cache_entries")) {
@@ -1433,6 +1487,7 @@ bool SyncDatabase::clearAllFuseCacheEntries() {
 }
 
 QList<FuseCacheEntry> SyncDatabase::getFuseCacheEntries() const {
+    QMutexLocker locker(&m_mutex);
     QList<FuseCacheEntry> entries;
 
     QSqlQuery query(m_db);
@@ -1457,6 +1512,7 @@ QList<FuseCacheEntry> SyncDatabase::getFuseCacheEntries() const {
 
 bool SyncDatabase::recordFuseCacheEntry(const QString& fileId, const QString& cachePath,
                                         qint64 size) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
     QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -1482,6 +1538,7 @@ bool SyncDatabase::recordFuseCacheEntry(const QString& fileId, const QString& ca
 }
 
 bool SyncDatabase::updateCacheAccessTime(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
     query.prepare("UPDATE fuse_cache_entries SET last_accessed = ? WHERE file_id = ?");
@@ -1497,6 +1554,7 @@ bool SyncDatabase::updateCacheAccessTime(const QString& fileId) {
 }
 
 bool SyncDatabase::evictFuseCacheEntry(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("DELETE FROM fuse_cache_entries WHERE file_id = ?");
     query.addBindValue(fileId);
@@ -1510,6 +1568,7 @@ bool SyncDatabase::evictFuseCacheEntry(const QString& fileId) {
 }
 
 QString SyncDatabase::getFuseSyncState(const QString& key) const {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("SELECT value FROM fuse_sync_state WHERE key = ?");
     query.addBindValue(key);
@@ -1522,6 +1581,7 @@ QString SyncDatabase::getFuseSyncState(const QString& key) const {
 }
 
 bool SyncDatabase::setFuseSyncState(const QString& key, const QString& value) {
+    QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
     query.prepare("INSERT OR REPLACE INTO fuse_sync_state (key, value) VALUES (?, ?)");
     query.addBindValue(key);
