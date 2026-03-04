@@ -238,12 +238,13 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
 
     QNetworkRequest request = createRequest(url);
     QNetworkReply* reply = m_networkManager->get(request);
+    tagReply(reply, fileId, localPath);
 
     // Create file for writing
     QFile* file = new QFile(localPath);
     if (!file->open(QIODevice::WriteOnly)) {
         delete file;
-        emit error("downloadFile", "Failed to open file for writing: " + localPath);
+        emit error("downloadFile:" + fileId, "Failed to open file for writing: " + localPath);
         reply->abort();
         reply->deleteLater();
         return;
@@ -265,7 +266,7 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
-            handleNetworkError(reply, "downloadFile");
+            handleNetworkError(reply, "downloadFile:" + fileId);
             QFile::remove(localPath);
             return;
         }
