@@ -487,9 +487,8 @@ void FileCache::onFileDownloaded(const QString& fileId, const QString& localPath
     }
 }
 
-void FileCache::onDownloadError(const QString& operation, const QString& errorMsg,
-                                int httpStatus, const QString& fileId,
-                                const QString& localPath) {
+void FileCache::onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
+                                const QString& fileId, const QString& localPath) {
     Q_UNUSED(httpStatus)
     Q_UNUSED(localPath)
 
@@ -519,8 +518,8 @@ void FileCache::onDownloadError(const QString& operation, const QString& errorMs
         } else {
             // Last resort: could not identify the failed file.
             // Only mark downloads as failed if we truly can't match.
-            qWarning() << "FileCache: Download error without file ID association:"
-                       << operation << errorMsg;
+            qWarning() << "FileCache: Download error without file ID association:" << operation
+                       << errorMsg;
 
             for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end(); ++it) {
                 if (!it.value()) {  // Still in progress
