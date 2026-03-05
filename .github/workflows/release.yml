@@ -4,6 +4,7 @@ on:
     push:
         tags:
             - 'v*'
+    workflow_dispatch:
 
 permissions:
     contents: write # Required for creating releases
@@ -44,7 +45,7 @@ jobs:
                   chmod +x linuxdeploy*.AppImage
 
             - name: Configure CMake
-              run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+              run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTS=OFF
 
             - name: Build
               run: cmake --build build --parallel
@@ -56,6 +57,10 @@ jobs:
                   cp res/icons/via.svg AppDir/usr/share/icons/hicolor/scalable/apps/via.svg
                   mkdir -p AppDir/usr/share/applications
                   cp res/via.desktop AppDir/usr/share/applications/
+
+            - name: Remove unsupported Qt SQL drivers
+              run: |
+                  find "$Qt6_DIR" -name 'libqsqlmimer.so' -delete || true
 
             - name: Create AppImage
               run: |
