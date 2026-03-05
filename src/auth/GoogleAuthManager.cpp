@@ -7,6 +7,7 @@
 
 #include <QDebug>
 #include <QDesktopServices>
+#include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
