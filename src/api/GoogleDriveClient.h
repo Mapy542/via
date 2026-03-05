@@ -91,8 +91,7 @@ class GoogleDriveClient : public QObject {
      * @param newParentId New parent folder ID
      * @param oldParentId Old parent folder ID
      */
-    virtual void moveFile(const QString& fileId, const QString& newParentId,
-                          const QString& oldParentId);
+    virtual void moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId);
 
     /**
      * @brief Rename a file
@@ -260,8 +259,7 @@ class GoogleDriveClient : public QObject {
      * @param newStartPageToken Token for next check
      * @param hasMorePages True if there are more pages to fetch
      */
-    void changesReceived(const QList<DriveChange>& changes, const QString& newStartPageToken,
-                         bool hasMorePages);
+    void changesReceived(const QList<DriveChange>& changes, const QString& newStartPageToken, bool hasMorePages);
 
     /**
      * @brief Emitted when start page token is received
@@ -314,8 +312,8 @@ class GoogleDriveClient : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void errorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
-                       const QString& fileId, const QString& localPath);
+    void errorDetailed(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
+                       const QString& localPath);
 
     /**
      * @brief Emitted when an API call fails due to authentication/authorization
@@ -326,7 +324,7 @@ class GoogleDriveClient : public QObject {
     void authenticationFailure(const QString& operation, int httpStatus, const QString& errorMsg);
 
    private:
-    QNetworkRequest createRequest(const QUrl& url) const;
+    QNetworkRequest createRequest(const QUrl& url);
     void handleNetworkError(QNetworkReply* reply, const QString& operation);
     DriveFile parseFileJson(const QJsonObject& json) const;
     DriveChange parseChangeJson(const QJsonObject& json) const;

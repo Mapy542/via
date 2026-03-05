@@ -45,19 +45,47 @@ class GoogleAuthManager : public QObject {
      * @brief Check if the user is authenticated
      * @return true if authenticated with valid tokens
      */
-    bool isAuthenticated() const;
+    virtual bool isAuthenticated() const;
 
     /**
      * @brief Get the current access token
      * @return Access token or empty string if not authenticated
      */
-    QString accessToken() const;
+    virtual QString accessToken() const;
 
     /**
      * @brief Get the refresh token
      * @return Refresh token or empty string if not authenticated
      */
-    QString refreshToken() const;
+    virtual QString refreshToken() const;
+
+    /**
+     * @brief Get the access token expiry time
+     * @return Token expiry as UTC QDateTime, or invalid QDateTime if unknown
+     */
+    virtual QDateTime tokenExpiry() const;
+
+    /**
+     * @brief Check whether the access token is expiring within a buffer window
+     * @param bufferSecs Seconds before actual expiry to consider "expiring soon" (default 120)
+     * @return true if the token will expire within bufferSecs, or is already expired,
+     *         or if the user is not authenticated
+     */
+    virtual bool isTokenExpiringSoon(int bufferSecs = 120) const;
+
+    /**
+     * @brief Ensure a valid (non-expiring-soon) access token is available.
+     *
+     * If the token is expiring within the buffer window, this method triggers
+     * a synchronous token refresh (blocking via QEventLoop) and waits up to
+     * @p timeoutMs milliseconds for the result.
+     *
+     * Safe to call from any thread that can run a local event loop.
+     *
+     * @param timeoutMs Maximum time to wait for the refresh (default 15 000 ms)
+     * @return true if a valid token is available after the call
+     */
+    virtual bool ensureValidToken(int timeoutMs = 15000);
 
    public slots:
     /**
@@ -72,7 +100,7 @@ class GoogleAuthManager : public QObject {
      *
      * Called automatically when the access token expires.
      */
-    void refreshTokens();
+    virtual void refreshTokens();
 
     /**
      * @brief Log out the user
@@ -150,6 +178,7 @@ class GoogleAuthManager : public QObject {
     bool m_forceConsentPrompt;
 
     bool m_authenticated;
+    bool m_refreshInFlight = false;  ///< Guards against concurrent token refreshes
 
     // Google OAuth endpoints
     static const QString AUTH_URL;

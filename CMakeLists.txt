@@ -207,4 +207,7 @@ if(BUILD_TESTS)
     add_qt_test(test_DirtySyncWorker tests/fuse/TestDirtySyncWorker.cpp)
     add_qt_test(test_MetadataCache tests/fuse/TestMetadataCache.cpp)
 
+    # Auth subsystem tests
+    add_qt_test(test_TokenRefresh tests/auth/TestTokenRefresh.cpp)
+
 endif()

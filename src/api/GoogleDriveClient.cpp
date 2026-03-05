@@ -30,18 +30,23 @@ void tagReply(QNetworkReply* reply, const QString& fileId, const QString& localP
 }  // namespace
 
 GoogleDriveClient::GoogleDriveClient(GoogleAuthManager* authManager, QObject* parent)
-    : QObject(parent),
-      m_authManager(authManager),
-      m_networkManager(new QNetworkAccessManager(this)) {}
+    : QObject(parent), m_authManager(authManager), m_networkManager(new QNetworkAccessManager(this)) {}
 
 GoogleDriveClient::~GoogleDriveClient() = default;
 
-QNetworkRequest GoogleDriveClient::createRequest(const QUrl& url) const {
+QNetworkRequest GoogleDriveClient::createRequest(const QUrl& url) {
     QNetworkRequest request(url);
 
-    if (m_authManager && m_authManager->isAuthenticated()) {
-        QString bearer = "Bearer " + m_authManager->accessToken();
-        request.setRawHeader("Authorization", bearer.toUtf8());
+    if (m_authManager) {
+        // Proactively refresh the token if it is expiring soon.
+        // This prevents the vast majority of 401 errors that would otherwise
+        // surface as user-visible notifications before a retry can occur.
+        m_authManager->ensureValidToken();
+
+        if (m_authManager->isAuthenticated()) {
+            QString bearer = "Bearer " + m_authManager->accessToken();
+            request.setRawHeader("Authorization", bearer.toUtf8());
+        }
     }
 
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -74,17 +79,43 @@ void GoogleDriveClient::handleNetworkError(QNetworkReply* reply, const QString& 
         QString fileId = reply->property("fileId").toString();
         QString localPath = reply->property("localPath").toString();
 
-        qWarning() << operation << "error:" << errorMsg;
-        emit error(operation, errorMsg);
-        emit errorDetailed(operation, errorMsg, httpStatus, fileId, localPath);
-
         const QString lowered = errorMsg.toLower();
         const bool authLike403 =
-            (httpStatus == 403 &&
-             (lowered.contains("auth") || lowered.contains("token") ||
-              lowered.contains("permission") || lowered.contains("credential")));
-        if (httpStatus == 401 || authLike403) {
+            (httpStatus == 403 && (lowered.contains("auth") || lowered.contains("token") ||
+                                   lowered.contains("permission") || lowered.contains("credential")));
+        const bool isAuthFailure = (httpStatus == 401 || authLike403);
+
+        if (isAuthFailure) {
+            // ---- Auth failure path ----
+            // Attempt a silent token refresh before propagating any error.
+            // If the refresh succeeds the caller's request already failed,
+            // but downstream retry mechanisms (SyncActionThread) will re-issue
+            // the request with the new token.
+            //
+            // IMPORTANT: We intentionally do NOT emit the legacy error() signal
+            // here.  Emitting it would cause FullSync, RemoteChangeWatcher, and
+            // the SyncActionThread legacy handler to surface a user-visible
+            // notification *before* the retry has a chance to succeed.
+            //
+            // We still emit errorDetailed() so that SyncActionThread's detailed
+            // handler can schedule a retry, and authenticationFailure() so that
+            // main.cpp's cooldown-guarded handler can kick off a refresh for any
+            // component that doesn't use the blocking ensureValidToken() path.
+
+            qInfo() << "Auth failure in" << operation << "(HTTP" << httpStatus << ") — attempting silent token refresh";
+
+            if (m_authManager) {
+                m_authManager->ensureValidToken();
+            }
+
+            // Emit detailed + auth signals only (no user-facing error())
+            emit errorDetailed(operation, errorMsg, httpStatus, fileId, localPath);
             emit authenticationFailure(operation, httpStatus, errorMsg);
+        } else {
+            // ---- Non-auth failure path (unchanged) ----
+            qWarning() << operation << "error:" << errorMsg;
+            emit error(operation, errorMsg);
+            emit errorDetailed(operation, errorMsg, httpStatus, fileId, localPath);
         }
     }
 }
@@ -163,10 +194,9 @@ void GoogleDriveClient::listFiles(const QString& folderId, const QString& pageTo
         // List files in specific folder
         query.addQueryItem("q", QString("'%1' in parents and trashed = false").arg(folderId));
     }
-    query.addQueryItem(
-        "fields",
-        "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,"
-        "trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,shortcutDetails)");
+    query.addQueryItem("fields",
+                       "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,"
+                       "trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,shortcutDetails)");
     query.addQueryItem("pageSize", "100");
 
     if (!pageToken.isEmpty()) {
@@ -251,13 +281,10 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
 
     // Connect progress signal
     connect(reply, &QNetworkReply::downloadProgress, this,
-            [this, fileId](qint64 received, qint64 total) {
-                emit downloadProgress(fileId, received, total);
-            });
+            [this, fileId](qint64 received, qint64 total) { emit downloadProgress(fileId, received, total); });
 
     // Write data as it arrives
-    connect(reply, &QNetworkReply::readyRead, this,
-            [reply, file]() { file->write(reply->readAll()); });
+    connect(reply, &QNetworkReply::readyRead, this, [reply, file]() { file->write(reply->readAll()); });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, file, fileId, localPath]() {
         file->close();
@@ -274,8 +301,7 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
     });
 }
 
-void GoogleDriveClient::uploadFile(const QString& localPath, const QString& parentId,
-                                   const QString& fileName) {
+void GoogleDriveClient::uploadFile(const QString& localPath, const QString& parentId, const QString& fileName) {
     QFileInfo fileInfo(localPath);
     if (!fileInfo.exists()) {
         emit error("uploadFile", "File does not exist: " + localPath);
@@ -326,17 +352,14 @@ void GoogleDriveClient::uploadFile(const QString& localPath, const QString& pare
     multiPart->append(filePart);
 
     QNetworkRequest request = createRequest(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader,
-                      "multipart/related; boundary=" + multiPart->boundary());
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "multipart/related; boundary=" + multiPart->boundary());
 
     QNetworkReply* reply = m_networkManager->post(request, multiPart);
     tagReply(reply, QString(), localPath);
     multiPart->setParent(reply);  // Delete multiPart with reply
 
     connect(reply, &QNetworkReply::uploadProgress, this,
-            [this, localPath](qint64 sent, qint64 total) {
-                emit uploadProgress(localPath, sent, total);
-            });
+            [this, localPath](qint64 sent, qint64 total) { emit uploadProgress(localPath, sent, total); });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -389,9 +412,7 @@ void GoogleDriveClient::updateFile(const QString& fileId, const QString& localPa
     file->setParent(reply);
 
     connect(reply, &QNetworkReply::uploadProgress, this,
-            [this, localPath](qint64 sent, qint64 total) {
-                emit uploadProgress(localPath, sent, total);
-            });
+            [this, localPath](qint64 sent, qint64 total) { emit uploadProgress(localPath, sent, total); });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -409,8 +430,7 @@ void GoogleDriveClient::updateFile(const QString& fileId, const QString& localPa
     });
 }
 
-void GoogleDriveClient::moveFile(const QString& fileId, const QString& newParentId,
-                                 const QString& oldParentId) {
+void GoogleDriveClient::moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId) {
     QUrl url(API_BASE_URL + "/files/" + fileId);
     QUrlQuery query;
     query.addQueryItem("addParents", newParentId);
@@ -451,8 +471,8 @@ void GoogleDriveClient::renameFile(const QString& fileId, const QString& newName
     metadata["name"] = newName;
 
     QNetworkRequest request = createRequest(url);
-    QNetworkReply* reply = m_networkManager->sendCustomRequest(
-        request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    QNetworkReply* reply =
+        m_networkManager->sendCustomRequest(request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     tagReply(reply, fileId, QString());
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, fileId]() {
@@ -494,8 +514,7 @@ void GoogleDriveClient::deleteFile(const QString& fileId) {
     });
 }
 
-void GoogleDriveClient::createFolder(const QString& name, const QString& parentId,
-                                     const QString& localPath) {
+void GoogleDriveClient::createFolder(const QString& name, const QString& parentId, const QString& localPath) {
     QUrl url(API_BASE_URL + "/files");
     QUrlQuery query;
     query.addQueryItem("fields", "id,name,mimeType,modifiedTime,parents");
@@ -507,8 +526,7 @@ void GoogleDriveClient::createFolder(const QString& name, const QString& parentI
     metadata["parents"] = QJsonArray({parentId});
 
     QNetworkRequest request = createRequest(url);
-    QNetworkReply* reply =
-        m_networkManager->post(request, QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    QNetworkReply* reply = m_networkManager->post(request, QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     tagReply(reply, QString(), localPath);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -539,10 +557,9 @@ void GoogleDriveClient::listChanges(const QString& startPageToken) {
     QUrl url(API_BASE_URL + "/changes");
     QUrlQuery query;
     query.addQueryItem("pageToken", startPageToken);
-    query.addQueryItem(
-        "fields",
-        "nextPageToken,newStartPageToken,changes(fileId,time,removed,file(id,name,mimeType,size,"
-        "createdTime,modifiedTime,md5Checksum,parents,trashed,ownedByMe))");
+    query.addQueryItem("fields",
+                       "nextPageToken,newStartPageToken,changes(fileId,time,removed,file(id,name,mimeType,size,"
+                       "createdTime,modifiedTime,md5Checksum,parents,trashed,ownedByMe))");
     query.addQueryItem("pageSize", "100");
     url.setQuery(query);
 
@@ -833,11 +850,10 @@ QList<DriveFile> GoogleDriveClient::listFilesBlocking(const QString& folderId) {
                                             "or mimeType = 'application/vnd.google-apps.shortcut')")
                                         .arg(folderId));
         }
-        query.addQueryItem(
-            "fields",
-            "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,"
-            "parents,trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,"
-            "shortcutDetails)");
+        query.addQueryItem("fields",
+                           "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,"
+                           "parents,trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,"
+                           "shortcutDetails)");
         query.addQueryItem("pageSize", "1000");
 
         if (!pageToken.isEmpty()) {

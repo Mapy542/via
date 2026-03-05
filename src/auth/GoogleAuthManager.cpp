@@ -84,25 +84,22 @@ void GoogleAuthManager::setupOAuth() {
     }
 
     // Additional OAuth parameters
-    m_oauth->setModifyParametersFunction(
-        [this](QAbstractOAuth::Stage stage, QMultiMap<QString, QVariant>* parameters) {
-            if (stage == QAbstractOAuth::Stage::RequestingAuthorization) {
-                parameters->insert("access_type", "offline");
-                if (m_forceConsentPrompt) {
-                    parameters->insert("prompt", "consent");
-                }
+    m_oauth->setModifyParametersFunction([this](QAbstractOAuth::Stage stage, QMultiMap<QString, QVariant>* parameters) {
+        if (stage == QAbstractOAuth::Stage::RequestingAuthorization) {
+            parameters->insert("access_type", "offline");
+            if (m_forceConsentPrompt) {
+                parameters->insert("prompt", "consent");
             }
-        });
+        }
+    });
 
     // Connect signals
     connect(m_oauth, &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser, this,
             [](const QUrl& url) { QDesktopServices::openUrl(url); });
 
-    connect(m_oauth, &QOAuth2AuthorizationCodeFlow::granted, this,
-            &GoogleAuthManager::onAuthorizationGranted);
+    connect(m_oauth, &QOAuth2AuthorizationCodeFlow::granted, this, &GoogleAuthManager::onAuthorizationGranted);
 
-    connect(m_oauth, &QOAuth2AuthorizationCodeFlow::tokenChanged, this,
-            &GoogleAuthManager::onTokenChanged);
+    connect(m_oauth, &QOAuth2AuthorizationCodeFlow::tokenChanged, this, &GoogleAuthManager::onTokenChanged);
 
     connect(m_oauth, &QOAuth2AuthorizationCodeFlow::refreshTokenChanged, this,
             &GoogleAuthManager::onRefreshTokenChanged);
@@ -158,13 +155,80 @@ void GoogleAuthManager::saveTokens() {
     }
 }
 
-bool GoogleAuthManager::isAuthenticated() const {
-    return m_authenticated && !m_accessToken.isEmpty();
-}
+bool GoogleAuthManager::isAuthenticated() const { return m_authenticated && !m_accessToken.isEmpty(); }
 
 QString GoogleAuthManager::accessToken() const { return m_accessToken; }
 
 QString GoogleAuthManager::refreshToken() const { return m_refreshTokenValue; }
+
+QDateTime GoogleAuthManager::tokenExpiry() const { return m_accessTokenExpiry; }
+
+bool GoogleAuthManager::isTokenExpiringSoon(int bufferSecs) const {
+    if (!m_authenticated || m_accessToken.isEmpty()) {
+        return true;  // not authenticated at all
+    }
+    if (!m_accessTokenExpiry.isValid()) {
+        return false;  // unknown expiry — assume valid
+    }
+    return QDateTime::currentDateTimeUtc().secsTo(m_accessTokenExpiry) <= bufferSecs;
+}
+
+bool GoogleAuthManager::ensureValidToken(int timeoutMs) {
+    // Already valid and not expiring soon — nothing to do
+    if (!isTokenExpiringSoon()) {
+        return true;
+    }
+
+    // Cannot refresh without a refresh token
+    if (m_refreshTokenValue.isEmpty()) {
+        return false;
+    }
+
+    // If a refresh is already in flight (e.g. the timer fired on resume from
+    // suspend at the same time an API call invoked us), just wait for the
+    // result instead of issuing a second concurrent refresh.
+    const bool needToInitiate = !m_refreshInFlight;
+
+    qInfo() << "ensureValidToken: token expiring soon"
+            << (needToInitiate ? "— triggering synchronous refresh" : "— waiting on in-flight refresh");
+
+    QEventLoop loop;
+    bool success = false;
+
+    auto c1 = connect(this, &GoogleAuthManager::tokenRefreshed, &loop, [&]() {
+        success = true;
+        loop.quit();
+    });
+    auto c2 = connect(this, &GoogleAuthManager::tokenRefreshError, &loop, [&]() {
+        success = false;
+        loop.quit();
+    });
+    auto c3 = connect(this, &GoogleAuthManager::authExpired, &loop, [&]() {
+        success = false;
+        loop.quit();
+    });
+
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeout.start(timeoutMs);
+
+    if (needToInitiate) {
+        refreshTokens();
+    }
+    loop.exec();
+
+    disconnect(c1);
+    disconnect(c2);
+    disconnect(c3);
+
+    if (success) {
+        qInfo() << "ensureValidToken: refresh succeeded";
+    } else {
+        qWarning() << "ensureValidToken: refresh failed or timed out";
+    }
+    return success;
+}
 
 void GoogleAuthManager::authenticate() {
     if (m_clientId.isEmpty() || m_clientSecret.isEmpty()) {
@@ -192,6 +256,12 @@ void GoogleAuthManager::refreshTokens() {
         return;
     }
 
+    if (m_refreshInFlight) {
+        qInfo() << "Token refresh already in flight, skipping duplicate request";
+        return;
+    }
+    m_refreshInFlight = true;
+
     qInfo() << "Refreshing access token";
 
     // Manual token refresh using QNetworkAccessManager
@@ -205,13 +275,13 @@ void GoogleAuthManager::refreshTokens() {
     query.addQueryItem("refresh_token", m_refreshTokenValue);
     query.addQueryItem("grant_type", "refresh_token");
 
-    QNetworkReply* reply =
-        m_networkManager->post(request, query.toString(QUrl::FullyEncoded).toUtf8());
+    QNetworkReply* reply = m_networkManager->post(request, query.toString(QUrl::FullyEncoded).toUtf8());
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
+            m_refreshInFlight = false;
             qWarning() << "Token refresh failed:" << reply->errorString();
             emit tokenRefreshError(reply->errorString());
             return;
@@ -222,6 +292,7 @@ void GoogleAuthManager::refreshTokens() {
         QJsonObject obj = doc.object();
 
         if (obj.contains("access_token")) {
+            m_refreshInFlight = false;
             const bool wasAuthenticated = m_authenticated;
             m_accessToken = obj["access_token"].toString();
             m_oauth->setToken(m_accessToken);
@@ -259,10 +330,10 @@ void GoogleAuthManager::refreshTokens() {
             if (error.isEmpty()) {
                 error = "Unknown error";
             }
+            m_refreshInFlight = false;
             qWarning() << "Token refresh error:" << error;
 
-            if (errorCode == "invalid_grant" || errorCode == "invalid_client" ||
-                errorCode == "unauthorized_client") {
+            if (errorCode == "invalid_grant" || errorCode == "invalid_client" || errorCode == "unauthorized_client") {
                 m_accessToken.clear();
                 m_refreshTokenValue.clear();
                 m_accessTokenExpiry = QDateTime();
@@ -343,8 +414,7 @@ void GoogleAuthManager::onRefreshTokenChanged(const QString& token) {
     qDebug() << "Refresh token updated";
 }
 
-void GoogleAuthManager::onError(const QString& error, const QString& errorDescription,
-                                const QUrl& uri) {
+void GoogleAuthManager::onError(const QString& error, const QString& errorDescription, const QUrl& uri) {
     Q_UNUSED(uri)
 
     QString message = error;
