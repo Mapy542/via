@@ -57,8 +57,8 @@ class RemoteChangeWatcher : public QObject {
      * @param syncDatabase Pointer to the sync database for persistence
      * @param parent Parent object
      */
-    explicit RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveClient* driveClient,
-                                 SyncDatabase* syncDatabase, QObject* parent = nullptr);
+    explicit RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveClient* driveClient, SyncDatabase* syncDatabase,
+                                 QObject* parent = nullptr);
 
     ~RemoteChangeWatcher() override;
 
@@ -99,6 +99,14 @@ class RemoteChangeWatcher : public QObject {
      * Used to resolve file paths from remote changes.
      */
     void setFolderIdToPath(const QHash<QString, QString>& mapping);
+
+    /**
+     * @brief Clear the stored change token
+     *
+     * Called on account sign-out so the next session fetches
+     * a fresh start-page token instead of reusing the old one.
+     */
+    void clearChangeToken();
 
    public slots:
     /**
@@ -168,8 +176,7 @@ class RemoteChangeWatcher : public QObject {
 
    private slots:
     void onPollingTimeout();
-    void onChangesReceived(const QList<DriveChange>& changes, const QString& newToken,
-                           bool hasMorePages);
+    void onChangesReceived(const QList<DriveChange>& changes, const QString& newToken, bool hasMorePages);
     void onStartPageTokenReceived(const QString& token);
     void onApiError(const QString& operation, const QString& error);
 

@@ -26,9 +26,8 @@
 #include "api/GoogleDriveClient.h"
 #include "utils/FileInUseChecker.h"
 
-SyncActionThread::SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* database,
-                                   GoogleDriveClient* driveClient, ChangeProcessor* changeProcessor,
-                                   LocalChangeWatcher* localWatcher, QObject* parent)
+SyncActionThread::SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
+                                   ChangeProcessor* changeProcessor, LocalChangeWatcher* localWatcher, QObject* parent)
     : QObject(parent),
       m_actionQueue(actionQueue),
       m_database(database),
@@ -39,34 +38,25 @@ SyncActionThread::SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* d
       m_processingActive(false) {
     // Connect to Sync Action Queue's itemsAvailable signal (Jobs Available Wakeup)
     if (m_actionQueue) {
-        connect(m_actionQueue, &SyncActionQueue::itemsAvailable, this,
-                &SyncActionThread::onItemsAvailable);
+        connect(m_actionQueue, &SyncActionQueue::itemsAvailable, this, &SyncActionThread::onItemsAvailable);
     }
 
     // Connect Drive API response signals
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::fileUploaded, this,
-                &SyncActionThread::onFileUploaded);
+        connect(m_driveClient, &GoogleDriveClient::fileUploaded, this, &SyncActionThread::onFileUploaded);
         connect(m_driveClient, &GoogleDriveClient::fileUploadedDetailed, this,
                 &SyncActionThread::onFileUploadedDetailed);
-        connect(m_driveClient, &GoogleDriveClient::fileUpdated, this,
-                &SyncActionThread::onFileUpdated);
-        connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this,
-                &SyncActionThread::onFileDownloaded);
+        connect(m_driveClient, &GoogleDriveClient::fileUpdated, this, &SyncActionThread::onFileUpdated);
+        connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this, &SyncActionThread::onFileDownloaded);
         connect(m_driveClient, &GoogleDriveClient::fileMoved, this, &SyncActionThread::onFileMoved);
-        connect(m_driveClient, &GoogleDriveClient::fileMovedDetailed, this,
-                &SyncActionThread::onFileMovedDetailed);
-        connect(m_driveClient, &GoogleDriveClient::fileRenamed, this,
-                &SyncActionThread::onFileRenamed);
-        connect(m_driveClient, &GoogleDriveClient::fileRenamedDetailed, this,
-                &SyncActionThread::onFileRenamedDetailed);
-        connect(m_driveClient, &GoogleDriveClient::fileDeleted, this,
-                &SyncActionThread::onFileDeleted);
+        connect(m_driveClient, &GoogleDriveClient::fileMovedDetailed, this, &SyncActionThread::onFileMovedDetailed);
+        connect(m_driveClient, &GoogleDriveClient::fileRenamed, this, &SyncActionThread::onFileRenamed);
+        connect(m_driveClient, &GoogleDriveClient::fileRenamedDetailed, this, &SyncActionThread::onFileRenamedDetailed);
+        connect(m_driveClient, &GoogleDriveClient::fileDeleted, this, &SyncActionThread::onFileDeleted);
         connect(m_driveClient, &GoogleDriveClient::folderCreatedDetailed, this,
                 &SyncActionThread::onFolderCreatedDetailed);
         connect(m_driveClient, &GoogleDriveClient::error, this, &SyncActionThread::onDriveError);
-        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
-                &SyncActionThread::onDriveErrorDetailed);
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this, &SyncActionThread::onDriveErrorDetailed);
     }
 }
 
@@ -119,6 +109,16 @@ void SyncActionThread::stop() {
     emit stateChanged(State::Stopped);
 
     qInfo() << "SyncActionThread stopped";
+}
+
+void SyncActionThread::clearInProgressActions() {
+    {
+        QMutexLocker locker(&m_driveActionsMutex);
+        m_driveActionsInProgress.clear();
+    }
+    m_retryCounts.clear();
+    m_lastTokenRefreshRequestMs = 0;
+    qInfo() << "SyncActionThread: in-progress actions and retry state cleared (account sign-out)";
 }
 
 void SyncActionThread::pause() {
@@ -254,8 +254,8 @@ void SyncActionThread::processNextAction() {
         action.localPath = resolveUniqueLocalPath(action.localPath, action.fileId, QString(), true);
     }
 
-    qDebug() << "Processing action:" << static_cast<int>(action.actionType)
-             << "path:" << action.localPath << "fileId:" << action.fileId;
+    qDebug() << "Processing action:" << static_cast<int>(action.actionType) << "path:" << action.localPath
+             << "fileId:" << action.fileId;
 
     // Store current action for async response handling
     trackActionInProgress(action);
@@ -327,10 +327,8 @@ void SyncActionThread::executeUpload(const SyncActionItem& item) {
     // Check if the file is still being written to by another process.
     // If so, re-enqueue to the back of the queue so other ready items
     // can proceed, and this file gets re-checked on its next turn.
-    if (!item.isFolder && fileInfo.isFile() &&
-        FileInUseChecker::isFileOpenForWriting(absolutePath)) {
-        qInfo() << "Upload deferred — file is open for writing by another process:"
-                << item.localPath;
+    if (!item.isFolder && fileInfo.isFile() && FileInUseChecker::isFileOpenForWriting(absolutePath)) {
+        qInfo() << "Upload deferred — file is open for writing by another process:" << item.localPath;
 
         // Untrack so the item can be re-processed
         untrackActionInProgress(item);
@@ -360,10 +358,9 @@ void SyncActionThread::executeUpload(const SyncActionItem& item) {
         if (!existingFolderId.isEmpty()) {
             qInfo() << "Skipping remote folder create - mapping already exists:" << item.localPath
                     << "fileId:" << existingFolderId;
-            updateDatabaseAfterAction(
-                item, existingFolderId,
-                item.modifiedTime.isValid() ? item.modifiedTime : QDateTime::currentDateTimeUtc(),
-                QString(), QString());
+            updateDatabaseAfterAction(item, existingFolderId,
+                                      item.modifiedTime.isValid() ? item.modifiedTime : QDateTime::currentDateTimeUtc(),
+                                      QString(), QString());
             completeAction(item);
             return;
         }
@@ -439,8 +436,7 @@ void SyncActionThread::executeDownload(const SyncActionItem& item) {
         }
         // Notify local watcher to watch newly created parent directory
         if (m_localWatcher) {
-            qDebug() << "Notifying local watcher to watch new parent directory:"
-                     << parentDir.absolutePath();
+            qDebug() << "Notifying local watcher to watch new parent directory:" << parentDir.absolutePath();
             m_localWatcher->watchDirectory(parentDir.absolutePath());
         }
     }
@@ -473,8 +469,7 @@ bool SyncActionThread::deleteLocalPathRecursive(const QString& localPath, const 
     if (fileInfo.isDir()) {
         QDir dir(absolutePath);
         // If recursive delete files, build a list of all db entries to mark deleted
-        QStringList recursiveDeleteChildren =
-            dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
+        QStringList recursiveDeleteChildren = dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
         // Delete children first
         for (const QString& child : recursiveDeleteChildren) {
             QString childRelPath = QDir(localPath).filePath(child);
@@ -497,8 +492,7 @@ bool SyncActionThread::deleteLocalPathRecursive(const QString& localPath, const 
     if (success) {
         // Mark in database as deleted
         if (m_database) {
-            const QString effectiveFileId =
-                fileId.isEmpty() ? m_database->getFileId(localPath) : fileId;
+            const QString effectiveFileId = fileId.isEmpty() ? m_database->getFileId(localPath) : fileId;
             m_database->markFileDeleted(localPath, effectiveFileId);
         }
         return true;
@@ -556,8 +550,7 @@ void SyncActionThread::executeMoveLocal(const SyncActionItem& item) {
         }
         // Notify local watcher to watch newly created destination directory
         if (m_localWatcher) {
-            qDebug() << "Notifying local watcher to watch new destination directory:"
-                     << destDir.absolutePath();
+            qDebug() << "Notifying local watcher to watch new destination directory:" << destDir.absolutePath();
             m_localWatcher->watchDirectory(destDir.absolutePath());
         }
     }
@@ -572,8 +565,7 @@ void SyncActionThread::executeMoveLocal(const SyncActionItem& item) {
     if (success) {
         // If a directory was moved, update watcher to track the new location
         if (m_localWatcher && isDirectory) {
-            qDebug() << "Directory moved, updating watcher: unwatch" << sourceAbsPath << "and watch"
-                     << destAbsPath;
+            qDebug() << "Directory moved, updating watcher: unwatch" << sourceAbsPath << "and watch" << destAbsPath;
             m_localWatcher->unwatchDirectory(sourceAbsPath);
             m_localWatcher->watchDirectory(destAbsPath);
         }
@@ -639,8 +631,7 @@ void SyncActionThread::executeRenameLocal(const SyncActionItem& item) {
     if (effectiveFileId.isEmpty() && m_database) {
         effectiveFileId = m_database->getFileId(item.localPath);
     }
-    QString resolvedRelPath =
-        resolveUniqueLocalPath(newRelPath, effectiveFileId, item.localPath, false);
+    QString resolvedRelPath = resolveUniqueLocalPath(newRelPath, effectiveFileId, item.localPath, false);
     QString newAbsPath = toAbsolutePath(resolvedRelPath);
 
     // Perform the rename
@@ -687,10 +678,8 @@ QString SyncActionThread::toAbsolutePath(const QString& relativePath) const {
     return QDir(m_syncFolder).filePath(relativePath);
 }
 
-QString SyncActionThread::resolveUniqueLocalPath(const QString& desiredLocalPath,
-                                                 const QString& fileId,
-                                                 const QString& currentLocalPath,
-                                                 bool reuseExistingMapping) const {
+QString SyncActionThread::resolveUniqueLocalPath(const QString& desiredLocalPath, const QString& fileId,
+                                                 const QString& currentLocalPath, bool reuseExistingMapping) const {
     QString normalizedPath = QDir::cleanPath(desiredLocalPath);
     if (normalizedPath.isEmpty()) {
         return normalizedPath;
@@ -721,8 +710,8 @@ QString SyncActionThread::resolveUniqueLocalPath(const QString& desiredLocalPath
     return normalizedPath;
 }
 
-QString SyncActionThread::buildDisambiguatedPath(const QString& desiredLocalPath,
-                                                 const QString& fileId, int counter) const {
+QString SyncActionThread::buildDisambiguatedPath(const QString& desiredLocalPath, const QString& fileId,
+                                                 int counter) const {
     QFileInfo info(desiredLocalPath);
     QString dirPath = info.path();
     QString baseName = info.completeBaseName();
@@ -768,8 +757,7 @@ bool SyncActionThread::isPathAvailableForFileId(const QString& localPath, const 
     return true;
 }
 
-bool SyncActionThread::resolveRemoteParentId(const QString& parentPath, QString& parentId,
-                                             bool forceRefresh) {
+bool SyncActionThread::resolveRemoteParentId(const QString& parentPath, QString& parentId, bool forceRefresh) {
     QString normalizedParent = QDir::cleanPath(parentPath);
     if (normalizedParent == ".") {
         normalizedParent.clear();
@@ -805,8 +793,7 @@ bool SyncActionThread::resolveRemoteParentId(const QString& parentPath, QString&
     return false;
 }
 
-bool SyncActionThread::deferUntilRemoteParentReady(const QString& parentPath,
-                                                   const SyncActionItem& item) {
+bool SyncActionThread::deferUntilRemoteParentReady(const QString& parentPath, const SyncActionItem& item) {
     QString normalizedParent = QDir::cleanPath(parentPath);
     if (normalizedParent == ".") {
         normalizedParent.clear();
@@ -829,8 +816,7 @@ bool SyncActionThread::deferUntilRemoteParentReady(const QString& parentPath,
     bool parentInProgress = false;
     {
         QMutexLocker locker(&m_driveActionsMutex);
-        parentInProgress =
-            m_driveActionsInProgress.contains(actionKeyForLocalPath(normalizedParent));
+        parentInProgress = m_driveActionsInProgress.contains(actionKeyForLocalPath(normalizedParent));
     }
 
     untrackActionInProgress(item);
@@ -851,14 +837,12 @@ bool SyncActionThread::deferUntilRemoteParentReady(const QString& parentPath,
     if (!m_actionQueue->enqueueIfNotDuplicate(item)) {
         qDebug() << "Deferred action already pending, suppressing duplicate:" << item.localPath;
     }
-    qInfo() << "Deferring action until remote parent exists:" << item.localPath
-            << "parent:" << normalizedParent;
+    qInfo() << "Deferring action until remote parent exists:" << item.localPath << "parent:" << normalizedParent;
     QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
     return true;
 }
 
-bool SyncActionThread::scheduleRetry(const SyncActionItem& item, const QString& reason,
-                                     int baseDelayMs) {
+bool SyncActionThread::scheduleRetry(const SyncActionItem& item, const QString& reason, int baseDelayMs) {
     QString key = actionKeyForItem(item);
     if (key.isEmpty() || !m_actionQueue) {
         return false;
@@ -881,17 +865,15 @@ bool SyncActionThread::scheduleRetry(const SyncActionItem& item, const QString& 
         m_changeProcessor->unmarkFileInOperation(item.localPath);
     }
 
-    qWarning() << "Retrying action after recoverable error:" << reason << "attempt" << (attempt + 1)
-               << "of" << MAX_RETRY_ATTEMPTS << "delayMs" << delayMs << "path" << item.localPath
-               << "fileId" << item.fileId;
+    qWarning() << "Retrying action after recoverable error:" << reason << "attempt" << (attempt + 1) << "of"
+               << MAX_RETRY_ATTEMPTS << "delayMs" << delayMs << "path" << item.localPath << "fileId" << item.fileId;
 
     QTimer::singleShot(delayMs, this, [this, item]() {
         if (!m_actionQueue) {
             return;
         }
         if (!m_actionQueue->enqueueIfNotDuplicate(item)) {
-            qDebug() << "Retry enqueue suppressed duplicate action:" << item.localPath
-                     << "fileId:" << item.fileId;
+            qDebug() << "Retry enqueue suppressed duplicate action:" << item.localPath << "fileId:" << item.fileId;
         }
     });
 
@@ -931,8 +913,7 @@ QString SyncActionThread::computeLocalFileMd5(const QString& localPath) const {
 }
 
 void SyncActionThread::updateDatabaseAfterAction(const SyncActionItem& item, const QString& fileId,
-                                                 const QDateTime& modifiedTime,
-                                                 const QString& remoteMd5,
+                                                 const QDateTime& modifiedTime, const QString& remoteMd5,
                                                  const QString& localHash) {
     if (!m_database) {
         return;
@@ -960,12 +941,10 @@ void SyncActionThread::updateDatabaseAfterAction(const SyncActionItem& item, con
 }
 
 void SyncActionThread::completeAction(const SyncActionItem& item) {
-    qInfo() << "Action completed:" << static_cast<int>(item.actionType)
-            << "path:" << item.localPath;
+    qInfo() << "Action completed:" << static_cast<int>(item.actionType) << "path:" << item.localPath;
 
     // Update local metadata if applicable (per flow chart)
-    if ((item.actionType == SyncActionType::Download ||
-         item.actionType == SyncActionType::MoveLocal ||
+    if ((item.actionType == SyncActionType::Download || item.actionType == SyncActionType::MoveLocal ||
          item.actionType == SyncActionType::RenameLocal) &&
         item.modifiedTime.isValid()) {
         QString metadataPath = item.localPath;
@@ -977,8 +956,7 @@ void SyncActionThread::completeAction(const SyncActionItem& item) {
                     metadataPath = mappedPath;
                 }
             }
-            if ((metadataPath.isEmpty() || metadataPath == item.localPath) &&
-                !item.moveDestination.isEmpty()) {
+            if ((metadataPath.isEmpty() || metadataPath == item.localPath) && !item.moveDestination.isEmpty()) {
                 metadataPath = item.moveDestination;
             }
         } else if (item.actionType == SyncActionType::RenameLocal) {
@@ -988,8 +966,7 @@ void SyncActionThread::completeAction(const SyncActionItem& item) {
                     metadataPath = mappedPath;
                 }
             }
-            if ((metadataPath.isEmpty() || metadataPath == item.localPath) &&
-                !item.renameTo.isEmpty()) {
+            if ((metadataPath.isEmpty() || metadataPath == item.localPath) && !item.renameTo.isEmpty()) {
                 metadataPath = QFileInfo(item.localPath).dir().filePath(item.renameTo);
             }
         }
@@ -1012,8 +989,7 @@ void SyncActionThread::completeAction(const SyncActionItem& item) {
     QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
 }
 
-void SyncActionThread::updateLocalMetadata(const QString& localPath,
-                                           const QDateTime& modifiedTime) {
+void SyncActionThread::updateLocalMetadata(const QString& localPath, const QDateTime& modifiedTime) {
     QString absolutePath = toAbsolutePath(localPath);
 
     QFileInfo fileInfo(absolutePath);
@@ -1034,8 +1010,7 @@ void SyncActionThread::updateLocalMetadata(const QString& localPath,
 
     // TODO: Add other platform-specific metadata updates if needed
 
-    qInfo() << "Updated local file metadata for" << localPath << "to modified time"
-            << modifiedTime.toString();
+    qInfo() << "Updated local file metadata for" << localPath << "to modified time" << modifiedTime.toString();
 }
 
 void SyncActionThread::failAction(const SyncActionItem& item, const QString& errorMsg) {
@@ -1098,8 +1073,7 @@ void SyncActionThread::onFileUploadedDetailed(const DriveFile& file, const QStri
 
     currentAction.fileId = file.id;
 
-    qInfo() << "Upload completed:" << file.name << "fileId:" << file.id
-            << "localPath:" << normalizedPath;
+    qInfo() << "Upload completed:" << file.name << "fileId:" << file.id << "localPath:" << normalizedPath;
 
     updateDatabaseAfterAction(currentAction, file.id, file.modifiedTime, file.md5Checksum,
                               currentAction.localContentHash);
@@ -1185,8 +1159,7 @@ void SyncActionThread::onFileMoved(const QString& fileId) {
         if (currentAction.moveDestination.isEmpty() || currentAction.moveDestination == ".") {
             newLocalPath = QFileInfo(currentAction.localPath).fileName();
         } else {
-            newLocalPath = QDir(currentAction.moveDestination)
-                               .filePath(QFileInfo(currentAction.localPath).fileName());
+            newLocalPath = QDir(currentAction.moveDestination).filePath(QFileInfo(currentAction.localPath).fileName());
         }
         m_database->setLocalPath(fileId, QDir::cleanPath(newLocalPath));
     }
@@ -1222,8 +1195,7 @@ void SyncActionThread::onFileRenamed(const QString& fileId) {
 
     // Update database path mapping with new name
     if (m_database && !currentAction.localPath.isEmpty() && !currentAction.renameTo.isEmpty()) {
-        QString newLocalPath =
-            QFileInfo(currentAction.localPath).dir().filePath(currentAction.renameTo);
+        QString newLocalPath = QFileInfo(currentAction.localPath).dir().filePath(currentAction.renameTo);
         m_database->setLocalPath(fileId, QDir::cleanPath(newLocalPath));
     }
 
@@ -1305,8 +1277,7 @@ void SyncActionThread::onFolderCreatedDetailed(const DriveFile& folder, const QS
 
     currentAction.fileId = folder.id;
 
-    qInfo() << "Folder created:" << folder.name << "fileId:" << folder.id
-            << "localPath:" << normalizedPath;
+    qInfo() << "Folder created:" << folder.name << "fileId:" << folder.id << "localPath:" << normalizedPath;
 
     updateDatabaseAfterAction(currentAction, folder.id, folder.modifiedTime, QString(), QString());
 
@@ -1332,16 +1303,14 @@ void SyncActionThread::onDriveError(const QString& operation, const QString& err
     if (found) {
         failAction(currentAction, operation + ": " + errorMsg);
     } else {
-        qWarning() << "SyncActionThread::onDriveError (legacy signal) – cannot match to action:"
-                   << operation << errorMsg
-                   << "actions in flight:" << m_driveActionsInProgress.size();
+        qWarning() << "SyncActionThread::onDriveError (legacy signal) – cannot match to action:" << operation
+                   << errorMsg << "actions in flight:" << m_driveActionsInProgress.size();
         emit error(operation + ": " + errorMsg);
     }
 }
 
-void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QString& errorMsg,
-                                            int httpStatus, const QString& fileId,
-                                            const QString& localPath) {
+void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
+                                            const QString& fileId, const QString& localPath) {
     SyncActionItem currentAction;
     bool found = false;
     QString normalizedPath = normalizeLocalPath(localPath);
@@ -1357,8 +1326,7 @@ void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QStr
             currentAction = m_driveActionsInProgress.value(pathKey);
             found = true;
         } else if (!normalizedPath.isEmpty()) {
-            for (auto it = m_driveActionsInProgress.constBegin();
-                 it != m_driveActionsInProgress.constEnd(); ++it) {
+            for (auto it = m_driveActionsInProgress.constBegin(); it != m_driveActionsInProgress.constEnd(); ++it) {
                 if (it.value().localPath == normalizedPath) {
                     currentAction = it.value();
                     found = true;
@@ -1376,15 +1344,13 @@ void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QStr
 
     const QString errorLower = errorMsg.toLower();
     const bool isAuthFailure = (httpStatus == 401);
-    const bool isStaleParent = (httpStatus == 404) &&
-                               (operation == "createFolder" || operation == "uploadFile") &&
+    const bool isStaleParent = (httpStatus == 404) && (operation == "createFolder" || operation == "uploadFile") &&
                                errorLower.contains("file not found");
     const bool isTransientStatus = (httpStatus >= 500 && httpStatus < 600);
-    const bool isTransientMessage =
-        errorLower.contains("goaway") || errorLower.contains("timed out") ||
-        errorLower.contains("timeout") || errorLower.contains("connection reset") ||
-        errorLower.contains("connection closed") || errorLower.contains("temporary") ||
-        errorLower.contains("stream error") || errorLower.contains("remote host closed");
+    const bool isTransientMessage = errorLower.contains("goaway") || errorLower.contains("timed out") ||
+                                    errorLower.contains("timeout") || errorLower.contains("connection reset") ||
+                                    errorLower.contains("connection closed") || errorLower.contains("temporary") ||
+                                    errorLower.contains("stream error") || errorLower.contains("remote host closed");
     const bool isTransientFailure = isTransientStatus || isTransientMessage;
 
     if (isStaleParent) {

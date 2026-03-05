@@ -78,9 +78,7 @@ bool initializeDirectories() {
     return true;
 }
 
-QString normalizedAbsolutePath(const QString& path) {
-    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
-}
+QString normalizedAbsolutePath(const QString& path) { return QDir::cleanPath(QFileInfo(path).absoluteFilePath()); }
 
 bool pathsOverlap(const QString& pathA, const QString& pathB) {
     if (pathA.isEmpty() || pathB.isEmpty()) {
@@ -112,8 +110,8 @@ void startFuseComponent(FuseDriver* fuseDriver, const QString& syncFolder) {
     }
 
     if (pathsOverlap(fuseDriver->mountPoint(), syncFolder)) {
-        qWarning() << "FUSE mount point overlaps sync folder, refusing to mount:"
-                   << fuseDriver->mountPoint() << "syncFolder=" << syncFolder;
+        qWarning() << "FUSE mount point overlaps sync folder, refusing to mount:" << fuseDriver->mountPoint()
+                   << "syncFolder=" << syncFolder;
         return;
     }
 
@@ -234,8 +232,7 @@ int main(int argc, char* argv[]) {
     }
     const bool fuseEnabled = (syncSystemMode == "fuse-only" || syncSystemMode == "both");
     const bool mirrorEnabled = (syncSystemMode == "mirror-only" || syncSystemMode == "both");
-    qInfo() << "Sync system mode:" << syncSystemMode << "(mirror:" << mirrorEnabled
-            << "fuse:" << fuseEnabled << ")";
+    qInfo() << "Sync system mode:" << syncSystemMode << "(mirror:" << mirrorEnabled << "fuse:" << fuseEnabled << ")";
 
     const QString fuseMountPoint =
         settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse").toString();
@@ -253,8 +250,7 @@ int main(int argc, char* argv[]) {
 
     // Initialize local change watcher
     LocalChangeWatcher localWatcher(&changeQueue);
-    QString syncFolder =
-        settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString();
+    QString syncFolder = settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString();
     // TODO: merge this. ignore patters are set in many places. just store in db or something
     localWatcher.setSyncFolder(syncFolder);
     localWatcher.setIgnorePatterns({"*.tmp", "*.swp", "*~", ".git/*", ".DS_Store"});
@@ -271,13 +267,11 @@ int main(int argc, char* argv[]) {
     // Initialize change processor/conflict resolver
     ChangeProcessor changeProcessor(&changeQueue, &syncActionQueue, &syncDatabase, &driveClient);
 
-    QObject::connect(&fuseDriver, &FuseDriver::mountError, &notificationManager,
-                     [&notificationManager](const QString& error) {
-                         notificationManager.showError("FUSE Mount Error", error);
-                     });
+    QObject::connect(
+        &fuseDriver, &FuseDriver::mountError, &notificationManager,
+        [&notificationManager](const QString& error) { notificationManager.showError("FUSE Mount Error", error); });
     // Initialize sync action thread (executes sync actions from queue)
-    SyncActionThread syncActionThread(&syncActionQueue, &syncDatabase, &driveClient,
-                                      &changeProcessor, &localWatcher);
+    SyncActionThread syncActionThread(&syncActionQueue, &syncDatabase, &driveClient, &changeProcessor, &localWatcher);
     syncActionThread.setSyncFolder(syncFolder);
     changeProcessor.setSyncFolder(syncFolder);  // share sync folder with change processor
 
@@ -310,8 +304,7 @@ int main(int argc, char* argv[]) {
     QObject::connect(&fullSyncLocalTimer, &QTimer::timeout, &fullSync, &FullSync::fullSyncLocal);
 
     // Connect change queue to processor wake-up signal
-    QObject::connect(&changeQueue, &ChangeQueue::itemsAvailable, &changeProcessor,
-                     &ChangeProcessor::onItemsAvailable);
+    QObject::connect(&changeQueue, &ChangeQueue::itemsAvailable, &changeProcessor, &ChangeProcessor::onItemsAvailable);
 
     // Connect sync action queue to action thread wake-up signal
     QObject::connect(&syncActionQueue, &SyncActionQueue::itemsAvailable, &syncActionThread,
@@ -328,8 +321,7 @@ int main(int argc, char* argv[]) {
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
     MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &syncActionQueue : nullptr,
-                          mirrorEnabled ? &changeProcessor : nullptr,
-                          mirrorEnabled ? &syncActionThread : nullptr,
+                          mirrorEnabled ? &changeProcessor : nullptr, mirrorEnabled ? &syncActionThread : nullptr,
                           mirrorEnabled ? &fullSync : nullptr, &notificationManager);
 
     // Connect signals for application-wide coordination
@@ -339,8 +331,7 @@ int main(int argc, char* argv[]) {
                      [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
                       &fullSyncLocalTimer, &fuseDriver, fuseEnabled, mirrorEnabled, &syncFolder]() {
                          if (mirrorEnabled) {
-                             startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
-                                                 &syncActionThread);
+                             startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread);
                              fullSyncLocalTimer.start();
                              // Trigger full sync after authentication to ensure drive is fully
                              // synced
@@ -351,30 +342,60 @@ int main(int argc, char* argv[]) {
                          }
                      });
 
-    // When logged out, stop sync components
-    QObject::connect(&authManager, &GoogleAuthManager::loggedOut, &app,
-                     [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
-                      &fullSyncLocalTimer, &fuseDriver, mirrorEnabled, fuseEnabled]() {
-                         if (mirrorEnabled) {
-                             fullSync.cancel();
-                             fullSyncLocalTimer.stop();
-                             stopSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
-                                                &syncActionThread);
-                         }
-                         if (fuseEnabled) {
-                             stopFuseComponent(&fuseDriver);
-                         }
-                     });
+    // When logged out, stop sync components and purge session state
+    QObject::connect(
+        &authManager, &GoogleAuthManager::loggedOut, &app,
+        [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync, &fullSyncLocalTimer,
+         &fuseDriver, mirrorEnabled, fuseEnabled, &changeQueue, &syncActionQueue, &syncDatabase, &syncFolder]() {
+            // --- 1. Cancel / stop running components ---
+            if (mirrorEnabled) {
+                fullSync.cancel();
+                fullSyncLocalTimer.stop();
+                stopSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread);
+            }
+            if (fuseEnabled) {
+                stopFuseComponent(&fuseDriver);
+            }
+
+            // --- 2. Drain in-memory queues ---
+            changeQueue.clear();
+            syncActionQueue.clear();
+
+            // --- 3. Clear per-component in-memory state ---
+            changeProcessor.clearState();
+            syncActionThread.clearInProgressActions();
+            remoteWatcher.clearChangeToken();
+            fullSync.clearPendingState();
+
+            // --- 4. Wipe the sync database ---
+            syncDatabase.clearAllData();
+
+            // --- 5. Prompt user about local sync folder ---
+            if (!syncFolder.isEmpty() && QDir(syncFolder).exists()) {
+                auto answer =
+                    QMessageBox::question(nullptr, QStringLiteral("Remove local files?"),
+                                          QStringLiteral("You have signed out.\n\n"
+                                                         "Do you want to delete the local sync folder and all its "
+                                                         "contents?\n\n%1")
+                                              .arg(syncFolder),
+                                          QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+
+                if (answer == QMessageBox::Yes) {
+                    QDir(syncFolder).removeRecursively();
+                    qInfo() << "Local sync folder purged on sign-out:" << syncFolder;
+                }
+            }
+
+            qInfo() << "Account sign-out cleanup complete";
+        });
 
     // Connect tray manager to main window
-    QObject::connect(&trayManager, &SystemTrayManager::showWindowRequested, &mainWindow,
-                     &MainWindow::show);
+    QObject::connect(&trayManager, &SystemTrayManager::showWindowRequested, &mainWindow, &MainWindow::show);
     QObject::connect(&trayManager, &SystemTrayManager::quitRequested, &app, &QApplication::quit);
 
     // Connect tray "Sync Now" to full sync (only when mirror sync is enabled)
     if (mirrorEnabled) {
-        QObject::connect(&trayManager, &SystemTrayManager::fullSyncRequested, &fullSync,
-                         &FullSync::fullSync);
+        QObject::connect(&trayManager, &SystemTrayManager::fullSyncRequested, &fullSync, &FullSync::fullSync);
     }
 
     // Connect storage info to tray for storage-level icons
@@ -382,55 +403,49 @@ int main(int argc, char* argv[]) {
                      &SystemTrayManager::updateStorageInfo);
 
     // Connect sync action thread status updates to tray
+    QObject::connect(&syncActionThread, &SyncActionThread::actionCompleted, &trayManager,
+                     [&trayManager](const SyncActionItem&) { trayManager.updateSyncStatus("Syncing..."); });
     QObject::connect(
-        &syncActionThread, &SyncActionThread::actionCompleted, &trayManager,
-        [&trayManager](const SyncActionItem&) { trayManager.updateSyncStatus("Syncing..."); });
-    QObject::connect(&syncActionThread, &SyncActionThread::actionFailed, &trayManager,
-                     [&trayManager](const SyncActionItem&, const QString&) {
-                         trayManager.updateSyncStatus("Sync error");
-                     });
+        &syncActionThread, &SyncActionThread::actionFailed, &trayManager,
+        [&trayManager](const SyncActionItem&, const QString&) { trayManager.updateSyncStatus("Sync error"); });
 
     // Connect full sync state changes to tray
-    QObject::connect(&fullSync, &FullSync::stateChanged, &trayManager,
-                     [&trayManager](FullSync::State state) {
-                         switch (state) {
-                             case FullSync::State::ScanningLocal:
-                                 trayManager.updateSyncStatus("Scanning local files...");
-                                 break;
-                             case FullSync::State::FetchingRemote:
-                                 trayManager.updateSyncStatus("Fetching remote files...");
-                                 break;
-                             case FullSync::State::Complete:
-                                 trayManager.updateSyncStatus("Syncing...");
-                                 break;
-                             case FullSync::State::Error:
-                                 trayManager.updateSyncStatus("Sync error");
-                                 break;
-                             case FullSync::State::Idle:
-                                 break;
-                         }
-                     });
+    QObject::connect(&fullSync, &FullSync::stateChanged, &trayManager, [&trayManager](FullSync::State state) {
+        switch (state) {
+            case FullSync::State::ScanningLocal:
+                trayManager.updateSyncStatus("Scanning local files...");
+                break;
+            case FullSync::State::FetchingRemote:
+                trayManager.updateSyncStatus("Fetching remote files...");
+                break;
+            case FullSync::State::Complete:
+                trayManager.updateSyncStatus("Syncing...");
+                break;
+            case FullSync::State::Error:
+                trayManager.updateSyncStatus("Sync error");
+                break;
+            case FullSync::State::Idle:
+                break;
+        }
+    });
 
     // Periodically refresh storage info (every 10 minutes)
     QTimer storageRefreshTimer(&app);
     storageRefreshTimer.setInterval(10 * 60 * 1000);
     storageRefreshTimer.setSingleShot(false);
-    QObject::connect(&storageRefreshTimer, &QTimer::timeout, &driveClient,
-                     &GoogleDriveClient::getAboutInfo);
+    QObject::connect(&storageRefreshTimer, &QTimer::timeout, &driveClient, &GoogleDriveClient::getAboutInfo);
     QObject::connect(&authManager, &GoogleAuthManager::authenticated, &storageRefreshTimer,
                      [&storageRefreshTimer, &driveClient]() {
                          storageRefreshTimer.start();
                          // Fetch once immediately
                          QTimer::singleShot(2000, &driveClient, &GoogleDriveClient::getAboutInfo);
                      });
-    QObject::connect(&authManager, &GoogleAuthManager::loggedOut, &storageRefreshTimer,
-                     &QTimer::stop);
+    QObject::connect(&authManager, &GoogleAuthManager::loggedOut, &storageRefreshTimer, &QTimer::stop);
 
     // Connect change processor errors to notification manager
-    QObject::connect(&changeProcessor, &ChangeProcessor::error, &notificationManager,
-                     [&notificationManager](const QString& error) {
-                         notificationManager.showError("Sync Error", error);
-                     });
+    QObject::connect(
+        &changeProcessor, &ChangeProcessor::error, &notificationManager,
+        [&notificationManager](const QString& error) { notificationManager.showError("Sync Error", error); });
 
     // Connect conflict detection to notification
     QObject::connect(&changeProcessor, &ChangeProcessor::conflictDetected, &notificationManager,
@@ -449,17 +464,15 @@ int main(int argc, char* argv[]) {
                      });
 
     // Connect sync action thread errors to notification manager
-    QObject::connect(&syncActionThread, &SyncActionThread::error, &notificationManager,
-                     [&notificationManager](const QString& error) {
-                         notificationManager.showError("Sync Action Error", error);
-                     });
+    QObject::connect(
+        &syncActionThread, &SyncActionThread::error, &notificationManager,
+        [&notificationManager](const QString& error) { notificationManager.showError("Sync Action Error", error); });
 
     // Connect progress bar to sync action thread
-    QObject::connect(
-        &syncActionThread, &SyncActionThread::actionProgress, &mainWindow,
-        [&mainWindow](const SyncActionItem&, qint64 bytesProcessed, qint64 bytesTotal) {
-            mainWindow.updateSyncProgress(bytesProcessed, bytesTotal);
-        });
+    QObject::connect(&syncActionThread, &SyncActionThread::actionProgress, &mainWindow,
+                     [&mainWindow](const SyncActionItem&, qint64 bytesProcessed, qint64 bytesTotal) {
+                         mainWindow.updateSyncProgress(bytesProcessed, bytesTotal);
+                     });
 
     QObject::connect(&syncActionThread, &SyncActionThread::tokenRefreshRequested, &authManager,
                      &GoogleAuthManager::refreshTokens);
@@ -468,29 +481,27 @@ int main(int argc, char* argv[]) {
     qint64 lastRefreshAttemptMs = 0;
     constexpr qint64 AUTH_REFRESH_COOLDOWN_MS = 10000;
 
-    QObject::connect(
-        &driveClient, &GoogleDriveClient::authenticationFailure, &app,
-        [&authManager, &refreshInFlight, &lastRefreshAttemptMs](
-            const QString& operation, int httpStatus, const QString& errorMsg) {
-            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-            if (refreshInFlight || (nowMs - lastRefreshAttemptMs) < AUTH_REFRESH_COOLDOWN_MS) {
-                qInfo() << "Auth refresh suppressed (in-flight/cooldown) op=" << operation
-                        << "status=" << httpStatus;
-                return;
-            }
+    QObject::connect(&driveClient, &GoogleDriveClient::authenticationFailure, &app,
+                     [&authManager, &refreshInFlight, &lastRefreshAttemptMs](const QString& operation, int httpStatus,
+                                                                             const QString& errorMsg) {
+                         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                         if (refreshInFlight || (nowMs - lastRefreshAttemptMs) < AUTH_REFRESH_COOLDOWN_MS) {
+                             qInfo() << "Auth refresh suppressed (in-flight/cooldown) op=" << operation
+                                     << "status=" << httpStatus;
+                             return;
+                         }
 
-            if (authManager.refreshToken().isEmpty()) {
-                qWarning() << "Auth failure without refresh token; skipping auto-refresh";
-                return;
-            }
+                         if (authManager.refreshToken().isEmpty()) {
+                             qWarning() << "Auth failure without refresh token; skipping auto-refresh";
+                             return;
+                         }
 
-            qWarning() << "Auth failure detected from operation:" << operation
-                       << "status:" << httpStatus << "error:" << errorMsg
-                       << "-> requesting token refresh";
-            refreshInFlight = true;
-            lastRefreshAttemptMs = nowMs;
-            authManager.refreshTokens();
-        });
+                         qWarning() << "Auth failure detected from operation:" << operation << "status:" << httpStatus
+                                    << "error:" << errorMsg << "-> requesting token refresh";
+                         refreshInFlight = true;
+                         lastRefreshAttemptMs = nowMs;
+                         authManager.refreshTokens();
+                     });
 
     QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &app,
                      [&refreshInFlight]() { refreshInFlight = false; });
@@ -504,9 +515,8 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(
         &authManager, &GoogleAuthManager::authExpired, &app,
-        [&refreshInFlight, &localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread,
-         &fullSync, &fullSyncLocalTimer, &trayManager, &mainWindow, &notificationManager,
-         &fuseDriver](const QString& reason) {
+        [&refreshInFlight, &localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
+         &fullSyncLocalTimer, &trayManager, &mainWindow, &notificationManager, &fuseDriver](const QString& reason) {
             refreshInFlight = false;
             fullSync.cancel();
             fullSyncLocalTimer.stop();
@@ -516,12 +526,10 @@ int main(int argc, char* argv[]) {
             mainWindow.setAuthExpired(reason);
             trayManager.updateAuthState(false);
             trayManager.updateSyncStatus("Authentication expired");
-            trayManager.showNotification("Session Expired",
-                                         "Google Drive session expired. Sign in again.",
+            trayManager.showNotification("Session Expired", "Google Drive session expired. Sign in again.",
                                          QSystemTrayIcon::Warning);
-            notificationManager.showWarning(
-                "Authentication Expired",
-                "Session expired. Re-authentication is required to resume sync.");
+            notificationManager.showWarning("Authentication Expired",
+                                            "Session expired. Re-authentication is required to resume sync.");
         });
 
     // Auto-login if tokens are available - check after connections are established
@@ -539,27 +547,25 @@ int main(int argc, char* argv[]) {
             qInfo() << "Starting sync components immediately";
 
             // Use QTimer::singleShot to ensure event loop is running
-            QTimer::singleShot(100, &app,
-                               [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread,
-                                &fullSync, &fullSyncLocalTimer, &fuseDriver, fuseEnabled,
-                                mirrorEnabled, &syncFolder, &trayManager]() {
-                                   if (mirrorEnabled) {
-                                       startSyncComponents(&localWatcher, &remoteWatcher,
-                                                           &changeProcessor, &syncActionThread);
-                                       fullSyncLocalTimer.start();
-                                       // Trigger full sync after starting components
-                                       QTimer::singleShot(500, &fullSync, &FullSync::fullSync);
-                                   }
-                                   if (fuseEnabled) {
-                                       startFuseComponent(&fuseDriver, syncFolder);
-                                   }
-                                   trayManager.updateAuthState(true);
-                               });
+            QTimer::singleShot(
+                100, &app,
+                [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync, &fullSyncLocalTimer,
+                 &fuseDriver, fuseEnabled, mirrorEnabled, &syncFolder, &trayManager]() {
+                    if (mirrorEnabled) {
+                        startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread);
+                        fullSyncLocalTimer.start();
+                        // Trigger full sync after starting components
+                        QTimer::singleShot(500, &fullSync, &FullSync::fullSync);
+                    }
+                    if (fuseEnabled) {
+                        startFuseComponent(&fuseDriver, syncFolder);
+                    }
+                    trayManager.updateAuthState(true);
+                });
         }
     }
 
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app,
-                     [&fuseDriver]() { stopFuseComponent(&fuseDriver); });
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&fuseDriver]() { stopFuseComponent(&fuseDriver); });
 
     // Show main window on first run or if not logged in
     if (!tokenStorage.hasValidTokens()) {

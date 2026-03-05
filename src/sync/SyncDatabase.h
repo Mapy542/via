@@ -243,8 +243,7 @@ class SyncDatabase : public QObject {
      * @param remoteMd5 Remote MD5 hash
      * @param localHash Local content hash
      */
-    void setContentHashesAtSync(const QString& localPath, const QString& remoteMd5,
-                                const QString& localHash);
+    void setContentHashesAtSync(const QString& localPath, const QString& remoteMd5, const QString& localHash);
 
     /**
      * @brief Get all synced files
@@ -320,8 +319,7 @@ class SyncDatabase : public QObject {
      * @param conflictPath Optional conflict copy path
      * @return Conflict record ID or -1 on failure
      */
-    int upsertConflictRecord(const QString& localPath, const QString& fileId,
-                             const QString& conflictPath = QString());
+    int upsertConflictRecord(const QString& localPath, const QString& fileId, const QString& conflictPath = QString());
 
     /**
      * @brief Append a version entry to a conflict record
@@ -479,6 +477,18 @@ class SyncDatabase : public QObject {
     bool evictFuseCacheEntry(const QString& fileId);
 
     // FUSE sync state (change tokens, etc.)
+
+    /**
+     * @brief Clear all user data from every table in the database
+     *
+     * Deletes rows from: files, settings, conflicts, conflict_versions,
+     * deleted_files, fuse_metadata, fuse_cache_entries, fuse_dirty_files,
+     * fuse_sync_state.  Used on account sign-out to prevent data leaks
+     * and conflicts when a different account signs in.
+     *
+     * @return true if all tables were cleared successfully
+     */
+    bool clearAllData();
 
     /**
      * @brief Get FUSE sync state value

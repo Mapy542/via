@@ -121,8 +121,7 @@ void FullSync::startInternal(Mode mode) {
         }
     }
 
-    qInfo() << "FullSync started for folder:" << m_syncFolder
-            << (m_mode == Mode::LocalOnly ? "(local-only)" : "");
+    qInfo() << "FullSync started for folder:" << m_syncFolder << (m_mode == Mode::LocalOnly ? "(local-only)" : "");
     emit stateChanged(State::ScanningLocal);
 
     // Start scanning local files (use singleShot to avoid blocking)
@@ -143,6 +142,19 @@ void FullSync::cancel() {
     emit stateChanged(State::Idle);
 }
 
+void FullSync::clearPendingState() {
+    QMutexLocker locker(&m_mutex);
+    m_allRemoteItems.clear();
+    m_discoveredLocalPaths.clear();
+    m_currentPageToken.clear();
+    delete m_remoteTree;
+    m_remoteTree = nullptr;
+    m_localFileCount = 0;
+    m_remoteFileCount = 0;
+    m_orphanCount = 0;
+    qInfo() << "FullSync: pending discovery state cleared (account sign-out)";
+}
+
 void FullSync::scanLocalFiles() {
     {
         QMutexLocker locker(&m_mutex);
@@ -155,8 +167,7 @@ void FullSync::scanLocalFiles() {
     emit progressUpdated("Scanning local files...", 0, 0);
 
     // Iterate through all files and directories in the sync folder
-    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
-                    QDirIterator::Subdirectories);
+    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
 
     int count = 0;
     while (it.hasNext()) {
@@ -355,11 +366,9 @@ void FullSync::buildRemoteFolderStructure() {
 
     unsigned long iterations = 0;
     std::vector<FileTreeNode*> currentBranchDepthParents;
-    currentBranchDepthParents.push_back(
-        m_remoteTree);  // list of parent IDs at current depth to reduce search time
+    currentBranchDepthParents.push_back(m_remoteTree);  // list of parent IDs at current depth to reduce search time
 
-    unsigned long maxIterations =
-        m_allRemoteItems.size() * 10;  // arbitrary limit to avoid infinite loops
+    unsigned long maxIterations = m_allRemoteItems.size() * 10;  // arbitrary limit to avoid infinite loops
     while (!m_allRemoteItems.isEmpty() && iterations < maxIterations) {
         // store all items added this iteration to remove them after
         QList<qsizetype> itemsToRemove;
@@ -373,9 +382,8 @@ void FullSync::buildRemoteFolderStructure() {
                     FileTreeNode* newNode = new FileTreeNode();
                     newNode->name = file.name;
                     newNode->isFolder = file.isFolder;
-                    newNode->relativePath = parentNode->relativePath.isEmpty()
-                                                ? file.name
-                                                : parentNode->relativePath + "/" + file.name;
+                    newNode->relativePath =
+                        parentNode->relativePath.isEmpty() ? file.name : parentNode->relativePath + "/" + file.name;
                     newNode->modifiedTime = file.modifiedTime;
                     newNode->fileId = file.id;
                     parentNode->children.insert(file.id, newNode);

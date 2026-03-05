@@ -98,9 +98,8 @@ class ChangeProcessor : public QObject {
      * @param driveClient Pointer to the Google Drive client (for conflict checks)
      * @param parent Parent object
      */
-    explicit ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* syncActionQueue,
-                             SyncDatabase* database, GoogleDriveClient* driveClient,
-                             QObject* parent = nullptr);
+    explicit ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* syncActionQueue, SyncDatabase* database,
+                             GoogleDriveClient* driveClient, QObject* parent = nullptr);
 
     ~ChangeProcessor() override;
 
@@ -176,6 +175,14 @@ class ChangeProcessor : public QObject {
 
     // Configuration - public for sharing with SyncActionThread
     QString m_syncFolder;
+
+    /**
+     * @brief Clear all in-memory state (conflicts, files-in-operation)
+     *
+     * Called on account sign-out to prevent stale data from leaking
+     * into a subsequent session.
+     */
+    void clearState();
 
    public slots:
     /**

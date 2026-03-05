@@ -88,9 +88,8 @@ class FullSync : public QObject {
      * @param changeProcessor Pointer to the change processor (for initial sync mode)
      * @param parent Parent object
      */
-    explicit FullSync(ChangeQueue* changeQueue, SyncDatabase* database,
-                      GoogleDriveClient* driveClient, ChangeProcessor* changeProcessor,
-                      QObject* parent = nullptr);
+    explicit FullSync(ChangeQueue* changeQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
+                      ChangeProcessor* changeProcessor, QObject* parent = nullptr);
 
     ~FullSync() override;
 
@@ -123,6 +122,15 @@ class FullSync : public QObject {
      * @return true if scanning or fetching
      */
     bool isRunning() const;
+
+    /**
+     * @brief Clear all in-memory discovery state
+     *
+     * Releases the remote file tree, discovered paths, and remote item
+     * list.  Called on account sign-out to avoid leaking stale data
+     * into a subsequent session.
+     */
+    void clearPendingState();
 
    public slots:
     /**

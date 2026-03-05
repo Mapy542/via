@@ -70,9 +70,8 @@ class SyncActionThread : public QObject {
      * @param localWatcher Pointer to local change watcher (optional, for watch list updates)
      * @param parent Parent object
      */
-    explicit SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* database,
-                              GoogleDriveClient* driveClient, ChangeProcessor* changeProcessor,
-                              LocalChangeWatcher* localWatcher = nullptr,
+    explicit SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
+                              ChangeProcessor* changeProcessor, LocalChangeWatcher* localWatcher = nullptr,
                               QObject* parent = nullptr);
 
     ~SyncActionThread() override;
@@ -100,6 +99,14 @@ class SyncActionThread : public QObject {
     // Configuration
     QString m_syncFolder;  // share with change processor to reduce lookups to settings config :)
     // TODO: unified settings object to reduce duplication and reduce settings lookup overhead?
+
+    /**
+     * @brief Clear drive-actions-in-progress map and retry state
+     *
+     * Called on account sign-out to discard any pending async
+     * action tracking from the previous session.
+     */
+    void clearInProgressActions();
 
    public slots:
     /**
@@ -195,8 +202,8 @@ class SyncActionThread : public QObject {
     void onFileDeleted(const QString& fileId);
     void onFolderCreatedDetailed(const DriveFile& folder, const QString& localPath);
     void onDriveError(const QString&, const QString&);
-    void onDriveErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
-                              const QString& fileId, const QString& localPath);
+    void onDriveErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
+                              const QString& localPath);
 
    private:
     /**
@@ -256,14 +263,11 @@ class SyncActionThread : public QObject {
     QString toAbsolutePath(const QString& relativePath) const;
 
     QString resolveUniqueLocalPath(const QString& desiredLocalPath, const QString& fileId,
-                                   const QString& currentLocalPath,
-                                   bool reuseExistingMapping) const;
-    QString buildDisambiguatedPath(const QString& desiredLocalPath, const QString& fileId,
-                                   int counter) const;
+                                   const QString& currentLocalPath, bool reuseExistingMapping) const;
+    QString buildDisambiguatedPath(const QString& desiredLocalPath, const QString& fileId, int counter) const;
     bool isPathAvailableForFileId(const QString& localPath, const QString& fileId,
                                   const QString& currentLocalPath) const;
-    bool resolveRemoteParentId(const QString& parentPath, QString& parentId,
-                               bool forceRefresh = false);
+    bool resolveRemoteParentId(const QString& parentPath, QString& parentId, bool forceRefresh = false);
     bool deferUntilRemoteParentReady(const QString& parentPath, const SyncActionItem& item);
     bool scheduleRetry(const SyncActionItem& item, const QString& reason, int baseDelayMs = 250);
     void clearRetryState(const SyncActionItem& item);
@@ -274,10 +278,8 @@ class SyncActionThread : public QObject {
      * @param fileId The Google Drive file ID (may be new for uploads)
      * @param modifiedTime The modification time to record
      */
-    void updateDatabaseAfterAction(const SyncActionItem& item, const QString& fileId,
-                                   const QDateTime& modifiedTime,
-                                   const QString& remoteMd5 = QString(),
-                                   const QString& localHash = QString());
+    void updateDatabaseAfterAction(const SyncActionItem& item, const QString& fileId, const QDateTime& modifiedTime,
+                                   const QString& remoteMd5 = QString(), const QString& localHash = QString());
 
     /**
      * @brief Compute local file MD5 hash by relative local path
