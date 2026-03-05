@@ -4,6 +4,15 @@ on:
     push:
         tags:
             - 'v*'
+    workflow_dispatch:
+        inputs:
+            version:
+                description: 'Release version label (e.g. v0.1.0)'
+                required: true
+                type: string
+
+env:
+    RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
 
 permissions:
     contents: write # Required for creating releases
@@ -44,7 +53,7 @@ jobs:
                   chmod +x linuxdeploy*.AppImage
 
             - name: Configure CMake
-              run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+              run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTS=OFF
 
             - name: Build
               run: cmake --build build --parallel
@@ -57,19 +66,26 @@ jobs:
                   mkdir -p AppDir/usr/share/applications
                   cp res/via.desktop AppDir/usr/share/applications/
 
+            - name: Remove unsupported Qt SQL drivers
+              run: |
+                  rm -f "$QT_ROOT_DIR/plugins/sqldrivers/libqsqlmimer.so"
+
             - name: Create AppImage
               run: |
                   export APPIMAGE_EXTRACT_AND_RUN=1
                   export QMAKE=$(which qmake6 2>/dev/null || which qmake)
+                  export EXTRA_QT_PLUGINS="svg;"
                   ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage
 
             - name: Rename AppImage
               run: |
-                  mv Via*.AppImage Via-${{ github.ref_name }}-x86_64.AppImage
+                  mv Via*.AppImage Via-${{ env.RELEASE_VERSION }}-x86_64.AppImage
 
             - name: Create Release
               uses: softprops/action-gh-release@v1
               with:
+                  tag_name: ${{ env.RELEASE_VERSION }}
+                  name: Via ${{ env.RELEASE_VERSION }}
                   files: Via-*.AppImage
                   draft: false
                   prerelease: false

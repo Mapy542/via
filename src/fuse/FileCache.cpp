@@ -31,7 +31,8 @@ FileCache::FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QOb
     if (m_driveClient) {
         connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this,
                 &FileCache::onFileDownloaded);
-        connect(m_driveClient, &GoogleDriveClient::error, this, &FileCache::onDownloadError);
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
+                &FileCache::onDownloadError);
     }
 }
 
@@ -171,14 +172,20 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
     emit downloadStarted(fileId);
 
     // Request download from GoogleDriveClient
-    // Must invoke on main thread since QNetworkAccessManager lives there
+    // Must invoke on main thread since QNetworkAccessManager lives there.
+    // Use BlockingQueuedConnection so the QNetworkReply is created (and the
+    // HTTP request initiated) immediately, rather than being deferred via the
+    // event-loop queue.  With the old QueuedConnection the request could sit
+    // queued while the main thread was busy (e.g. servicing readdir), causing
+    // the underlying TCP connection to go stale and producing empty-reply
+    // errors from Google's CDN.
     if (m_driveClient) {
         QMetaObject::invokeMethod(
             m_driveClient,
             [driveClient = m_driveClient, fileId, cachePath]() {
                 driveClient->downloadFile(fileId, cachePath);
             },
-            Qt::QueuedConnection);
+            Qt::BlockingQueuedConnection);
     } else {
         qWarning() << "FileCache: No GoogleDriveClient available for download";
         return QString();
@@ -480,7 +487,11 @@ void FileCache::onFileDownloaded(const QString& fileId, const QString& localPath
     }
 }
 
-void FileCache::onDownloadError(const QString& operation, const QString& error) {
+void FileCache::onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
+                                const QString& fileId, const QString& localPath) {
+    Q_UNUSED(httpStatus)
+    Q_UNUSED(localPath)
+
     // Check if this is a download error
     if (!operation.startsWith("download")) {
         return;
@@ -488,28 +499,33 @@ void FileCache::onDownloadError(const QString& operation, const QString& error) 
 
     QMutexLocker locker(&m_mutex);
 
-    // Try to extract fileId from operation string if it follows "download:<fileId>" format
-    QString failedFileId;
-    if (operation.contains(':')) {
-        failedFileId = operation.mid(operation.indexOf(':') + 1);
-    }
-
-    if (!failedFileId.isEmpty() && m_pendingDownloads.contains(failedFileId)) {
-        // We know exactly which file failed
-        m_downloadErrors[failedFileId] = error;
-        m_pendingDownloads[failedFileId] = true;  // Mark as completed (with error)
+    // The errorDetailed signal provides the fileId directly via tagReply(),
+    // so we can always identify which download failed.
+    if (!fileId.isEmpty() && m_pendingDownloads.contains(fileId)) {
+        m_downloadErrors[fileId] = errorMsg;
+        m_pendingDownloads[fileId] = true;  // Mark as completed (with error)
     } else {
-        // Unable to determine which specific file failed
-        // This is a limitation of the current GoogleDriveClient API
-        // Mark all pending downloads as potentially failed
-        // TODO: Extend GoogleDriveClient::error signal to include fileId for downloads
-        qWarning() << "FileCache: Download error without file ID association:" << operation
-                   << error;
+        // Fallback: try to extract fileId from operation string
+        // (format "downloadFile:<fileId>")
+        QString parsedId;
+        if (operation.contains(':')) {
+            parsedId = operation.mid(operation.indexOf(':') + 1);
+        }
 
-        for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end(); ++it) {
-            if (!it.value()) {  // Still in progress
-                m_downloadErrors[it.key()] = error;
-                it.value() = true;  // Mark as completed (with error)
+        if (!parsedId.isEmpty() && m_pendingDownloads.contains(parsedId)) {
+            m_downloadErrors[parsedId] = errorMsg;
+            m_pendingDownloads[parsedId] = true;
+        } else {
+            // Last resort: could not identify the failed file.
+            // Only mark downloads as failed if we truly can't match.
+            qWarning() << "FileCache: Download error without file ID association:" << operation
+                       << errorMsg;
+
+            for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end(); ++it) {
+                if (!it.value()) {  // Still in progress
+                    m_downloadErrors[it.key()] = errorMsg;
+                    it.value() = true;  // Mark as completed (with error)
+                }
             }
         }
     }

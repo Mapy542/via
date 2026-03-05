@@ -364,11 +364,15 @@ class FileCache : public QObject {
     void onFileDownloaded(const QString& fileId, const QString& localPath);
 
     /**
-     * @brief Handle download error from GoogleDriveClient
+     * @brief Handle download error from GoogleDriveClient (via errorDetailed signal)
      * @param operation Operation that failed
-     * @param error Error message
+     * @param errorMsg Error message
+     * @param httpStatus HTTP status code (0 if unavailable)
+     * @param fileId File ID associated with the request (if known)
+     * @param localPath Local path associated with the request (if known)
      */
-    void onDownloadError(const QString& operation, const QString& error);
+    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
+                         const QString& fileId, const QString& localPath);
 
    private:
     // Internal helpers
