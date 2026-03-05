@@ -429,6 +429,24 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    // Connect FUSE subsystem signals to tray
+    if (fuseEnabled) {
+        QObject::connect(&fuseDriver, &FuseDriver::mounted, &trayManager,
+                         [&trayManager]() { trayManager.updateFuseStatus("Mounted"); });
+        QObject::connect(&fuseDriver, &FuseDriver::unmounted, &trayManager,
+                         [&trayManager]() { trayManager.updateFuseStatus("Idle"); });
+        QObject::connect(&fuseDriver, &FuseDriver::mountError, &trayManager,
+                         [&trayManager](const QString& error) { trayManager.updateFuseStatus("Error: " + error); });
+        QObject::connect(&fuseDriver, &FuseDriver::dirtyFilesFlushed, &trayManager, [&trayManager](int count) {
+            if (count > 0)
+                trayManager.updateFuseStatus(QString("Uploading %1 files").arg(count));
+            else
+                trayManager.updateFuseStatus("Mounted");
+        });
+        QObject::connect(&fuseDriver, &FuseDriver::metadataRefreshed, &trayManager,
+                         [&trayManager]() { trayManager.updateFuseStatus("Refreshing metadata"); });
+    }
+
     // Periodically refresh storage info (every 10 minutes)
     QTimer storageRefreshTimer(&app);
     storageRefreshTimer.setInterval(10 * 60 * 1000);
