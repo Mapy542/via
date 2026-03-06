@@ -259,8 +259,7 @@ class FuseDriver : public QObject {
      * @param database Pointer to sync database (for FUSE-specific tables)
      * @param parent Parent QObject
      */
-    explicit FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database,
-                        QObject* parent = nullptr);
+    explicit FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, QObject* parent = nullptr);
 
     ~FuseDriver() override;
 
@@ -439,8 +438,8 @@ class FuseDriver : public QObject {
      * 2. If not cached, query API for children
      * 3. Fill buffer with child names
      */
-    static int fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset,
-                           struct fuse_file_info* fi, enum fuse_readdir_flags flags);
+    static int fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi,
+                           enum fuse_readdir_flags flags);
 
     /**
      * @brief Open a file
@@ -461,8 +460,7 @@ class FuseDriver : public QObject {
      * 1. Read from cached file
      * 2. Update fuse_cache_entries.last_accessed
      */
-    static int fuseRead(const char* path, char* buf, size_t size, off_t offset,
-                        struct fuse_file_info* fi);
+    static int fuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
 
     /**
      * @brief Write file data
@@ -473,8 +471,7 @@ class FuseDriver : public QObject {
      * 3. Record in fuse_dirty_files
      * 4. Upload is deferred to DirtySyncWorker
      */
-    static int fuseWrite(const char* path, const char* buf, size_t size, off_t offset,
-                         struct fuse_file_info* fi);
+    static int fuseWrite(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
 
     /**
      * @brief Release (close) a file
@@ -482,6 +479,16 @@ class FuseDriver : public QObject {
      * Cleanup file handle. Dirty files are uploaded by DirtySyncWorker.
      */
     static int fuseRelease(const char* path, struct fuse_file_info* fi);
+
+    /**
+     * @brief Synchronise dirty data to Google Drive
+     *
+     * Called when an application explicitly calls fsync(). Performs a
+     * synchronous upload so the caller can trust that data has reached
+     * the server.  Normal close() (fuseRelease) is non-blocking and
+     * defers the upload to DirtySyncWorker.
+     */
+    static int fuseFsync(const char* path, int datasync, struct fuse_file_info* fi);
 
     /**
      * @brief Create new directory
@@ -572,8 +579,7 @@ class FuseDriver : public QObject {
     /**
      * @brief Set file timestamps (M5 no-op stub)
      */
-    static int fuseUtimens(const char* path, const struct timespec tv[2],
-                           struct fuse_file_info* fi);
+    static int fuseUtimens(const char* path, const struct timespec tv[2], struct fuse_file_info* fi);
 
     // ========================================================================
     // Internal Helper Methods
@@ -642,6 +648,13 @@ class FuseDriver : public QObject {
      * @return true if the file was found and marked dirty
      */
     bool markOpenFileDirty(uint64_t fh);
+
+    /**
+     * @brief Mark an open file as clean (successfully synced)
+     * @param fh File handle from FUSE
+     * @return true if the file was found and marked clean
+     */
+    bool markOpenFileClean(uint64_t fh);
 
     /**
      * @brief Unregister an open file handle

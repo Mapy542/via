@@ -38,11 +38,12 @@
 #include <QTimer>
 #include <QWaitCondition>
 
+#include "api/DriveFile.h"
+
 // Forward declarations
 class FileCache;
 class GoogleDriveClient;
 class SyncDatabase;
-class DriveFile;
 struct DirtyFileEntry;
 
 /**
@@ -61,11 +62,11 @@ enum class DirtySyncWorkerState {
  * @brief Result of an upload operation
  */
 struct UploadResult {
-    QString fileId;       ///< File ID that was uploaded
-    QString path;         ///< File path
-    bool success;         ///< Whether upload succeeded
-    QString errorMessage; ///< Error message if failed
-    QDateTime uploadedAt; ///< When upload completed
+    QString fileId;        ///< File ID that was uploaded
+    QString path;          ///< File path
+    bool success;          ///< Whether upload succeeded
+    QString errorMessage;  ///< Error message if failed
+    QDateTime uploadedAt;  ///< When upload completed
 };
 
 Q_DECLARE_METATYPE(DirtySyncWorkerState)
@@ -104,8 +105,8 @@ class DirtySyncWorker : public QObject {
      * @param database Pointer to sync database
      * @param parent Parent QObject
      */
-    explicit DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient,
-                             SyncDatabase* database, QObject* parent = nullptr);
+    explicit DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient, SyncDatabase* database,
+                             QObject* parent = nullptr);
 
     ~DirtySyncWorker() override;
 
@@ -291,8 +292,7 @@ class DirtySyncWorker : public QObject {
      * @param fileId File ID associated with the error
      * @param localPath Local path associated with the request
      */
-    void onUploadErrorDetailed(const QString& operation, const QString& errorMsg,
-                               int httpStatus, const QString& fileId,
+    void onUploadErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
                                const QString& localPath);
 
    private:
@@ -348,6 +348,7 @@ class DirtySyncWorker : public QObject {
     QWaitCondition m_uploadCondition;
     bool m_uploadSuccess;
     QString m_uploadError;
+    DriveFile m_lastUploadedFile;  ///< Populated by onFileUploaded for metadata update
 
     // Retry tracking  (GPT5.3 #8)
     QMap<QString, int> m_retryCounts;
