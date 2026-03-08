@@ -13,7 +13,7 @@ jobs:
         steps:
             - uses: 'actions/checkout@v4'
               with:
-                  repository: Mapy542/Via
+                  repository: Mapy542/via
 
             - name: 'TODO to Issue'
               uses: 'alstr/todo-to-issue-action@v5'
