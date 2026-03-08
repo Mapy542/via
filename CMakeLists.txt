@@ -29,6 +29,9 @@ find_package(Qt6 REQUIRED COMPONENTS
     Test
 )
 
+# Find QtKeychain (OS keyring integration)
+find_package(Qt6Keychain REQUIRED)
+
 # Find FUSE3
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3)
@@ -39,6 +42,7 @@ set(SOURCES
     src/ui/MainWindow.cpp
     src/ui/SettingsWindow.cpp
     src/ui/SystemTrayManager.cpp
+    src/ui/ConflictDialog.cpp
     src/auth/GoogleAuthManager.cpp
     src/auth/TokenStorage.cpp
     src/api/GoogleDriveClient.cpp
@@ -69,6 +73,7 @@ set(HEADERS
     src/ui/MainWindow.h
     src/ui/SettingsWindow.h
     src/ui/SystemTrayManager.h
+    src/ui/ConflictDialog.h
     src/auth/GoogleAuthManager.h
     src/auth/TokenStorage.h
     src/api/GoogleDriveClient.h
@@ -119,6 +124,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::DBus
     Qt6::Concurrent
     PkgConfig::FUSE3
+    qt6keychain
 )
 
 # Include directories
@@ -152,7 +158,7 @@ install(FILES res/icons/via.svg
 option(BUILD_TESTS "Build unit tests" ON)
 
 if(BUILD_TESTS)
-    enable_testing()
+    include(CTest)
 
     configure_file(
         ${CMAKE_SOURCE_DIR}/CTestCustom.cmake
@@ -173,6 +179,7 @@ if(BUILD_TESTS)
         Qt6::Widgets
         Qt6::Test
         PkgConfig::FUSE3
+        qt6keychain
     )
     target_include_directories(via_testable PUBLIC
         ${CMAKE_SOURCE_DIR}/src

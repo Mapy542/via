@@ -3,13 +3,14 @@
  * @brief Dialog for managing sync conflicts
  *
  * Provides UI for viewing and resolving file synchronization conflicts.
+ * Uses the canonical ConflictInfo struct and ConflictResolutionStrategy enum
+ * from ChangeProcessor.h.
  */
 
 #ifndef CONFLICTDIALOG_H
 #define CONFLICTDIALOG_H
 
 #include <QComboBox>
-#include <QDateTime>
 #include <QDialog>
 #include <QGroupBox>
 #include <QLabel>
@@ -17,20 +18,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
-/**
- * @struct ConflictInfo
- * @brief Information about a file conflict
- */
-struct ConflictInfo {
-    QString fileName;          ///< Original file name
-    QString localPath;         ///< Local file path
-    QString remotePath;        ///< Remote file path
-    QDateTime localModified;   ///< Local modification time
-    QDateTime remoteModified;  ///< Remote modification time
-    qint64 localSize;          ///< Local file size in bytes
-    qint64 remoteSize;         ///< Remote file size in bytes
-    QString conflictCopyPath;  ///< Path to conflict copy
-};
+#include "sync/ChangeProcessor.h"
 
 /**
  * @class ConflictDialog
@@ -46,17 +34,6 @@ class ConflictDialog : public QDialog {
 
    public:
     /**
-     * @brief Resolution strategy for conflicts
-     */
-    enum ResolutionStrategy {
-        KeepLocal,   ///< Keep local version, overwrite remote
-        KeepRemote,  ///< Keep remote version, overwrite local
-        KeepBoth,    ///< Keep both versions (create copy)
-        Manual       ///< Manual resolution by user
-    };
-    Q_ENUM(ResolutionStrategy)
-
-    /**
      * @brief Construct the conflict dialog
      * @param parent Parent widget
      */
@@ -66,7 +43,7 @@ class ConflictDialog : public QDialog {
 
     /**
      * @brief Add a conflict to the list
-     * @param conflict Conflict information
+     * @param conflict Conflict information (from ChangeProcessor)
      */
     void addConflict(const ConflictInfo& conflict);
 
@@ -84,10 +61,10 @@ class ConflictDialog : public QDialog {
    signals:
     /**
      * @brief Emitted when a conflict is resolved
-     * @param fileName Name of the resolved file
+     * @param localPath Path of the resolved file
      * @param strategy Resolution strategy used
      */
-    void conflictResolved(const QString& fileName, ResolutionStrategy strategy);
+    void conflictResolved(const QString& localPath, ConflictResolutionStrategy strategy);
 
     /**
      * @brief Emitted when all conflicts are resolved
@@ -99,12 +76,10 @@ class ConflictDialog : public QDialog {
     void onResolveAllClicked();
     void onSelectionChanged();
     void onOpenLocalClicked();
-    void onOpenRemoteClicked();
 
    private:
     void setupUi();
     void updateButtonStates();
-    QString formatFileSize(qint64 bytes) const;
 
     QList<ConflictInfo> m_conflicts;
 
@@ -118,7 +93,6 @@ class ConflictDialog : public QDialog {
     QLabel* m_localInfoLabel;
     QLabel* m_remoteInfoLabel;
     QPushButton* m_openLocalButton;
-    QPushButton* m_openRemoteButton;
 
     // Resolution group
     QGroupBox* m_resolutionGroup;

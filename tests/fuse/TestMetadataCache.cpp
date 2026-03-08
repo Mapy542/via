@@ -21,8 +21,7 @@
 class FakeDriveClientMC : public GoogleDriveClient {
     Q_OBJECT
    public:
-    explicit FakeDriveClientMC(QObject* parent = nullptr)
-        : GoogleDriveClient(nullptr, parent) {}
+    explicit FakeDriveClientMC(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
     void downloadFile(const QString&, const QString&) override {}
     void uploadFile(const QString&, const QString&, const QString&) override {}
@@ -67,8 +66,7 @@ class TestMetadataCache : public QObject {
     MetadataCache* m_cache = nullptr;
 
     static FuseFileMetadata makeFile(const QString& id, const QString& path,
-                                     const QString& parentId = "root",
-                                     qint64 size = 100);
+                                     const QString& parentId = "root", qint64 size = 100);
     static FuseFileMetadata makeFolder(const QString& id, const QString& path,
                                        const QString& parentId = "root");
 };
@@ -145,66 +143,65 @@ void TestMetadataCache::cleanup() {
 // Tests — CRUD
 // ---------------------------------------------------------------------------
 void TestMetadataCache::testSetAndGetByPath() {
-    auto f = makeFile("id1", "/docs/readme.txt");
+    auto f = makeFile("id1", "docs/readme.txt");
     m_cache->setMetadata(f);
 
-    auto got = m_cache->getMetadataByPath("/docs/readme.txt");
+    auto got = m_cache->getMetadataByPath("docs/readme.txt");
     QVERIFY(got.isValid());
     QCOMPARE(got.fileId, QString("id1"));
     QCOMPARE(got.size, qint64(100));
 }
 
 void TestMetadataCache::testGetByFileId() {
-    auto f = makeFile("id2", "/data.bin");
+    auto f = makeFile("id2", "data.bin");
     m_cache->setMetadata(f);
 
     auto got = m_cache->getMetadataByFileId("id2");
     QVERIFY(got.isValid());
-    QCOMPARE(got.path, QString("/data.bin"));
+    QCOMPARE(got.path, QString("data.bin"));
 }
 
 void TestMetadataCache::testRemoveMetadata() {
-    auto f = makeFile("id3", "/temp.txt");
+    auto f = makeFile("id3", "temp.txt");
     m_cache->setMetadata(f);
-    QVERIFY(m_cache->getMetadataByPath("/temp.txt").isValid());
+    QVERIFY(m_cache->getMetadataByPath("temp.txt").isValid());
 
-    m_cache->removeByPath("/temp.txt");
-    QVERIFY(!m_cache->getMetadataByPath("/temp.txt").isValid());
+    m_cache->removeByPath("temp.txt");
+    QVERIFY(!m_cache->getMetadataByPath("temp.txt").isValid());
 }
 
 void TestMetadataCache::testClearAll() {
-    m_cache->setMetadata(makeFile("a", "/a.txt"));
-    m_cache->setMetadata(makeFile("b", "/b.txt"));
+    m_cache->setMetadata(makeFile("a", "a.txt"));
+    m_cache->setMetadata(makeFile("b", "b.txt"));
 
     m_cache->clearAll();
 
-    QVERIFY(!m_cache->getMetadataByPath("/a.txt").isValid());
-    QVERIFY(!m_cache->getMetadataByPath("/b.txt").isValid());
+    QVERIFY(!m_cache->getMetadataByPath("a.txt").isValid());
+    QVERIFY(!m_cache->getMetadataByPath("b.txt").isValid());
 }
 
 void TestMetadataCache::testSetMetadataBatch() {
     QList<FuseFileMetadata> batch;
-    batch << makeFile("x1", "/x/1.txt", "xdir")
-          << makeFile("x2", "/x/2.txt", "xdir");
+    batch << makeFile("x1", "x/1.txt", "xdir") << makeFile("x2", "x/2.txt", "xdir");
 
     m_cache->setMetadataBatch(batch);
 
-    QVERIFY(m_cache->getMetadataByPath("/x/1.txt").isValid());
-    QVERIFY(m_cache->getMetadataByPath("/x/2.txt").isValid());
+    QVERIFY(m_cache->getMetadataByPath("x/1.txt").isValid());
+    QVERIFY(m_cache->getMetadataByPath("x/2.txt").isValid());
 }
 
 void TestMetadataCache::testGetChildren() {
-    auto dir = makeFolder("dir1", "/photos");
-    auto c1 = makeFile("p1", "/photos/a.jpg", "dir1");
-    auto c2 = makeFile("p2", "/photos/b.jpg", "dir1");
-    auto outer = makeFile("o1", "/other.txt");
+    auto dir = makeFolder("dir1", "photos");
+    auto c1 = makeFile("p1", "photos/a.jpg", "dir1");
+    auto c2 = makeFile("p2", "photos/b.jpg", "dir1");
+    auto outer = makeFile("o1", "other.txt");
 
     m_cache->setMetadata(dir);
     m_cache->setMetadata(c1);
     m_cache->setMetadata(c2);
     m_cache->setMetadata(outer);
 
-    auto children = m_cache->getChildren("/photos");
+    auto children = m_cache->getChildren("photos");
     QCOMPARE(children.size(), 2);
 
     QSet<QString> ids;
@@ -217,7 +214,7 @@ void TestMetadataCache::testGetChildren() {
 // Persistence — recreate cache from DB
 // ---------------------------------------------------------------------------
 void TestMetadataCache::testPersistence_SurvivesReinit() {
-    auto f = makeFile("persist1", "/saved.txt");
+    auto f = makeFile("persist1", "saved.txt");
     m_cache->setMetadata(f);
 
     // Destroy in-memory cache
@@ -227,7 +224,7 @@ void TestMetadataCache::testPersistence_SurvivesReinit() {
     m_cache = new MetadataCache(m_db, m_driveClient, this);
     QVERIFY(m_cache->initialize());
 
-    auto got = m_cache->getMetadataByPath("/saved.txt");
+    auto got = m_cache->getMetadataByPath("saved.txt");
     QVERIFY(got.isValid());
     QCOMPARE(got.fileId, QString("persist1"));
 }
@@ -236,7 +233,7 @@ void TestMetadataCache::testPersistence_SurvivesReinit() {
 // Edge cases — misses
 // ---------------------------------------------------------------------------
 void TestMetadataCache::testGetByPath_UnknownReturnsInvalid() {
-    QVERIFY(!m_cache->getMetadataByPath("/nonexistent").isValid());
+    QVERIFY(!m_cache->getMetadataByPath("nonexistent").isValid());
 }
 
 void TestMetadataCache::testGetByFileId_UnknownReturnsInvalid() {

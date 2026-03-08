@@ -243,7 +243,8 @@ class SyncDatabase : public QObject {
      * @param remoteMd5 Remote MD5 hash
      * @param localHash Local content hash
      */
-    void setContentHashesAtSync(const QString& localPath, const QString& remoteMd5, const QString& localHash);
+    void setContentHashesAtSync(const QString& localPath, const QString& remoteMd5,
+                                const QString& localHash);
 
     /**
      * @brief Get all synced files
@@ -262,9 +263,8 @@ class SyncDatabase : public QObject {
 
     /**
      * @brief Get the stored change page token
-     * @return Change page token or empty string
+     * @return Change page token or empty string if not set
      */
-    // TODO: Figure out why no key in settings table!! (Saved in setting?? change to db for final)
     QString getChangeToken() const;
 
     /**
@@ -319,7 +319,8 @@ class SyncDatabase : public QObject {
      * @param conflictPath Optional conflict copy path
      * @return Conflict record ID or -1 on failure
      */
-    int upsertConflictRecord(const QString& localPath, const QString& fileId, const QString& conflictPath = QString());
+    int upsertConflictRecord(const QString& localPath, const QString& fileId,
+                             const QString& conflictPath = QString());
 
     /**
      * @brief Append a version entry to a conflict record

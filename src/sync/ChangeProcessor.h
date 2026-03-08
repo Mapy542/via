@@ -98,8 +98,9 @@ class ChangeProcessor : public QObject {
      * @param driveClient Pointer to the Google Drive client (for conflict checks)
      * @param parent Parent object
      */
-    explicit ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* syncActionQueue, SyncDatabase* database,
-                             GoogleDriveClient* driveClient, QObject* parent = nullptr);
+    explicit ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* syncActionQueue,
+                             SyncDatabase* database, GoogleDriveClient* driveClient,
+                             QObject* parent = nullptr);
 
     ~ChangeProcessor() override;
 
@@ -172,9 +173,6 @@ class ChangeProcessor : public QObject {
      * @return Absolute path to the sync folder
      */
     QString syncFolder() const;
-
-    // Configuration - public for sharing with SyncActionThread
-    QString m_syncFolder;
 
     /**
      * @brief Clear all in-memory state (conflicts, files-in-operation)
@@ -381,6 +379,7 @@ class ChangeProcessor : public QObject {
     // Configuration
     ConflictResolutionStrategy m_conflictStrategy;
     SyncSettings m_cachedSettings;
+    QString m_syncFolder;
 
     // Files currently being processed by Sync Action Thread
     QSet<QString> m_filesInOperation;

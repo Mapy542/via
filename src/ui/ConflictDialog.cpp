@@ -1,12 +1,15 @@
 /**
  * @file ConflictDialog.cpp
  * @brief Implementation of the conflict dialog
+ *
+ * MIS-01: Adapted to use the canonical ConflictInfo from ChangeProcessor.h
+ * and ConflictResolutionStrategy enum. Removed duplicate struct definitions.
  */
 
 #include "ConflictDialog.h"
 
-#include <QDateTime>
 #include <QDesktopServices>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMessageBox>
@@ -37,7 +40,7 @@ void ConflictDialog::setupUi() {
     m_conflictTable = new QTableWidget(this);
     m_conflictTable->setColumnCount(4);
     m_conflictTable->setHorizontalHeaderLabels(
-        {"File Name", "Local Modified", "Remote Modified", "Status"});
+        {"File", "Local Modified", "Remote Modified", "Status"});
     m_conflictTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_conflictTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_conflictTable->horizontalHeader()->setStretchLastSection(true);
@@ -61,18 +64,12 @@ void ConflictDialog::setupUi() {
     localLayout->addWidget(m_openLocalButton);
     detailsLayout->addLayout(localLayout);
 
-    QHBoxLayout* remoteLayout = new QHBoxLayout();
     m_remoteInfoLabel = new QLabel("Remote: Select a conflict to view details", this);
-    m_openRemoteButton = new QPushButton("Open Remote", this);
-    m_openRemoteButton->setEnabled(false);
-    remoteLayout->addWidget(m_remoteInfoLabel, 1);
-    remoteLayout->addWidget(m_openRemoteButton);
-    detailsLayout->addLayout(remoteLayout);
+    detailsLayout->addWidget(m_remoteInfoLabel);
 
     m_mainLayout->addWidget(m_detailsGroup);
 
     connect(m_openLocalButton, &QPushButton::clicked, this, &ConflictDialog::onOpenLocalClicked);
-    connect(m_openRemoteButton, &QPushButton::clicked, this, &ConflictDialog::onOpenRemoteClicked);
 
     // Resolution group
     m_resolutionGroup = new QGroupBox("Resolution", this);
@@ -81,9 +78,14 @@ void ConflictDialog::setupUi() {
     resolutionLayout->addWidget(new QLabel("Strategy:", this));
 
     m_resolutionCombo = new QComboBox(this);
-    m_resolutionCombo->addItem("Keep local version", KeepLocal);
-    m_resolutionCombo->addItem("Keep remote version", KeepRemote);
-    m_resolutionCombo->addItem("Keep both versions (create copy)", KeepBoth);
+    m_resolutionCombo->addItem("Keep local version",
+                               static_cast<int>(ConflictResolutionStrategy::KeepLocal));
+    m_resolutionCombo->addItem("Keep remote version",
+                               static_cast<int>(ConflictResolutionStrategy::KeepRemote));
+    m_resolutionCombo->addItem("Keep both versions (create copy)",
+                               static_cast<int>(ConflictResolutionStrategy::KeepBoth));
+    m_resolutionCombo->addItem("Keep newest version",
+                               static_cast<int>(ConflictResolutionStrategy::KeepNewest));
     resolutionLayout->addWidget(m_resolutionCombo);
 
     resolutionLayout->addStretch();
@@ -118,17 +120,27 @@ void ConflictDialog::addConflict(const ConflictInfo& conflict) {
     int row = m_conflictTable->rowCount();
     m_conflictTable->insertRow(row);
 
-    QTableWidgetItem* nameItem = new QTableWidgetItem(conflict.fileName);
+    QString displayName = QFileInfo(conflict.localPath).fileName();
+    if (displayName.isEmpty()) {
+        displayName = conflict.localPath;
+    }
+
+    QTableWidgetItem* nameItem = new QTableWidgetItem(displayName);
     nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+    nameItem->setToolTip(conflict.localPath);
     m_conflictTable->setItem(row, 0, nameItem);
 
     QTableWidgetItem* localItem =
-        new QTableWidgetItem(conflict.localModified.toString("yyyy-MM-dd hh:mm:ss"));
+        new QTableWidgetItem(conflict.localModifiedTime.isValid()
+                                 ? conflict.localModifiedTime.toString("yyyy-MM-dd hh:mm:ss")
+                                 : "Unknown");
     localItem->setFlags(localItem->flags() & ~Qt::ItemIsEditable);
     m_conflictTable->setItem(row, 1, localItem);
 
     QTableWidgetItem* remoteItem =
-        new QTableWidgetItem(conflict.remoteModified.toString("yyyy-MM-dd hh:mm:ss"));
+        new QTableWidgetItem(conflict.remoteModifiedTime.isValid()
+                                 ? conflict.remoteModifiedTime.toString("yyyy-MM-dd hh:mm:ss")
+                                 : "Unknown");
     remoteItem->setFlags(remoteItem->flags() & ~Qt::ItemIsEditable);
     m_conflictTable->setItem(row, 2, remoteItem);
 
@@ -154,19 +166,14 @@ void ConflictDialog::onResolveSelectedClicked() {
         return;
     }
 
-    ResolutionStrategy strategy =
-        static_cast<ResolutionStrategy>(m_resolutionCombo->currentData().toInt());
+    auto strategy =
+        static_cast<ConflictResolutionStrategy>(m_resolutionCombo->currentData().toInt());
 
-    ConflictInfo& conflict = m_conflicts[row];
+    const ConflictInfo& conflict = m_conflicts[row];
 
-    emit conflictResolved(conflict.fileName, strategy);
+    emit conflictResolved(conflict.localPath, strategy);
 
-    // Update table
-    QTableWidgetItem* statusItem = m_conflictTable->item(row, 3);
-    statusItem->setText("Resolved");
-    statusItem->setForeground(Qt::darkGreen);
-
-    // Remove from list
+    // Remove from list and table
     m_conflicts.removeAt(row);
     m_conflictTable->removeRow(row);
 
@@ -193,12 +200,12 @@ void ConflictDialog::onResolveAllClicked() {
         return;
     }
 
-    ResolutionStrategy strategy =
-        static_cast<ResolutionStrategy>(m_resolutionCombo->currentData().toInt());
+    auto strategy =
+        static_cast<ConflictResolutionStrategy>(m_resolutionCombo->currentData().toInt());
 
     while (!m_conflicts.isEmpty()) {
         const ConflictInfo& conflict = m_conflicts.first();
-        emit conflictResolved(conflict.fileName, strategy);
+        emit conflictResolved(conflict.localPath, strategy);
         m_conflicts.removeFirst();
     }
 
@@ -216,22 +223,26 @@ void ConflictDialog::onSelectionChanged() {
     if (row >= 0 && row < m_conflicts.count()) {
         const ConflictInfo& conflict = m_conflicts[row];
 
-        m_localInfoLabel->setText(QString("Local: %1 (%2)")
-                                      .arg(conflict.localPath)
-                                      .arg(formatFileSize(conflict.localSize)));
+        m_localInfoLabel->setText(
+            QString("Local: %1 (modified: %2)")
+                .arg(conflict.localPath,
+                     conflict.localModifiedTime.isValid()
+                         ? conflict.localModifiedTime.toString("yyyy-MM-dd hh:mm:ss")
+                         : "Unknown"));
 
-        m_remoteInfoLabel->setText(QString("Remote: %1 (%2)")
-                                       .arg(conflict.remotePath)
-                                       .arg(formatFileSize(conflict.remoteSize)));
+        m_remoteInfoLabel->setText(
+            QString("Remote: fileId=%1 (modified: %2)")
+                .arg(conflict.fileId,
+                     conflict.remoteModifiedTime.isValid()
+                         ? conflict.remoteModifiedTime.toString("yyyy-MM-dd hh:mm:ss")
+                         : "Unknown"));
 
         m_openLocalButton->setEnabled(true);
-        m_openRemoteButton->setEnabled(true);
         m_resolveSelectedButton->setEnabled(true);
     } else {
         m_localInfoLabel->setText("Local: Select a conflict to view details");
         m_remoteInfoLabel->setText("Remote: Select a conflict to view details");
         m_openLocalButton->setEnabled(false);
-        m_openRemoteButton->setEnabled(false);
         m_resolveSelectedButton->setEnabled(false);
     }
 }
@@ -243,37 +254,9 @@ void ConflictDialog::onOpenLocalClicked() {
     }
 }
 
-void ConflictDialog::onOpenRemoteClicked() {
-    int row = m_conflictTable->currentRow();
-    if (row >= 0 && row < m_conflicts.count()) {
-        // For remote, we'd typically open in browser
-        // This is a placeholder - actual implementation would need the web URL
-        QMessageBox::information(this, "Open Remote",
-                                 "Opening remote file in Google Drive web interface...\n"
-                                 "Path: " +
-                                     m_conflicts[row].remotePath);
-    }
-}
-
 void ConflictDialog::updateButtonStates() {
     bool hasConflicts = !m_conflicts.isEmpty();
     m_resolveAllButton->setEnabled(hasConflicts);
 
     onSelectionChanged();  // Update selection-dependent buttons
-}
-
-QString ConflictDialog::formatFileSize(qint64 bytes) const {
-    const qint64 KB = 1024;
-    const qint64 MB = 1024 * KB;
-    const qint64 GB = 1024 * MB;
-
-    if (bytes >= GB) {
-        return QString("%1 GB").arg(bytes / static_cast<double>(GB), 0, 'f', 2);
-    } else if (bytes >= MB) {
-        return QString("%1 MB").arg(bytes / static_cast<double>(MB), 0, 'f', 2);
-    } else if (bytes >= KB) {
-        return QString("%1 KB").arg(bytes / static_cast<double>(KB), 0, 'f', 2);
-    } else {
-        return QString("%1 bytes").arg(bytes);
-    }
 }

@@ -92,8 +92,6 @@ class LocalChangeWatcher : public QObject {
     State state() const;
 
    public slots:
-    // TODO: All components have the same start/stop/pause/resume interface - make a controls Macro
-    // which can be reused in all?
     /**
      * @brief Start watching the sync folder
      *

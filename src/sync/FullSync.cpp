@@ -22,6 +22,7 @@
 #include "SyncSettings.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
+#include "utils/PathUtils.h"
 
 FullSync::FullSync(ChangeQueue* changeQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
                    ChangeProcessor* changeProcessor, QObject* parent)
@@ -121,7 +122,8 @@ void FullSync::startInternal(Mode mode) {
         }
     }
 
-    qInfo() << "FullSync started for folder:" << m_syncFolder << (m_mode == Mode::LocalOnly ? "(local-only)" : "");
+    qInfo() << "FullSync started for folder:" << m_syncFolder
+            << (m_mode == Mode::LocalOnly ? "(local-only)" : "");
     emit stateChanged(State::ScanningLocal);
 
     // Start scanning local files (use singleShot to avoid blocking)
@@ -167,7 +169,8 @@ void FullSync::scanLocalFiles() {
     emit progressUpdated("Scanning local files...", 0, 0);
 
     // Iterate through all files and directories in the sync folder
-    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
 
     int count = 0;
     while (it.hasNext()) {
@@ -366,9 +369,11 @@ void FullSync::buildRemoteFolderStructure() {
 
     unsigned long iterations = 0;
     std::vector<FileTreeNode*> currentBranchDepthParents;
-    currentBranchDepthParents.push_back(m_remoteTree);  // list of parent IDs at current depth to reduce search time
+    currentBranchDepthParents.push_back(
+        m_remoteTree);  // list of parent IDs at current depth to reduce search time
 
-    unsigned long maxIterations = m_allRemoteItems.size() * 10;  // arbitrary limit to avoid infinite loops
+    unsigned long maxIterations =
+        m_allRemoteItems.size() * 10;  // arbitrary limit to avoid infinite loops
     while (!m_allRemoteItems.isEmpty() && iterations < maxIterations) {
         // store all items added this iteration to remove them after
         QList<qsizetype> itemsToRemove;
@@ -382,8 +387,11 @@ void FullSync::buildRemoteFolderStructure() {
                     FileTreeNode* newNode = new FileTreeNode();
                     newNode->name = file.name;
                     newNode->isFolder = file.isFolder;
-                    newNode->relativePath =
-                        parentNode->relativePath.isEmpty() ? file.name : parentNode->relativePath + "/" + file.name;
+                    // GPT-6: Sanitize remote name before building local path
+                    QString safeName = PathUtils::sanitizeRemoteFileName(file.name);
+                    newNode->relativePath = parentNode->relativePath.isEmpty()
+                                                ? safeName
+                                                : parentNode->relativePath + "/" + safeName;
                     newNode->modifiedTime = file.modifiedTime;
                     newNode->fileId = file.id;
                     parentNode->children.insert(file.id, newNode);
@@ -457,15 +465,17 @@ void FullSync::finishSync() {
         m_discoveredLocalPaths.clear();
     }
 
-    // TODO: remaining remote count items are ignored orphans. Change what is reported here
-    qInfo() << "FullSync complete: local=" << localCount << "remote=" << remoteCount;
+    // LOG-04: Subtract orphaned items from remote count so we report actual synced files
+    int effectiveRemoteCount = remoteCount - m_orphanCount;
+    qInfo() << "FullSync complete: local=" << localCount << "remote=" << effectiveRemoteCount;
     if (m_orphanCount > 0) {
         qInfo() << "FullSync ignored orphaned remote items:" << m_orphanCount;
     }
 
     emit stateChanged(State::Complete);
-    emit progressUpdated("Full sync complete", localCount + remoteCount, localCount + remoteCount);
-    emit completed(localCount, remoteCount);
+    emit progressUpdated("Full sync complete", localCount + effectiveRemoteCount,
+                         localCount + effectiveRemoteCount);
+    emit completed(localCount, effectiveRemoteCount);
 
     // Note: The ChangeProcessor remains in initial sync mode until all queued
     // items are processed. The initial sync mode causes the conflict resolver

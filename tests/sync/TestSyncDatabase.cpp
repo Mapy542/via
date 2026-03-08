@@ -365,12 +365,20 @@ void TestSyncDatabase::testMigration_V1ToV3() {
 
     QCOMPARE(m_db->getLocalPath("file-1"), QString("migrate/file.txt"));
 
+    // Verify the version was updated by querying the DB file directly
     {
-        QSqlDatabase dbCheck = QSqlDatabase::database("sync_connection");
-        QSqlQuery versionQuery(dbCheck);
-        QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
-        QVERIFY(versionQuery.next());
-        QCOMPARE(versionQuery.value(0).toInt(), 5);
+        const QString checkConn = QStringLiteral("migration_check_v1");
+        {
+            QSqlDatabase dbCheck = QSqlDatabase::addDatabase("QSQLITE", checkConn);
+            dbCheck.setDatabaseName(dbPath);
+            QVERIFY(dbCheck.open());
+            QSqlQuery versionQuery(dbCheck);
+            QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
+            QVERIFY(versionQuery.next());
+            QCOMPARE(versionQuery.value(0).toInt(), 5);
+            dbCheck.close();
+        }
+        QSqlDatabase::removeDatabase(checkConn);
     }
 
     m_db->close();
@@ -459,12 +467,20 @@ void TestSyncDatabase::testMigration_V2ToV3() {
 
     QCOMPARE(m_db->getLocalPath("file-2"), QString("migrate2/file.txt"));
 
+    // Verify the version was updated by querying the DB file directly
     {
-        QSqlDatabase dbCheck = QSqlDatabase::database("sync_connection");
-        QSqlQuery versionQuery(dbCheck);
-        QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
-        QVERIFY(versionQuery.next());
-        QCOMPARE(versionQuery.value(0).toInt(), 5);
+        const QString checkConn = QStringLiteral("migration_check_v2");
+        {
+            QSqlDatabase dbCheck = QSqlDatabase::addDatabase("QSQLITE", checkConn);
+            dbCheck.setDatabaseName(dbPath);
+            QVERIFY(dbCheck.open());
+            QSqlQuery versionQuery(dbCheck);
+            QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
+            QVERIFY(versionQuery.next());
+            QCOMPARE(versionQuery.value(0).toInt(), 5);
+            dbCheck.close();
+        }
+        QSqlDatabase::removeDatabase(checkConn);
     }
 
     m_db->close();

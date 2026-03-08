@@ -1,6 +1,15 @@
 /**
  * @file GoogleDriveClient.cpp
  * @brief Implementation of Google Drive REST API client
+ *
+ * TODO (ROB-01): Implement API rate limiting. Google Drive allows ~12,000 queries/min per
+ * user. Rapid full-sync or large Drives can hit this, causing 403/429 errors. Add a
+ * token-bucket or leaky-bucket limiter here so all callers are automatically throttled.
+ *
+ * TODO (CON-01): Multiple methods below use nested QEventLoop::exec() to block on network
+ * replies. Mitigated with 30-second timeouts on all blocking loops and a re-entrancy guard
+ * (m_inBlockingCall) that prevents nested event-loop entry. A full refactor to
+ * QtConcurrent/QFuture would eliminate nested loops entirely.
  */
 
 #include "GoogleDriveClient.h"
@@ -11,12 +20,16 @@
 #include <QHttpMultiPart>
 #include <QMimeDatabase>
 #include <QMimeType>
+#include <QTimer>
 #include <QUrlQuery>
 
 #include "auth/GoogleAuthManager.h"
 
 const QString GoogleDriveClient::API_BASE_URL = "https://www.googleapis.com/drive/v3";
 const QString GoogleDriveClient::UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3";
+
+// CON-02: 30-second timeout for blocking event loops
+static constexpr int BLOCKING_CALL_TIMEOUT_MS = 30000;
 
 namespace {
 void tagReply(QNetworkReply* reply, const QString& fileId, const QString& localPath) {
@@ -30,7 +43,9 @@ void tagReply(QNetworkReply* reply, const QString& fileId, const QString& localP
 }  // namespace
 
 GoogleDriveClient::GoogleDriveClient(GoogleAuthManager* authManager, QObject* parent)
-    : QObject(parent), m_authManager(authManager), m_networkManager(new QNetworkAccessManager(this)) {}
+    : QObject(parent),
+      m_authManager(authManager),
+      m_networkManager(new QNetworkAccessManager(this)) {}
 
 GoogleDriveClient::~GoogleDriveClient() = default;
 
@@ -81,8 +96,9 @@ void GoogleDriveClient::handleNetworkError(QNetworkReply* reply, const QString& 
 
         const QString lowered = errorMsg.toLower();
         const bool authLike403 =
-            (httpStatus == 403 && (lowered.contains("auth") || lowered.contains("token") ||
-                                   lowered.contains("permission") || lowered.contains("credential")));
+            (httpStatus == 403 &&
+             (lowered.contains("auth") || lowered.contains("token") ||
+              lowered.contains("permission") || lowered.contains("credential")));
         const bool isAuthFailure = (httpStatus == 401 || authLike403);
 
         if (isAuthFailure) {
@@ -102,7 +118,8 @@ void GoogleDriveClient::handleNetworkError(QNetworkReply* reply, const QString& 
             // main.cpp's cooldown-guarded handler can kick off a refresh for any
             // component that doesn't use the blocking ensureValidToken() path.
 
-            qInfo() << "Auth failure in" << operation << "(HTTP" << httpStatus << ") — attempting silent token refresh";
+            qInfo() << "Auth failure in" << operation << "(HTTP" << httpStatus
+                    << ") — attempting silent token refresh";
 
             if (m_authManager) {
                 m_authManager->ensureValidToken();
@@ -194,9 +211,10 @@ void GoogleDriveClient::listFiles(const QString& folderId, const QString& pageTo
         // List files in specific folder
         query.addQueryItem("q", QString("'%1' in parents and trashed = false").arg(folderId));
     }
-    query.addQueryItem("fields",
-                       "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,"
-                       "trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,shortcutDetails)");
+    query.addQueryItem(
+        "fields",
+        "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,"
+        "trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,shortcutDetails)");
     query.addQueryItem("pageSize", "100");
 
     if (!pageToken.isEmpty()) {
@@ -282,10 +300,13 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
 
     // Connect progress signal
     connect(reply, &QNetworkReply::downloadProgress, this,
-            [this, fileId](qint64 received, qint64 total) { emit downloadProgress(fileId, received, total); });
+            [this, fileId](qint64 received, qint64 total) {
+                emit downloadProgress(fileId, received, total);
+            });
 
     // Write data as it arrives
-    connect(reply, &QNetworkReply::readyRead, this, [reply, file]() { file->write(reply->readAll()); });
+    connect(reply, &QNetworkReply::readyRead, this,
+            [reply, file]() { file->write(reply->readAll()); });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, file, fileId, localPath]() {
         file->close();
@@ -302,7 +323,8 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
     });
 }
 
-void GoogleDriveClient::uploadFile(const QString& localPath, const QString& parentId, const QString& fileName) {
+void GoogleDriveClient::uploadFile(const QString& localPath, const QString& parentId,
+                                   const QString& fileName) {
     QFileInfo fileInfo(localPath);
     if (!fileInfo.exists()) {
         emit error("uploadFile", "File does not exist: " + localPath);
@@ -353,14 +375,17 @@ void GoogleDriveClient::uploadFile(const QString& localPath, const QString& pare
     multiPart->append(filePart);
 
     QNetworkRequest request = createRequest(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "multipart/related; boundary=" + multiPart->boundary());
+    request.setHeader(QNetworkRequest::ContentTypeHeader,
+                      "multipart/related; boundary=" + multiPart->boundary());
 
     QNetworkReply* reply = m_networkManager->post(request, multiPart);
     tagReply(reply, QString(), localPath);
     multiPart->setParent(reply);  // Delete multiPart with reply
 
     connect(reply, &QNetworkReply::uploadProgress, this,
-            [this, localPath](qint64 sent, qint64 total) { emit uploadProgress(localPath, sent, total); });
+            [this, localPath](qint64 sent, qint64 total) {
+                emit uploadProgress(localPath, sent, total);
+            });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -413,7 +438,9 @@ void GoogleDriveClient::updateFile(const QString& fileId, const QString& localPa
     file->setParent(reply);
 
     connect(reply, &QNetworkReply::uploadProgress, this,
-            [this, localPath](qint64 sent, qint64 total) { emit uploadProgress(localPath, sent, total); });
+            [this, localPath](qint64 sent, qint64 total) {
+                emit uploadProgress(localPath, sent, total);
+            });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -431,7 +458,8 @@ void GoogleDriveClient::updateFile(const QString& fileId, const QString& localPa
     });
 }
 
-void GoogleDriveClient::moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId) {
+void GoogleDriveClient::moveFile(const QString& fileId, const QString& newParentId,
+                                 const QString& oldParentId) {
     QUrl url(API_BASE_URL + "/files/" + fileId);
     QUrlQuery query;
     query.addQueryItem("addParents", newParentId);
@@ -472,8 +500,8 @@ void GoogleDriveClient::renameFile(const QString& fileId, const QString& newName
     metadata["name"] = newName;
 
     QNetworkRequest request = createRequest(url);
-    QNetworkReply* reply =
-        m_networkManager->sendCustomRequest(request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    QNetworkReply* reply = m_networkManager->sendCustomRequest(
+        request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     tagReply(reply, fileId, QString());
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, fileId]() {
@@ -491,6 +519,43 @@ void GoogleDriveClient::renameFile(const QString& fileId, const QString& newName
         emit fileRenamed(fileId);
         if (renamedFile.isValid()) {
             emit fileRenamedDetailed(renamedFile);
+        }
+    });
+}
+
+void GoogleDriveClient::moveAndRenameFile(const QString& fileId, const QString& newParentId,
+                                          const QString& oldParentId, const QString& newName) {
+    QUrl url(API_BASE_URL + "/files/" + fileId);
+    QUrlQuery query;
+    query.addQueryItem("addParents", newParentId);
+    query.addQueryItem("removeParents", oldParentId);
+    query.addQueryItem("fields", "id,name,mimeType,modifiedTime,parents");
+    url.setQuery(query);
+
+    QJsonObject metadata;
+    metadata["name"] = newName;
+
+    QNetworkRequest request = createRequest(url);
+    QNetworkReply* reply = m_networkManager->sendCustomRequest(
+        request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    tagReply(reply, fileId, QString());
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, fileId]() {
+        reply->deleteLater();
+
+        if (reply->error() != QNetworkReply::NoError) {
+            handleNetworkError(reply, "moveAndRenameFile");
+            return;
+        }
+
+        QByteArray data = reply->readAll();
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        DriveFile resultFile = parseFileJson(doc.object());
+
+        emit fileMoved(fileId);
+        emit fileRenamed(fileId);
+        if (resultFile.isValid()) {
+            emit fileMovedAndRenamedDetailed(resultFile);
         }
     });
 }
@@ -515,7 +580,8 @@ void GoogleDriveClient::deleteFile(const QString& fileId) {
     });
 }
 
-void GoogleDriveClient::createFolder(const QString& name, const QString& parentId, const QString& localPath) {
+void GoogleDriveClient::createFolder(const QString& name, const QString& parentId,
+                                     const QString& localPath) {
     QUrl url(API_BASE_URL + "/files");
     QUrlQuery query;
     query.addQueryItem("fields", "id,name,mimeType,modifiedTime,parents");
@@ -527,7 +593,8 @@ void GoogleDriveClient::createFolder(const QString& name, const QString& parentI
     metadata["parents"] = QJsonArray({parentId});
 
     QNetworkRequest request = createRequest(url);
-    QNetworkReply* reply = m_networkManager->post(request, QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    QNetworkReply* reply =
+        m_networkManager->post(request, QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     tagReply(reply, QString(), localPath);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -558,9 +625,10 @@ void GoogleDriveClient::listChanges(const QString& startPageToken) {
     QUrl url(API_BASE_URL + "/changes");
     QUrlQuery query;
     query.addQueryItem("pageToken", startPageToken);
-    query.addQueryItem("fields",
-                       "nextPageToken,newStartPageToken,changes(fileId,time,removed,file(id,name,mimeType,size,"
-                       "createdTime,modifiedTime,md5Checksum,parents,trashed,ownedByMe))");
+    query.addQueryItem(
+        "fields",
+        "nextPageToken,newStartPageToken,changes(fileId,time,removed,file(id,name,mimeType,size,"
+        "createdTime,modifiedTime,md5Checksum,parents,trashed,ownedByMe))");
     query.addQueryItem("pageSize", "100");
     url.setQuery(query);
 
@@ -655,6 +723,12 @@ void GoogleDriveClient::getAboutInfo() {
 }
 
 QJsonArray GoogleDriveClient::getParentsByFileId(const QString& fileId) {
+    if (m_inBlockingCall) {
+        qWarning() << "getParentsByFileId: re-entrant blocking call detected, aborting";
+        return {};
+    }
+    m_inBlockingCall = true;
+
     QUrl url(API_BASE_URL + "/files/" + fileId);
     QUrlQuery query;
     query.addQueryItem("fields", "parents");
@@ -663,15 +737,20 @@ QJsonArray GoogleDriveClient::getParentsByFileId(const QString& fileId) {
     QNetworkRequest request = createRequest(url);
     QNetworkReply* reply = m_networkManager->get(request);
 
-    // Use event loop to wait for reply (blocking call)
+    // CON-02: Blocking call with timeout
     QEventLoop loop;
+    QTimer::singleShot(BLOCKING_CALL_TIMEOUT_MS, &loop, &QEventLoop::quit);
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    m_inBlockingCall = false;
 
     QString parentId;
 
     QJsonArray parents;
-    if (reply->error() != QNetworkReply::NoError) {
+    if (!reply->isFinished()) {
+        qWarning() << "getParentsByFileId: timed out after" << BLOCKING_CALL_TIMEOUT_MS << "ms";
+        reply->abort();
+    } else if (reply->error() != QNetworkReply::NoError) {
         handleNetworkError(reply, "getParentByFileId");
     } else {
         QByteArray data = reply->readAll();
@@ -686,6 +765,12 @@ QJsonArray GoogleDriveClient::getParentsByFileId(const QString& fileId) {
 }
 
 DriveFile GoogleDriveClient::getFileMetadataBlocking(const QString& fileId) {
+    if (m_inBlockingCall) {
+        qWarning() << "getFileMetadataBlocking: re-entrant blocking call detected, aborting";
+        return {};
+    }
+    m_inBlockingCall = true;
+
     QUrl url(API_BASE_URL + "/files/" + fileId);
     QUrlQuery query;
     query.addQueryItem("fields", "id,name,parents,mimeType,modifiedTime,md5Checksum");
@@ -694,13 +779,19 @@ DriveFile GoogleDriveClient::getFileMetadataBlocking(const QString& fileId) {
     QNetworkRequest request = createRequest(url);
     QNetworkReply* reply = m_networkManager->get(request);
 
-    // Use event loop to wait for reply (blocking call)
+    // CON-02: Blocking call with timeout
     QEventLoop loop;
+    QTimer::singleShot(BLOCKING_CALL_TIMEOUT_MS, &loop, &QEventLoop::quit);
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    m_inBlockingCall = false;
 
     DriveFile file;
-    if (reply->error() != QNetworkReply::NoError) {
+    if (!reply->isFinished()) {
+        qWarning() << "getFileMetadataBlocking: timed out after" << BLOCKING_CALL_TIMEOUT_MS
+                   << "ms";
+        reply->abort();
+    } else if (reply->error() != QNetworkReply::NoError) {
         handleNetworkError(reply, "getFileMetadataBlocking");
     } else {
         QByteArray data = reply->readAll();
@@ -728,6 +819,11 @@ QString GoogleDriveClient::getFolderIdByPath(const QString& path) {
     if (path.isEmpty() || path == "/") {
         return "root";
     }
+    if (m_inBlockingCall) {
+        qWarning() << "getFolderIdByPath: re-entrant blocking call detected, aborting";
+        return {};
+    }
+    m_inBlockingCall = true;
 
     QStringList parts = path.split('/', Qt::SkipEmptyParts);
     QString parentId = "root";
@@ -735,9 +831,12 @@ QString GoogleDriveClient::getFolderIdByPath(const QString& path) {
     for (const QString& part : parts) {
         QUrl url(API_BASE_URL + "/files");
         QUrlQuery query;
+        // Escape single quotes to prevent query-syntax injection (SEC-02)
+        QString escapedPart = part;
+        escapedPart.replace(QLatin1Char('\''), QLatin1String("\\'"));
         query.addQueryItem("q", QString("name = '%1' and '%2' in parents and mimeType = "
                                         "'application/vnd.google-apps.folder' and trashed = false")
-                                    .arg(part)
+                                    .arg(escapedPart)
                                     .arg(parentId));
         query.addQueryItem("fields", "files(id,name)");
         url.setQuery(query);
@@ -745,14 +844,24 @@ QString GoogleDriveClient::getFolderIdByPath(const QString& path) {
         QNetworkRequest request = createRequest(url);
         QNetworkReply* reply = m_networkManager->get(request);
 
-        // Use event loop to wait for reply (blocking call)
+        // CON-02: Blocking call with timeout
         QEventLoop loop;
+        QTimer::singleShot(BLOCKING_CALL_TIMEOUT_MS, &loop, &QEventLoop::quit);
         connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
         loop.exec();
+
+        if (!reply->isFinished()) {
+            qWarning() << "getFolderIdByPath: timed out after" << BLOCKING_CALL_TIMEOUT_MS << "ms";
+            reply->abort();
+            reply->deleteLater();
+            m_inBlockingCall = false;
+            return QString();
+        }
 
         if (reply->error() != QNetworkReply::NoError) {
             handleNetworkError(reply, "getFolderIdByPath");
             reply->deleteLater();
+            m_inBlockingCall = false;
             return QString();
         }
 
@@ -773,10 +882,17 @@ QString GoogleDriveClient::getFolderIdByPath(const QString& path) {
         reply->deleteLater();
     }
 
+    m_inBlockingCall = false;
     return parentId;
 }
 
 QDateTime GoogleDriveClient::getRemoteModifiedTime(const QString& fileId) {
+    if (m_inBlockingCall) {
+        qWarning() << "getRemoteModifiedTime: re-entrant blocking call detected, aborting";
+        return {};
+    }
+    m_inBlockingCall = true;
+
     QUrl url(API_BASE_URL + "/files/" + fileId);
     QUrlQuery query;
     query.addQueryItem("fields", "modifiedTime");
@@ -785,13 +901,18 @@ QDateTime GoogleDriveClient::getRemoteModifiedTime(const QString& fileId) {
     QNetworkRequest request = createRequest(url);
     QNetworkReply* reply = m_networkManager->get(request);
 
-    // Use event loop to wait for reply (blocking call)
+    // CON-02: Blocking call with timeout
     QEventLoop loop;
+    QTimer::singleShot(BLOCKING_CALL_TIMEOUT_MS, &loop, &QEventLoop::quit);
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    m_inBlockingCall = false;
 
     QDateTime modifiedTime;
-    if (reply->error() != QNetworkReply::NoError) {
+    if (!reply->isFinished()) {
+        qWarning() << "getRemoteModifiedTime: timed out after" << BLOCKING_CALL_TIMEOUT_MS << "ms";
+        reply->abort();
+    } else if (reply->error() != QNetworkReply::NoError) {
         handleNetworkError(reply, "getRemoteModifiedTime");
     } else {
         QByteArray data = reply->readAll();
@@ -806,6 +927,12 @@ QDateTime GoogleDriveClient::getRemoteModifiedTime(const QString& fileId) {
 }
 
 QString GoogleDriveClient::getRootFolderId() {
+    if (m_inBlockingCall) {
+        qWarning() << "getRootFolderId: re-entrant blocking call detected, aborting";
+        return {};
+    }
+    m_inBlockingCall = true;
+
     // call files.get with fileId='root' to get the actual root folder ID
     QUrl url(API_BASE_URL + "/files/root");
     QUrlQuery query;
@@ -813,12 +940,17 @@ QString GoogleDriveClient::getRootFolderId() {
     url.setQuery(query);
     QNetworkRequest request = createRequest(url);
     QNetworkReply* reply = m_networkManager->get(request);
-    // Use event loop to wait for reply (blocking call)
+    // CON-02: Blocking call with timeout
     QEventLoop loop;
+    QTimer::singleShot(BLOCKING_CALL_TIMEOUT_MS, &loop, &QEventLoop::quit);
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    m_inBlockingCall = false;
     QString rootId;
-    if (reply->error() != QNetworkReply::NoError) {
+    if (!reply->isFinished()) {
+        qWarning() << "getRootFolderId: timed out after" << BLOCKING_CALL_TIMEOUT_MS << "ms";
+        reply->abort();
+    } else if (reply->error() != QNetworkReply::NoError) {
         handleNetworkError(reply, "getRootFolderId");
     } else {
         QByteArray data = reply->readAll();
@@ -831,6 +963,12 @@ QString GoogleDriveClient::getRootFolderId() {
 }
 
 QList<DriveFile> GoogleDriveClient::listFilesBlocking(const QString& folderId) {
+    if (m_inBlockingCall) {
+        qWarning() << "listFilesBlocking: re-entrant blocking call detected, aborting";
+        return {};
+    }
+    m_inBlockingCall = true;
+
     QList<DriveFile> allFiles;
     QString pageToken;
 
@@ -851,10 +989,11 @@ QList<DriveFile> GoogleDriveClient::listFilesBlocking(const QString& folderId) {
                                             "or mimeType = 'application/vnd.google-apps.shortcut')")
                                         .arg(folderId));
         }
-        query.addQueryItem("fields",
-                           "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,"
-                           "parents,trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,"
-                           "shortcutDetails)");
+        query.addQueryItem(
+            "fields",
+            "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,"
+            "parents,trashed,starred,shared,ownedByMe,webViewLink,webContentLink,iconLink,"
+            "shortcutDetails)");
         query.addQueryItem("pageSize", "1000");
 
         if (!pageToken.isEmpty()) {
@@ -866,10 +1005,18 @@ QList<DriveFile> GoogleDriveClient::listFilesBlocking(const QString& folderId) {
         QNetworkRequest request = createRequest(url);
         QNetworkReply* reply = m_networkManager->get(request);
 
-        // Use event loop to wait for reply (blocking call)
+        // CON-02: Blocking call with timeout
         QEventLoop loop;
+        QTimer::singleShot(BLOCKING_CALL_TIMEOUT_MS, &loop, &QEventLoop::quit);
         connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
         loop.exec();
+
+        if (!reply->isFinished()) {
+            qWarning() << "listFilesBlocking: timed out after" << BLOCKING_CALL_TIMEOUT_MS << "ms";
+            reply->abort();
+            reply->deleteLater();
+            break;
+        }
 
         if (reply->error() != QNetworkReply::NoError) {
             handleNetworkError(reply, "listFilesBlocking");
@@ -890,5 +1037,6 @@ QList<DriveFile> GoogleDriveClient::listFilesBlocking(const QString& folderId) {
         reply->deleteLater();
     } while (!pageToken.isEmpty());
 
+    m_inBlockingCall = false;
     return allFiles;
 }

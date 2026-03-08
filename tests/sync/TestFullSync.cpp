@@ -489,11 +489,10 @@ void TestFullSync::testOrphanCountReported() {
 
     QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
 
-    // remoteCount includes orphans (known TODO in FullSync.cpp:437)
-    // The orphan file is still counted but never queued
+    // LOG-04: remoteCount now excludes orphans (only counts actually queued files)
     auto args = completedSpy.first();
     int remoteCount = args.at(1).toInt();
-    QCOMPARE(remoteCount, 2);  // both counted, but orphan not queued
+    QCOMPARE(remoteCount, 1);  // orphan excluded from count
 
     // Verify orphan was NOT actually queued
     bool foundOrphan = false;

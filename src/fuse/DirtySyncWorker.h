@@ -105,8 +105,8 @@ class DirtySyncWorker : public QObject {
      * @param database Pointer to sync database
      * @param parent Parent QObject
      */
-    explicit DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient, SyncDatabase* database,
-                             QObject* parent = nullptr);
+    explicit DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient,
+                             SyncDatabase* database, QObject* parent = nullptr);
 
     ~DirtySyncWorker() override;
 
@@ -292,8 +292,8 @@ class DirtySyncWorker : public QObject {
      * @param fileId File ID associated with the error
      * @param localPath Local path associated with the request
      */
-    void onUploadErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
-                               const QString& localPath);
+    void onUploadErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
+                               const QString& fileId, const QString& localPath);
 
    private:
     /**
@@ -345,6 +345,7 @@ class DirtySyncWorker : public QObject {
     // Current upload tracking
     QString m_currentUploadFileId;
     bool m_uploadInProgress;
+    bool m_uploadDone;  ///< Set by signal handlers to guard against lost wakeups
     QWaitCondition m_uploadCondition;
     bool m_uploadSuccess;
     QString m_uploadError;

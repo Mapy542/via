@@ -445,7 +445,6 @@ class MetadataCache : public QObject {
 
     // Constants
     static const int DEFAULT_MAX_CACHE_AGE_SECONDS = 300;  // 5 minutes
-    static const char* DB_CONNECTION_NAME;                 // Database connection name
 };
 
 #endif  // METADATACACHE_H

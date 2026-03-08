@@ -91,7 +91,18 @@ class GoogleDriveClient : public QObject {
      * @param newParentId New parent folder ID
      * @param oldParentId Old parent folder ID
      */
-    virtual void moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId);
+    virtual void moveFile(const QString& fileId, const QString& newParentId,
+                          const QString& oldParentId);
+
+    /**
+     * @brief Move and rename a file atomically in a single PATCH request
+     * @param fileId File ID
+     * @param newParentId New parent folder ID
+     * @param oldParentId Old parent folder ID
+     * @param newName New name for the file
+     */
+    virtual void moveAndRenameFile(const QString& fileId, const QString& newParentId,
+                                   const QString& oldParentId, const QString& newName);
 
     /**
      * @brief Rename a file
@@ -235,6 +246,12 @@ class GoogleDriveClient : public QObject {
     void fileRenamedDetailed(const DriveFile& file);
 
     /**
+     * @brief Emitted when file is moved and renamed atomically
+     * @param file Updated file metadata
+     */
+    void fileMovedAndRenamedDetailed(const DriveFile& file);
+
+    /**
      * @brief Emitted when file is deleted
      * @param fileId File ID
      */
@@ -259,7 +276,8 @@ class GoogleDriveClient : public QObject {
      * @param newStartPageToken Token for next check
      * @param hasMorePages True if there are more pages to fetch
      */
-    void changesReceived(const QList<DriveChange>& changes, const QString& newStartPageToken, bool hasMorePages);
+    void changesReceived(const QList<DriveChange>& changes, const QString& newStartPageToken,
+                         bool hasMorePages);
 
     /**
      * @brief Emitted when start page token is received
@@ -312,8 +330,8 @@ class GoogleDriveClient : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void errorDetailed(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
-                       const QString& localPath);
+    void errorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
+                       const QString& fileId, const QString& localPath);
 
     /**
      * @brief Emitted when an API call fails due to authentication/authorization
@@ -331,6 +349,9 @@ class GoogleDriveClient : public QObject {
 
     GoogleAuthManager* m_authManager;
     QNetworkAccessManager* m_networkManager;
+
+    // CON-01: Re-entrancy guard for blocking event loop methods
+    bool m_inBlockingCall = false;
 
     // API base URL
     static const QString API_BASE_URL;

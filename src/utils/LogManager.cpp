@@ -179,7 +179,7 @@ void LogManager::messageHandler(QtMsgType type, const QMessageLogContext& contex
     std::cout << formattedMsg.toStdString() << std::endl;
 
     // Write to file
-    s_instance->writeToFile(formattedMsg);
+    s_instance->writeToFile(formattedMsg, type);
 
     // For fatal messages, also write to stderr and abort
     if (type == QtFatalMsg) {
@@ -189,7 +189,7 @@ void LogManager::messageHandler(QtMsgType type, const QMessageLogContext& contex
     }
 }
 
-void LogManager::writeToFile(const QString& message) {
+void LogManager::writeToFile(const QString& message, QtMsgType type) {
     QMutexLocker locker(&m_mutex);
 
     if (!m_logFile.isOpen()) {
@@ -202,10 +202,15 @@ void LogManager::writeToFile(const QString& message) {
     QTextStream stream(&m_logFile);
     stream << message << "\n";
 
-    // Flush periodically to ensure logs are written
-    static int writeCount = 0;
-    if (++writeCount % 10 == 0) {
+    // ROB-05: Flush immediately for warnings and above so they aren't lost on crash.
+    // For debug/info, flush every 10th write to balance I/O cost.
+    if (type >= QtWarningMsg) {
         m_logFile.flush();
+    } else {
+        static int writeCount = 0;
+        if (++writeCount % 10 == 0) {
+            m_logFile.flush();
+        }
     }
 }
 

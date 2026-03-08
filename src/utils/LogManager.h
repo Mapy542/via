@@ -95,8 +95,10 @@ class LogManager : public QObject {
 
     /**
      * @brief Write a message to the log file
+     * @param message Formatted log message
+     * @param type Message severity level (flushes immediately for warnings and above)
      */
-    void writeToFile(const QString& message);
+    void writeToFile(const QString& message, QtMsgType type = QtDebugMsg);
 
     static LogManager* s_instance;
 

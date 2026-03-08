@@ -16,6 +16,7 @@
 #include "api/DriveChange.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
+#include "utils/PathUtils.h"
 
 const int RemoteChangeWatcher::DEFAULT_POLL_INTERVAL_MS;
 
@@ -30,14 +31,16 @@ RemoteChangeWatcher::RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveCl
       m_waitingForToken(false) {
     // Configure polling timer
     m_settings = SyncSettings::load();
-    m_pollingTimer->setInterval(m_settings.remotePollIntervalMs > 0 ? m_settings.remotePollIntervalMs
-                                                                    : DEFAULT_POLL_INTERVAL_MS);
+    m_pollingTimer->setInterval(m_settings.remotePollIntervalMs > 0
+                                    ? m_settings.remotePollIntervalMs
+                                    : DEFAULT_POLL_INTERVAL_MS);
 
     // Connect signals
     connect(m_pollingTimer, &QTimer::timeout, this, &RemoteChangeWatcher::onPollingTimeout);
 
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::changesReceived, this, &RemoteChangeWatcher::onChangesReceived);
+        connect(m_driveClient, &GoogleDriveClient::changesReceived, this,
+                &RemoteChangeWatcher::onChangesReceived);
         connect(m_driveClient, &GoogleDriveClient::startPageTokenReceived, this,
                 &RemoteChangeWatcher::onStartPageTokenReceived);
         connect(m_driveClient, &GoogleDriveClient::error, this, &RemoteChangeWatcher::onApiError);
@@ -108,7 +111,8 @@ void RemoteChangeWatcher::start() {
     locker.unlock();
 
     emit stateChanged(State::Running);
-    qInfo() << "RemoteChangeWatcher started, polling interval:" << m_pollingTimer->interval() << "ms";
+    qInfo() << "RemoteChangeWatcher started, polling interval:" << m_pollingTimer->interval()
+            << "ms";
 
     // Do an immediate check
     checkNow();
@@ -203,8 +207,8 @@ void RemoteChangeWatcher::checkNow() {
 
 void RemoteChangeWatcher::onPollingTimeout() { checkNow(); }
 
-void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes, const QString& newToken,
-                                            bool hasMorePages) {
+void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
+                                            const QString& newToken, bool hasMorePages) {
     qDebug() << "Received" << changes.count() << "remote changes, hasMorePages:" << hasMorePages;
 
     // Ignore if we're not running (e.g. in fuse-only mode, another component
@@ -277,7 +281,8 @@ void RemoteChangeWatcher::onStartPageTokenReceived(const QString& token) {
 }
 
 void RemoteChangeWatcher::onApiError(const QString& operation, const QString& error) {
-    if (operation.contains("changes", Qt::CaseInsensitive) || operation.contains("token", Qt::CaseInsensitive)) {
+    if (operation.contains("changes", Qt::CaseInsensitive) ||
+        operation.contains("token", Qt::CaseInsensitive)) {
         bool runDeferredCheck = false;
         {
             QMutexLocker locker(&m_mutex);
@@ -302,7 +307,8 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
         return;
     }
 
-    qDebug() << "Processing change:" << change.changeId << "fileId:" << change.fileId << "removed:" << change.removed;
+    qDebug() << "Processing change:" << change.changeId << "fileId:" << change.fileId
+             << "removed:" << change.removed;
 
     // Deduplication: Skip if we've recently queued this file ID
     {
@@ -347,7 +353,8 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
         QString path = m_syncDatabase->getLocalPath(change.fileId);
         item.localPath = path;  // May be empty if we don't have it locally
         item.isDirectory = change.file.isFolder;
-        item.modifiedTime = change.file.modifiedTime.isValid() ? change.file.modifiedTime : change.time;
+        item.modifiedTime =
+            change.file.modifiedTime.isValid() ? change.file.modifiedTime : change.time;
 
     } else {
         // Resolve the file path
@@ -357,7 +364,8 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
             return;
         }
         item.localPath = path;
-        item.modifiedTime = change.file.modifiedTime.isValid() ? change.file.modifiedTime : change.time;
+        item.modifiedTime =
+            change.file.modifiedTime.isValid() ? change.file.modifiedTime : change.time;
         item.isDirectory = change.file.isFolder;
         item.remoteMd5 = change.file.md5Checksum;
 
@@ -379,19 +387,19 @@ QString RemoteChangeWatcher::resolvePath(const DriveFile& file) {
     if (parentId.isEmpty()) {
         // Files without a parent ID are typically shared files or files not in
         // the user's My Drive hierarchy. Return empty to signal this.
-        // The change processor should skip files with empty paths.
-        // TODO: Validate that change processor handles this correctly.
+        // Caller drops changes with empty paths before enqueue.
         return QString();
     }
 
     // Look up parent path in the folder ID to path mapping
     if (m_folderIdToPath.contains(parentId)) {
         QString parentPath = m_folderIdToPath.value(parentId);
+        QString safeName = PathUtils::sanitizeRemoteFileName(file.name);
         if (parentPath.isEmpty()) {
             // Parent is the root folder (empty path = My Drive root)
-            return file.name;
+            return safeName;
         }
-        return parentPath + "/" + file.name;
+        return parentPath + "/" + safeName;
     }
 
     locker.unlock();

@@ -13,8 +13,6 @@
 #include "sync/SyncDatabase.h"
 
 const int MetadataCache::DEFAULT_MAX_CACHE_AGE_SECONDS;
-// DB_CONNECTION_NAME is no longer used — all DB access goes through SyncDatabase.
-const char* MetadataCache::DB_CONNECTION_NAME = "sync_connection";
 
 MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveClient,
                              QObject* parent)
@@ -375,6 +373,11 @@ void MetadataCache::setMetadataBatch(const QList<FuseFileMetadata>& metadataList
         auto oldPathIt = m_fileIdToPath.constFind(metadata.fileId);
         if (oldPathIt != m_fileIdToPath.constEnd() && oldPathIt.value() != metadata.path) {
             m_pathToMetadata.remove(oldPathIt.value());
+
+            // Also remove stale path from parent's children list
+            for (auto& children : m_parentToChildren) {
+                children.removeAll(oldPathIt.value());
+            }
         }
 
         m_pathToMetadata[metadata.path] = metadata;
@@ -724,7 +727,9 @@ void MetadataCache::onApiChildrenReceived(const QString& parentId,
     QList<FuseFileMetadata> childrenWithPaths;
     for (FuseFileMetadata child : children) {
         if (parentPath == "/") {
-            child.path = "/" + child.name;
+            // Use bare name (no leading slash) to match FuseDriver's
+            // path convention and avoid duplicate cache entries
+            child.path = child.name;
         } else {
             child.path = parentPath + "/" + child.name;
         }
@@ -773,12 +778,19 @@ void MetadataCache::loadFromDatabase() {
         metadata.cachedAt = dbMeta.cachedAt;
         metadata.lastAccessed = dbMeta.lastAccessed;
 
+        // Normalize legacy paths that may have a leading slash
+        if (metadata.path.startsWith(QStringLiteral("/"))) {
+            metadata.path = metadata.path.mid(1);
+        }
+
         m_pathToMetadata[metadata.path] = metadata;
         m_fileIdToPath[metadata.fileId] = metadata.path;
 
-        // Build parent-to-children mapping
+        // Build parent-to-children mapping (deduplicate)
         QString parentPath = getParentPath(metadata.path);
-        m_parentToChildren[parentPath].append(metadata.path);
+        if (!m_parentToChildren[parentPath].contains(metadata.path)) {
+            m_parentToChildren[parentPath].append(metadata.path);
+        }
     }
 
     qDebug() << "MetadataCache: Loaded" << m_pathToMetadata.size() << "entries from database";

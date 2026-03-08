@@ -318,8 +318,9 @@ void MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
     if (!metadata.parentId.isEmpty()) {
         QString rootId = m_metadataCache->rootFolderId();
         if (metadata.parentId == rootId) {
-            // Parent is root folder
-            metadata.path = QStringLiteral("/") + metadata.name;
+            // Parent is root folder — use bare name (no leading slash)
+            // to match FuseDriver's path convention
+            metadata.path = metadata.name;
         } else {
             QString parentPath = m_metadataCache->getPathByFileId(metadata.parentId);
             if (!parentPath.isEmpty()) {

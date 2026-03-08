@@ -54,14 +54,16 @@ bool isAuthOrPermissionFailure(int httpStatus, const QString& errorMsg) {
     }
 
     const QString lowered = errorMsg.toLower();
-    return lowered.contains(QStringLiteral("authentication")) || lowered.contains(QStringLiteral("auth")) ||
-           lowered.contains(QStringLiteral("permission")) || lowered.contains(QStringLiteral("credential")) ||
+    return lowered.contains(QStringLiteral("authentication")) ||
+           lowered.contains(QStringLiteral("auth")) ||
+           lowered.contains(QStringLiteral("permission")) ||
+           lowered.contains(QStringLiteral("credential")) ||
            lowered.contains(QStringLiteral("unauthorized"));
 }
 
 bool waitForFolderCreate(GoogleDriveClient* driveClient, const QString& requestLocalPath,
-                         const std::function<bool()>& startRequest, DriveFile* createdFolder, QString* errorOut,
-                         bool* authFailureOut = nullptr) {
+                         const std::function<bool()>& startRequest, DriveFile* createdFolder,
+                         QString* errorOut, bool* authFailureOut = nullptr) {
     if (!driveClient) {
         if (errorOut) {
             *errorOut = QStringLiteral("GoogleDriveClient unavailable");
@@ -92,8 +94,8 @@ bool waitForFolderCreate(GoogleDriveClient* driveClient, const QString& requestL
                                    });
 
     errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus, const QString&,
-                                     const QString& localPath) {
+                                 [&](const QString& operation, const QString& errorMsg,
+                                     int httpStatus, const QString&, const QString& localPath) {
                                      if (operation != QStringLiteral("createFolder")) {
                                          return;
                                      }
@@ -136,8 +138,9 @@ bool waitForFolderCreate(GoogleDriveClient* driveClient, const QString& requestL
     return success;
 }
 
-bool waitForUpload(GoogleDriveClient* driveClient, const QString& localPath, DriveFile* uploadedFile,
-                   const std::function<bool()>& startRequest, QString* errorOut, bool* authFailureOut = nullptr) {
+bool waitForUpload(GoogleDriveClient* driveClient, const QString& localPath,
+                   DriveFile* uploadedFile, const std::function<bool()>& startRequest,
+                   QString* errorOut, bool* authFailureOut = nullptr) {
     if (!driveClient) {
         if (errorOut) {
             *errorOut = QStringLiteral("GoogleDriveClient unavailable");
@@ -167,19 +170,20 @@ bool waitForUpload(GoogleDriveClient* driveClient, const QString& localPath, Dri
                                         loop.quit();
                                     });
 
-    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus, const QString&,
-                                     const QString& errorLocalPath) {
-                                     if (operation != QStringLiteral("uploadFile")) {
-                                         return;
-                                     }
-                                     if (errorLocalPath != localPath) {
-                                         return;
-                                     }
-                                     error = errorMsg;
-                                     errorStatus = httpStatus;
-                                     loop.quit();
-                                 });
+    errorConn =
+        QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
+                         [&](const QString& operation, const QString& errorMsg, int httpStatus,
+                             const QString&, const QString& errorLocalPath) {
+                             if (operation != QStringLiteral("uploadFile")) {
+                                 return;
+                             }
+                             if (errorLocalPath != localPath) {
+                                 return;
+                             }
+                             error = errorMsg;
+                             errorStatus = httpStatus;
+                             loop.quit();
+                         });
 
     timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
         error = QStringLiteral("uploadFile timeout");
@@ -213,7 +217,8 @@ bool waitForUpload(GoogleDriveClient* driveClient, const QString& localPath, Dri
 }
 
 bool waitForUpdate(GoogleDriveClient* driveClient, const QString& fileId, DriveFile* updatedFile,
-                   const std::function<bool()>& startRequest, QString* errorOut, bool* authFailureOut = nullptr) {
+                   const std::function<bool()>& startRequest, QString* errorOut,
+                   bool* authFailureOut = nullptr) {
     if (!driveClient) {
         if (errorOut) {
             *errorOut = QStringLiteral("GoogleDriveClient unavailable");
@@ -233,18 +238,19 @@ bool waitForUpdate(GoogleDriveClient* driveClient, const QString& fileId, DriveF
     QMetaObject::Connection errorConn;
     QMetaObject::Connection timeoutConn;
 
-    updatedConn = QObject::connect(driveClient, &GoogleDriveClient::fileUpdated, &loop, [&](const DriveFile& file) {
-        if (file.id != fileId) {
-            return;
-        }
-        success = file.isValid();
-        result = file;
-        loop.quit();
-    });
+    updatedConn = QObject::connect(driveClient, &GoogleDriveClient::fileUpdated, &loop,
+                                   [&](const DriveFile& file) {
+                                       if (file.id != fileId) {
+                                           return;
+                                       }
+                                       success = file.isValid();
+                                       result = file;
+                                       loop.quit();
+                                   });
 
     errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus,
-                                     const QString& errorFileId, const QString&) {
+                                 [&](const QString& operation, const QString& errorMsg,
+                                     int httpStatus, const QString& errorFileId, const QString&) {
                                      if (operation != QStringLiteral("updateFile")) {
                                          return;
                                      }
@@ -288,7 +294,8 @@ bool waitForUpdate(GoogleDriveClient* driveClient, const QString& fileId, DriveF
 }
 
 bool waitForMove(GoogleDriveClient* driveClient, const QString& fileId, DriveFile* movedFile,
-                 const std::function<bool()>& startRequest, QString* errorOut, bool* authFailureOut = nullptr) {
+                 const std::function<bool()>& startRequest, QString* errorOut,
+                 bool* authFailureOut = nullptr) {
     if (!driveClient) {
         if (errorOut) {
             *errorOut = QStringLiteral("GoogleDriveClient unavailable");
@@ -308,18 +315,19 @@ bool waitForMove(GoogleDriveClient* driveClient, const QString& fileId, DriveFil
     QMetaObject::Connection errorConn;
     QMetaObject::Connection timeoutConn;
 
-    movedConn = QObject::connect(driveClient, &GoogleDriveClient::fileMovedDetailed, &loop, [&](const DriveFile& file) {
-        if (file.id != fileId) {
-            return;
-        }
-        success = file.isValid();
-        result = file;
-        loop.quit();
-    });
+    movedConn = QObject::connect(driveClient, &GoogleDriveClient::fileMovedDetailed, &loop,
+                                 [&](const DriveFile& file) {
+                                     if (file.id != fileId) {
+                                         return;
+                                     }
+                                     success = file.isValid();
+                                     result = file;
+                                     loop.quit();
+                                 });
 
     errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus,
-                                     const QString& errorFileId, const QString&) {
+                                 [&](const QString& operation, const QString& errorMsg,
+                                     int httpStatus, const QString& errorFileId, const QString&) {
                                      if (operation != QStringLiteral("moveFile")) {
                                          return;
                                      }
@@ -363,7 +371,8 @@ bool waitForMove(GoogleDriveClient* driveClient, const QString& fileId, DriveFil
 }
 
 bool waitForRename(GoogleDriveClient* driveClient, const QString& fileId, DriveFile* renamedFile,
-                   const std::function<bool()>& startRequest, QString* errorOut, bool* authFailureOut = nullptr) {
+                   const std::function<bool()>& startRequest, QString* errorOut,
+                   bool* authFailureOut = nullptr) {
     if (!driveClient) {
         if (errorOut) {
             *errorOut = QStringLiteral("GoogleDriveClient unavailable");
@@ -383,19 +392,19 @@ bool waitForRename(GoogleDriveClient* driveClient, const QString& fileId, DriveF
     QMetaObject::Connection errorConn;
     QMetaObject::Connection timeoutConn;
 
-    renamedConn =
-        QObject::connect(driveClient, &GoogleDriveClient::fileRenamedDetailed, &loop, [&](const DriveFile& file) {
-            if (file.id != fileId) {
-                return;
-            }
-            success = file.isValid();
-            result = file;
-            loop.quit();
-        });
+    renamedConn = QObject::connect(driveClient, &GoogleDriveClient::fileRenamedDetailed, &loop,
+                                   [&](const DriveFile& file) {
+                                       if (file.id != fileId) {
+                                           return;
+                                       }
+                                       success = file.isValid();
+                                       result = file;
+                                       loop.quit();
+                                   });
 
     errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus,
-                                     const QString& errorFileId, const QString&) {
+                                 [&](const QString& operation, const QString& errorMsg,
+                                     int httpStatus, const QString& errorFileId, const QString&) {
                                      if (operation != QStringLiteral("renameFile")) {
                                          return;
                                      }
@@ -438,8 +447,86 @@ bool waitForRename(GoogleDriveClient* driveClient, const QString& fileId, DriveF
     return success;
 }
 
-bool waitForDelete(GoogleDriveClient* driveClient, const QString& fileId, const std::function<bool()>& startRequest,
-                   QString* errorOut, bool* authFailureOut = nullptr) {
+bool waitForMoveAndRename(GoogleDriveClient* driveClient, const QString& fileId,
+                          DriveFile* resultFile, const std::function<bool()>& startRequest,
+                          QString* errorOut, bool* authFailureOut = nullptr) {
+    if (!driveClient) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
+        }
+        return false;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    bool success = false;
+    QString error;
+    int errorStatus = 0;
+    DriveFile result;
+
+    QMetaObject::Connection resultConn;
+    QMetaObject::Connection errorConn;
+    QMetaObject::Connection timeoutConn;
+
+    resultConn = QObject::connect(driveClient, &GoogleDriveClient::fileMovedAndRenamedDetailed,
+                                  &loop, [&](const DriveFile& file) {
+                                      if (file.id != fileId) {
+                                          return;
+                                      }
+                                      success = file.isValid();
+                                      result = file;
+                                      loop.quit();
+                                  });
+
+    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
+                                 [&](const QString& operation, const QString& errorMsg,
+                                     int httpStatus, const QString& errorFileId, const QString&) {
+                                     if (operation != QStringLiteral("moveAndRenameFile")) {
+                                         return;
+                                     }
+                                     if (!errorFileId.isEmpty() && errorFileId != fileId) {
+                                         return;
+                                     }
+                                     error = errorMsg;
+                                     errorStatus = httpStatus;
+                                     loop.quit();
+                                 });
+
+    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
+        error = QStringLiteral("moveAndRenameFile timeout");
+        loop.quit();
+    });
+
+    if (!startRequest || !startRequest()) {
+        error = QStringLiteral("Failed to dispatch moveAndRenameFile request");
+    } else {
+        timeout.start(FUSE_API_TIMEOUT_MS);
+        loop.exec();
+    }
+
+    QObject::disconnect(resultConn);
+    QObject::disconnect(errorConn);
+    QObject::disconnect(timeoutConn);
+
+    if (!success && errorOut) {
+        *errorOut = error.isEmpty() ? QStringLiteral("moveAndRenameFile failed") : error;
+    }
+
+    if (authFailureOut) {
+        *authFailureOut = isAuthOrPermissionFailure(errorStatus, error);
+    }
+
+    if (success && resultFile) {
+        *resultFile = result;
+    }
+
+    return success;
+}
+
+bool waitForDelete(GoogleDriveClient* driveClient, const QString& fileId,
+                   const std::function<bool()>& startRequest, QString* errorOut,
+                   bool* authFailureOut = nullptr) {
     if (!driveClient) {
         if (errorOut) {
             *errorOut = QStringLiteral("GoogleDriveClient unavailable");
@@ -458,17 +545,18 @@ bool waitForDelete(GoogleDriveClient* driveClient, const QString& fileId, const 
     QMetaObject::Connection errorConn;
     QMetaObject::Connection timeoutConn;
 
-    deletedConn = QObject::connect(driveClient, &GoogleDriveClient::fileDeleted, &loop, [&](const QString& deletedId) {
-        if (deletedId != fileId) {
-            return;
-        }
-        success = true;
-        loop.quit();
-    });
+    deletedConn = QObject::connect(driveClient, &GoogleDriveClient::fileDeleted, &loop,
+                                   [&](const QString& deletedId) {
+                                       if (deletedId != fileId) {
+                                           return;
+                                       }
+                                       success = true;
+                                       loop.quit();
+                                   });
 
     errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus,
-                                     const QString& errorFileId, const QString&) {
+                                 [&](const QString& operation, const QString& errorMsg,
+                                     int httpStatus, const QString& errorFileId, const QString&) {
                                      if (operation != QStringLiteral("deleteFile")) {
                                          return;
                                      }
@@ -645,7 +733,8 @@ bool FuseDriver::mount() {
                 QList<QByteArray> fields = line.split(' ');
                 if (fields.size() >= 2 && fields[1] == mountPointBytes) {
                     isMounted = true;
-                    qDebug() << "FuseDriver: Found existing mount in /proc/mounts:" << line.trimmed();
+                    qDebug() << "FuseDriver: Found existing mount in /proc/mounts:"
+                             << line.trimmed();
                     break;
                 }
             }
@@ -672,8 +761,9 @@ bool FuseDriver::mount() {
                 if (fusermount.exitCode() != 0) {
                     qWarning() << "FuseDriver: Failed to unmount existing FUSE mount:"
                                << fusermount.readAllStandardError().trimmed();
-                    emit mountError("Mount point has an existing FUSE mount that could not be cleaned up: " +
-                                    m_mountPoint);
+                    emit mountError(
+                        "Mount point has an existing FUSE mount that could not be cleaned up: " +
+                        m_mountPoint);
                     return false;
                 }
                 qInfo() << "FuseDriver: Lazy unmount succeeded";
@@ -746,9 +836,10 @@ bool FuseDriver::mount() {
             appArmorAttr.close();
             qDebug() << "FuseDriver:   AppArmor profile:" << profile;
             if (profile.contains("snap.")) {
-                qWarning() << "FuseDriver: Running inside Snap confinement (" << profile
-                           << "). FUSE mount may fail with EPERM. "
-                              "Launch the application from a native terminal (not a Snap-confined one).";
+                qWarning()
+                    << "FuseDriver: Running inside Snap confinement (" << profile
+                    << "). FUSE mount may fail with EPERM. "
+                       "Launch the application from a native terminal (not a Snap-confined one).";
             }
         }
 
@@ -759,6 +850,7 @@ bool FuseDriver::mount() {
         if (!m_fuse) {
             qCritical() << "FuseDriver: Failed to create FUSE instance"
                         << "- errno=" << savedErrno << "(" << strerror(savedErrno) << ")";
+            m_mountReadySemaphore.release();
             return;
         }
         qDebug() << "FuseDriver: fuse_new() succeeded";
@@ -779,11 +871,14 @@ bool FuseDriver::mount() {
             }
             fuse_destroy(m_fuse);
             m_fuse = nullptr;
+            m_mountReadySemaphore.release();
             return;
         }
         qDebug() << "FuseDriver: fuse_mount() succeeded at" << m_mountPoint;
 
         m_session = fuse_get_session(m_fuse);
+
+        m_mountReadySemaphore.release();
 
         qInfo() << "FuseDriver: FUSE event loop starting";
 
@@ -803,8 +898,15 @@ bool FuseDriver::mount() {
 
     m_fuseThread->start();
 
-    // Wait for FUSE to initialize
-    QThread::msleep(200);
+    // ROB-03: Wait for FUSE mount with proper synchronization instead of sleep+poll
+    if (!m_mountReadySemaphore.tryAcquire(1, 5000)) {
+        qCritical() << "FuseDriver: Timed out waiting for FUSE mount";
+        m_fuseThread->wait(2000);
+        delete m_fuseThread;
+        m_fuseThread = nullptr;
+        emit mountError("FUSE initialization timed out");
+        return false;
+    }
 
     if (!m_fuse) {
         m_fuseThread->wait(2000);
@@ -956,16 +1058,17 @@ void FuseDriver::flushDirtyFiles() {
             if (waitForUpdate(
                     m_driveClient, entry.fileId, &updated,
                     [&]() {
-                        return invokeDriveCall(m_driveClient,
-                                               [&]() { m_driveClient->updateFile(entry.fileId, cachePath); });
+                        return invokeDriveCall(m_driveClient, [&]() {
+                            m_driveClient->updateFile(entry.fileId, cachePath);
+                        });
                     },
                     &error, &authFailure)) {
                 m_fileCache->clearDirty(entry.fileId);
                 uploadedCount++;
             } else {
                 m_fileCache->markUploadFailed(entry.fileId);
-                qWarning() << "FuseDriver: Unmount flush upload failed for" << entry.path << ":" << error
-                           << "authFailure=" << authFailure;
+                qWarning() << "FuseDriver: Unmount flush upload failed for" << entry.path << ":"
+                           << error << "authFailure=" << authFailure;
             }
         }
     }
@@ -977,6 +1080,11 @@ void FuseDriver::flushDirtyFiles() {
 // ============================================================================
 // FUSE Callback Implementations
 // ============================================================================
+// TODO (CON-02): All FUSE callbacks below block the calling FUSE thread waiting for
+// the Google Drive API on the main thread via Qt::BlockingQueuedConnection. If the
+// main thread is busy (UI events, token refresh) all FUSE ops stall and applications
+// using the mount point will hang. Consider a dedicated API worker thread, and serve
+// cached data while API calls are in flight instead of blocking.
 
 int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_file_info* fi) {
     Q_UNUSED(fi)
@@ -1017,8 +1125,8 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
             // Find parent folder ID
             QString parentId;
             if (parentPath.isEmpty()) {
-                parentId =
-                    s_instance->m_metadataCache ? s_instance->m_metadataCache->rootFolderId() : QStringLiteral("root");
+                parentId = s_instance->m_metadataCache ? s_instance->m_metadataCache->rootFolderId()
+                                                       : QStringLiteral("root");
                 if (parentId.isEmpty()) {
                     parentId = QStringLiteral("root");
                 }
@@ -1106,8 +1214,10 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
             stbuf->st_uid = getuid();
             stbuf->st_gid = getgid();
             stbuf->st_mtime = meta.modifiedTime.toSecsSinceEpoch();
-            stbuf->st_atime = meta.lastAccessed.isValid() ? meta.lastAccessed.toSecsSinceEpoch() : stbuf->st_mtime;
-            stbuf->st_ctime = meta.createdTime.isValid() ? meta.createdTime.toSecsSinceEpoch() : stbuf->st_mtime;
+            stbuf->st_atime = meta.lastAccessed.isValid() ? meta.lastAccessed.toSecsSinceEpoch()
+                                                          : stbuf->st_mtime;
+            stbuf->st_ctime =
+                meta.createdTime.isValid() ? meta.createdTime.toSecsSinceEpoch() : stbuf->st_mtime;
 
             return 0;
         }
@@ -1132,10 +1242,34 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         return 0;
     }
 
+    // ── Cache-first path (LOG-01 fix) ──
+    // If MetadataCache has fresh children for this directory, serve them
+    // directly without hitting the API.  The MetadataRefreshWorker keeps
+    // the cache warm in the background, so this is safe.
+    QString cacheLookupPath;
+    if (qpath.isEmpty() || qpath == "/") {
+        cacheLookupPath = QStringLiteral("/");
+    } else {
+        cacheLookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
+    }
+
+    if (s_instance->m_metadataCache &&
+        s_instance->m_metadataCache->hasChildrenCached(cacheLookupPath)) {
+        QList<FuseFileMetadata> cached = s_instance->m_metadataCache->getChildren(cacheLookupPath);
+        qDebug() << "FuseDriver::readdir: Serving" << cached.size() << "entries from cache for"
+                 << qpath;
+        for (const FuseFileMetadata& child : cached) {
+            filler(buf, child.name.toUtf8().constData(), nullptr, 0, FUSE_FILL_DIR_PLUS);
+        }
+        return 0;
+    }
+
+    // ── Fallback: fetch from API ─────────────────────────────────────
     // Get parent folder ID
     QString parentId;
     if (qpath.isEmpty() || qpath == "/") {
-        parentId = s_instance->m_metadataCache ? s_instance->m_metadataCache->rootFolderId() : QStringLiteral("root");
+        parentId = s_instance->m_metadataCache ? s_instance->m_metadataCache->rootFolderId()
+                                               : QStringLiteral("root");
         if (parentId.isEmpty()) {
             parentId = QStringLiteral("root");
         }
@@ -1149,10 +1283,8 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         }
     }
 
-    // Always fetch children from the API to ensure we have a complete listing.
-    // Cached entries alone may be incomplete (e.g. only a subset was populated
-    // by a previous getattr or partial readdir).
-    qDebug() << "FuseDriver::readdir: Fetching children for" << qpath << "(parentId=" << parentId << ") from API...";
+    qDebug() << "FuseDriver::readdir: Cache miss — fetching children for" << qpath
+             << "(parentId=" << parentId << ") from API...";
 
     QList<DriveFile> apiFiles;
     // Must invoke on main thread since QNetworkAccessManager lives there
@@ -1263,7 +1395,8 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
     return 0;
 }
 
-int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi) {
+int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
+                         struct fuse_file_info* fi) {
     Q_UNUSED(path)
 
     if (!s_instance) {
@@ -1297,7 +1430,8 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
     return data.size();
 }
 
-int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi) {
+int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t offset,
+                          struct fuse_file_info* fi) {
     Q_UNUSED(path)
 
     if (!s_instance) {
@@ -1335,7 +1469,8 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
     if (!openFile.dirty) {
         s_instance->markOpenFileDirty(fi->fh);
         if (s_instance->m_fileCache) {
-            QString lookupPath = openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
+            QString lookupPath =
+                openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
             s_instance->m_fileCache->markDirty(openFile.fileId, lookupPath);
         }
         emit s_instance->fileModified(openFile.path);
@@ -1356,7 +1491,8 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
             // Optimistic local metadata update so stat() returns
             // a reasonable size/mtime immediately after close.
             if (s_instance->m_database) {
-                QString lookupPath = openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
+                QString lookupPath =
+                    openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
                 FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
                 if (!meta.fileId.isEmpty()) {
                     meta.size = QFileInfo(openFile.cachePath).size();
@@ -1369,7 +1505,8 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
             // Kick the DirtySyncWorker so the upload starts promptly
             // instead of waiting for the next timer tick.
             if (s_instance->m_dirtySyncWorker) {
-                QMetaObject::invokeMethod(s_instance->m_dirtySyncWorker, "syncNow", Qt::QueuedConnection);
+                QMetaObject::invokeMethod(s_instance->m_dirtySyncWorker, "syncNow",
+                                          Qt::QueuedConnection);
             }
 
             qDebug() << "FuseDriver: release – deferred upload for" << openFile.path;
@@ -1424,7 +1561,8 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
         s_instance->markOpenFileClean(fi->fh);
 
         if (s_instance->m_database) {
-            QString lookupPath = openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
+            QString lookupPath =
+                openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
             FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
             if (!meta.fileId.isEmpty()) {
                 meta.size = QFileInfo(openFile.cachePath).size();
@@ -1537,8 +1675,9 @@ int FuseDriver::fuseRmdir(const char* path) {
     if (!waitForDelete(
             s_instance->m_driveClient, meta.fileId,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient,
-                                       [&]() { s_instance->m_driveClient->deleteFile(meta.fileId); });
+                return invokeDriveCall(s_instance->m_driveClient, [&]() {
+                    s_instance->m_driveClient->deleteFile(meta.fileId);
+                });
             },
             &error, &authFailure)) {
         qWarning() << "FuseDriver: rmdir delete failed for" << lookupPath << ":" << error;
@@ -1574,8 +1713,9 @@ int FuseDriver::fuseUnlink(const char* path) {
     if (!waitForDelete(
             s_instance->m_driveClient, meta.fileId,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient,
-                                       [&]() { s_instance->m_driveClient->deleteFile(meta.fileId); });
+                return invokeDriveCall(s_instance->m_driveClient, [&]() {
+                    s_instance->m_driveClient->deleteFile(meta.fileId);
+                });
             },
             &error, &authFailure)) {
         qWarning() << "FuseDriver: unlink delete failed for" << lookupPath << ":" << error;
@@ -1618,11 +1758,53 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
     bool isRename = (oldName != newName);
     bool isMove = (oldParentPath != newParentPath);
 
-    if (isMove) {
+    // LOG-02: When both move and rename are needed, issue a single atomic PATCH request
+    if (isMove && isRename) {
         QString newParentId = "root";
         if (!newParentPath.isEmpty() && newParentPath != "/") {
-            QString newParentLookup = newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
-            FuseMetadata newParentMeta = s_instance->m_database->getFuseMetadataByPath(newParentLookup);
+            QString newParentLookup =
+                newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
+            FuseMetadata newParentMeta =
+                s_instance->m_database->getFuseMetadataByPath(newParentLookup);
+            if (newParentMeta.fileId.isEmpty() || !newParentMeta.isFolder) {
+                return -ENOENT;
+            }
+            newParentId = newParentMeta.fileId;
+        }
+
+        QString oldParentId = meta.parentId;
+        if (oldParentId.isEmpty()) {
+            oldParentId = "root";
+        }
+
+        QString error;
+        DriveFile resultFile;
+        bool authFailure = false;
+        if (!waitForMoveAndRename(
+                s_instance->m_driveClient, meta.fileId, &resultFile,
+                [&]() {
+                    return invokeDriveCall(s_instance->m_driveClient, [&]() {
+                        s_instance->m_driveClient->moveAndRenameFile(meta.fileId, newParentId,
+                                                                     oldParentId, newName);
+                    });
+                },
+                &error, &authFailure)) {
+            qWarning() << "FuseDriver: move+rename failed" << fromPath << "->" << toPath << ":"
+                       << error;
+            return authFailure ? -EACCES : -EIO;
+        }
+
+        meta.parentId = newParentId;
+        if (resultFile.modifiedTime.isValid()) {
+            meta.modifiedTime = resultFile.modifiedTime;
+        }
+    } else if (isMove) {
+        QString newParentId = "root";
+        if (!newParentPath.isEmpty() && newParentPath != "/") {
+            QString newParentLookup =
+                newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
+            FuseMetadata newParentMeta =
+                s_instance->m_database->getFuseMetadataByPath(newParentLookup);
             if (newParentMeta.fileId.isEmpty() || !newParentMeta.isFolder) {
                 return -ENOENT;
             }
@@ -1653,17 +1835,16 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         if (movedFile.modifiedTime.isValid()) {
             meta.modifiedTime = movedFile.modifiedTime;
         }
-    }
-
-    if (isRename) {
+    } else if (isRename) {
         QString error;
         DriveFile renamedFile;
         bool authFailure = false;
         if (!waitForRename(
                 s_instance->m_driveClient, meta.fileId, &renamedFile,
                 [&]() {
-                    return invokeDriveCall(s_instance->m_driveClient,
-                                           [&]() { s_instance->m_driveClient->renameFile(meta.fileId, newName); });
+                    return invokeDriveCall(s_instance->m_driveClient, [&]() {
+                        s_instance->m_driveClient->renameFile(meta.fileId, newName);
+                    });
                 },
                 &error, &authFailure)) {
             qWarning() << "FuseDriver: rename failed" << fromPath << "->" << toPath << ":" << error;
@@ -1810,10 +1991,15 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     newMeta.cachedAt = QDateTime::currentDateTime();
     newMeta.lastAccessed = QDateTime::currentDateTime();
     if (!s_instance->m_database->saveFuseMetadata(newMeta)) {
+        // ROB-06: Clean up orphaned remote file since metadata save failed
+        qWarning() << "FuseDriver: saveFuseMetadata failed for" << newMeta.fileId
+                   << "- deleting orphaned remote file";
+        QMetaObject::invokeMethod(
+            s_instance->m_driveClient,
+            [fileId = newMeta.fileId]() { s_instance->m_driveClient->deleteFile(fileId); },
+            Qt::QueuedConnection);
         return -EIO;
     }
-
-    // Create file handle for the new file
     FuseOpenFile openFile;
     openFile.fileId = uploadedFile.id;
     openFile.path = qpath;
@@ -1865,7 +2051,8 @@ int FuseDriver::fuseChown(const char* path, uid_t uid, gid_t gid, struct fuse_fi
     return 0;
 }
 
-int FuseDriver::fuseUtimens(const char* path, const struct timespec tv[2], struct fuse_file_info* fi) {
+int FuseDriver::fuseUtimens(const char* path, const struct timespec tv[2],
+                            struct fuse_file_info* fi) {
     Q_UNUSED(path)
     Q_UNUSED(tv)
     Q_UNUSED(fi)
@@ -1963,11 +2150,14 @@ void FuseDriver::startBackgroundWorkers() {
     if (m_metadataCache && m_fileCache && m_database && m_driveClient && !m_metadataRefreshThread &&
         !m_metadataRefreshWorker) {
         m_metadataRefreshThread = new QThread(this);
-        m_metadataRefreshWorker = new MetadataRefreshWorker(m_metadataCache, m_fileCache, m_database, m_driveClient);
+        m_metadataRefreshWorker =
+            new MetadataRefreshWorker(m_metadataCache, m_fileCache, m_database, m_driveClient);
         m_metadataRefreshWorker->moveToThread(m_metadataRefreshThread);
 
-        connect(m_metadataRefreshThread, &QThread::started, m_metadataRefreshWorker, &MetadataRefreshWorker::start);
-        connect(m_metadataRefreshThread, &QThread::finished, m_metadataRefreshWorker, &QObject::deleteLater);
+        connect(m_metadataRefreshThread, &QThread::started, m_metadataRefreshWorker,
+                &MetadataRefreshWorker::start);
+        connect(m_metadataRefreshThread, &QThread::finished, m_metadataRefreshWorker,
+                &QObject::deleteLater);
 
         m_metadataRefreshThread->start();
     }
@@ -1996,7 +2186,8 @@ void FuseDriver::stopBackgroundWorkers() {
     }
 
     // Stop metadata refresh worker
-    if (m_metadataRefreshWorker && m_metadataRefreshThread && m_metadataRefreshThread->isRunning()) {
+    if (m_metadataRefreshWorker && m_metadataRefreshThread &&
+        m_metadataRefreshThread->isRunning()) {
         QMetaObject::invokeMethod(m_metadataRefreshWorker, "stop", Qt::QueuedConnection);
     }
 

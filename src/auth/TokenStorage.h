@@ -3,7 +3,10 @@
  * @brief Secure storage for OAuth tokens
  *
  * Handles secure storage of OAuth access and refresh tokens.
- * Uses QSettings with optional encryption for security.
+ * Uses QtKeychain (OS-backed secure storage) as the primary backend,
+ * with a file-based fallback (0600-permissioned JSON) when no keyring
+ * is available. Migrates legacy XOR-obfuscated QSettings values on
+ * first use.
  */
 
 #ifndef TOKENSTORAGE_H
@@ -18,10 +21,8 @@
  * @class TokenStorage
  * @brief Secure storage for OAuth tokens
  *
- * Provides secure storage for OAuth tokens using QSettings.
- * Tokens are stored with basic obfuscation to prevent casual
- * reading. For production use, system keyring integration
- * (e.g., libsecret on Linux) is recommended.
+ * Provides secure storage for OAuth tokens using the OS keyring
+ * (via QtKeychain / libsecret) with an encrypted-file fallback.
  */
 class TokenStorage : public QObject {
     Q_OBJECT
@@ -110,23 +111,33 @@ class TokenStorage : public QObject {
     void tokensCleared();
 
    private:
-    /**
-     * @brief Encode a string for storage (basic obfuscation)
-     * @param input Plain text
-     * @return Encoded string
-     */
-    QString encode(const QString& input) const;
+    // ── Keychain helpers ──────────────────────────────────────────────
+    bool writeToKeychain(const QString& key, const QString& value) const;
+    QString readFromKeychain(const QString& key) const;
+    void deleteFromKeychain(const QString& key) const;
 
-    /**
-     * @brief Decode a stored string
-     * @param input Encoded string
-     * @return Plain text
-     */
-    QString decode(const QString& input) const;
+    // ── File-based fallback (0600-permissioned JSON) ──────────────────
+    bool writeToFallbackFile(const QString& key, const QString& value) const;
+    QString readFromFallbackFile(const QString& key) const;
+    void deleteFromFallbackFile(const QString& key) const;
+    QString fallbackFilePath() const;
 
-    QSettings m_settings;
+    // ── Combined read/write using best available backend ─────────────
+    void secureWrite(const QString& key, const QString& value) const;
+    QString secureRead(const QString& key) const;
+    void secureDelete(const QString& key) const;
 
-    // Settings keys
+    // ── Legacy migration ─────────────────────────────────────────────
+    void migrateFromLegacySettings();
+    QString legacyDecode(const QString& input) const;
+
+    QSettings m_settings;      ///< Still used for non-secret settings (expiry)
+    bool m_keychainAvailable;  ///< Cached result of QKeychain::isAvailable()
+
+    // Service name for keychain entries
+    static const QString KEYCHAIN_SERVICE;
+
+    // Key names (shared between keychain and fallback)
     static const QString ACCESS_TOKEN_KEY;
     static const QString REFRESH_TOKEN_KEY;
     static const QString EXPIRY_KEY;

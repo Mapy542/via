@@ -13,6 +13,7 @@
 #include <QRegularExpression>
 
 #include "ChangeQueue.h"
+#include "SyncSettings.h"
 #include "utils/FileInUseChecker.h"
 
 const int LocalChangeWatcher::DEBOUNCE_DELAY_MS;
@@ -51,9 +52,8 @@ LocalChangeWatcher::LocalChangeWatcher(ChangeQueue* changeQueue, QObject* parent
     connect(m_watcher, &QFileSystemWatcher::fileChanged, this, &LocalChangeWatcher::onFileChanged);
     connect(m_debounceTimer, &QTimer::timeout, this, &LocalChangeWatcher::processDebounceQueue);
 
-    // Default ignore patterns
-    setIgnorePatterns({"*.tmp", "*.swp", "*.bak", "*~", ".*.swp", ".git/*", ".git", ".DS_Store",
-                       "Thumbs.db", "*.part", "*.partial"});
+    // QUA-02: Use canonical ignore patterns from SyncSettings
+    setIgnorePatterns(SyncSettings::defaultIgnorePatterns());
 }
 
 LocalChangeWatcher::~LocalChangeWatcher() { stop(); }

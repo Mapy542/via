@@ -11,12 +11,16 @@
 #include <QSqlQuery>
 #include <QSqlRecord>
 #include <QStandardPaths>
+#include <atomic>
 #include <stdexcept>
 
 const QString SyncDatabase::DB_NAME = "via_sync.db";
 const int SyncDatabase::DB_VERSION = 5;
 
 namespace {
+
+static std::atomic<int> s_connectionCounter{0};
+
 bool tableHasColumn(QSqlDatabase& db, const QString& tableName, const QString& columnName) {
     QSqlQuery query(db);
     if (!query.exec(QString("PRAGMA table_info(%1)").arg(tableName))) {
@@ -57,8 +61,11 @@ bool SyncDatabase::initialize() {
         dir.mkpath(".");
     }
 
-    // Open database
-    m_db = QSqlDatabase::addDatabase("QSQLITE", "sync_connection");
+    // Open database — use a unique connection name per instance to avoid
+    // clashes when multiple SyncDatabase objects exist (e.g. in tests).
+    const QString connectionName =
+        QStringLiteral("sync_connection_%1").arg(s_connectionCounter.fetch_add(1));
+    m_db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
     m_db.setDatabaseName(m_dbPath);
 
     if (!m_db.open()) {
@@ -80,8 +87,9 @@ bool SyncDatabase::initialize() {
 
     int currentVersion = getStoredVersion();
     if (currentVersion > DB_VERSION) {
-        logError("initialize",
-                 QString("Database version %1 is newer than supported %2").arg(currentVersion).arg(DB_VERSION));
+        logError("initialize", QString("Database version %1 is newer than supported %2")
+                                   .arg(currentVersion)
+                                   .arg(DB_VERSION));
         return false;
     }
 
@@ -204,7 +212,9 @@ bool SyncDatabase::migrateDatabase(int currentVersion) {
         return true;
     }
 
-    logError("migrateDatabase", QString("No migration path from version %1 to %2").arg(currentVersion).arg(DB_VERSION));
+    logError(
+        "migrateDatabase",
+        QString("No migration path from version %1 to %2").arg(currentVersion).arg(DB_VERSION));
     return false;
 }
 
@@ -230,7 +240,8 @@ bool SyncDatabase::migrateFromV1ToV2() {
     }
 
     QSqlQuery selectQuery(m_db);
-    if (!selectQuery.exec("SELECT file_id, local_path, modified_time_at_sync, is_folder FROM files")) {
+    if (!selectQuery.exec(
+            "SELECT file_id, local_path, modified_time_at_sync, is_folder FROM files")) {
         logError("migrateFromV1ToV2 (select files)", selectQuery.lastError().text());
         query.exec("ROLLBACK");
         return false;
@@ -385,7 +396,8 @@ bool SyncDatabase::createTables() {
 
     // Create indexes
     query.exec("CREATE INDEX IF NOT EXISTS idx_files_local_path ON files(local_path)");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_files_file_id_local_path ON files(file_id, local_path)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_files_file_id_local_path ON files(file_id, local_path)");
     query.exec("CREATE INDEX IF NOT EXISTS idx_conflicts_local_path ON conflicts(local_path)");
     query.exec(
         "CREATE INDEX IF NOT EXISTS idx_conflict_versions_conflict_id ON "
@@ -440,7 +452,8 @@ FileSyncState SyncDatabase::getFileState(const QString& localPath) const {
         state.localPath = query.value("local_path").toString();
         state.fileId = query.value("file_id").toString();
 
-        state.modifiedTimeAtSync = QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
+        state.modifiedTimeAtSync =
+            QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
         state.isFolder = query.value("is_folder").toInt() == 1;
         state.remoteMd5AtSync = query.value("remote_md5_at_sync").toString();
         state.localHashAtSync = query.value("local_hash_at_sync").toString();
@@ -463,7 +476,8 @@ FileSyncState SyncDatabase::getFileStateById(const QString& fileId) const {
     if (query.exec() && query.next()) {
         state.localPath = query.value("local_path").toString();
         state.fileId = query.value("file_id").toString();
-        state.modifiedTimeAtSync = QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
+        state.modifiedTimeAtSync =
+            QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
         state.isFolder = query.value("is_folder").toInt() == 1;
         state.remoteMd5AtSync = query.value("remote_md5_at_sync").toString();
         state.localHashAtSync = query.value("local_hash_at_sync").toString();
@@ -696,7 +710,8 @@ void SyncDatabase::setContentHashesAtSync(const QString& localPath, const QStrin
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setContentHashesAtSync");
     QSqlQuery query(m_db);
-    query.prepare("UPDATE files SET remote_md5_at_sync = ?, local_hash_at_sync = ? WHERE local_path = ?");
+    query.prepare(
+        "UPDATE files SET remote_md5_at_sync = ?, local_hash_at_sync = ? WHERE local_path = ?");
     query.addBindValue(remoteMd5);
     query.addBindValue(localHash);
     query.addBindValue(localPath);
@@ -775,7 +790,7 @@ QString SyncDatabase::getChangeToken() const {
     QSqlQuery query(m_db);
     query.prepare("SELECT value FROM settings WHERE key = 'change_token'");
 
-    // TODO: Validate edge case of no key existing
+    // Returns empty QString when key doesn't exist (query.next() returns false)
     if (query.exec() && query.next()) {
         return query.value(0).toString();
     }
@@ -840,8 +855,9 @@ void SyncDatabase::requireRelativePath(const QString& path, const char* operatio
 
 void SyncDatabase::requireFileId(const QString& fileId, const char* operation) const {
     if (fileId.isEmpty()) {
-        throw std::invalid_argument(
-            QString("SyncDatabase::%1 requires a non-empty fileId").arg(QString::fromUtf8(operation)).toStdString());
+        throw std::invalid_argument(QString("SyncDatabase::%1 requires a non-empty fileId")
+                                        .arg(QString::fromUtf8(operation))
+                                        .toStdString());
     }
 }
 
@@ -903,7 +919,8 @@ int SyncDatabase::purgeOldDeletedRecords(int maxAgeDays) {
             removeFileQuery.prepare("DELETE FROM files WHERE file_id = ?");
             removeFileQuery.addBindValue(fileId);
             if (!removeFileQuery.exec()) {
-                logError("purgeOldDeletedRecords (remove from files)", removeFileQuery.lastError().text());
+                logError("purgeOldDeletedRecords (remove from files)",
+                         removeFileQuery.lastError().text());
             }
         }
     } else {
@@ -921,13 +938,15 @@ int SyncDatabase::purgeOldDeletedRecords(int maxAgeDays) {
 
     int rowsAffected = query.numRowsAffected();
     if (rowsAffected > 0) {
-        qInfo() << "Purged" << rowsAffected << "deleted file records older than" << maxAgeDays << "days";
+        qInfo() << "Purged" << rowsAffected << "deleted file records older than" << maxAgeDays
+                << "days";
     }
 
     return rowsAffected;
 }
 
-int SyncDatabase::upsertConflictRecord(const QString& localPath, const QString& fileId, const QString& conflictPath) {
+int SyncDatabase::upsertConflictRecord(const QString& localPath, const QString& fileId,
+                                       const QString& conflictPath) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "upsertConflictRecord");
     QSqlQuery query(m_db);
@@ -939,7 +958,8 @@ int SyncDatabase::upsertConflictRecord(const QString& localPath, const QString& 
     if (query.exec() && query.next()) {
         int conflictId = query.value(0).toInt();
         QSqlQuery updateQuery(m_db);
-        updateQuery.prepare("UPDATE conflicts SET file_id = ?, conflict_path = ?, detected_at = ? WHERE id = ?");
+        updateQuery.prepare(
+            "UPDATE conflicts SET file_id = ?, conflict_path = ?, detected_at = ? WHERE id = ?");
         updateQuery.addBindValue(fileId);
         updateQuery.addBindValue(conflictPath);
         updateQuery.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
@@ -983,7 +1003,8 @@ void SyncDatabase::addConflictVersion(int conflictId, const ConflictVersion& ver
     query.addBindValue(version.localModifiedTime.toString(Qt::ISODate));
     query.addBindValue(version.remoteModifiedTime.toString(Qt::ISODate));
     query.addBindValue(version.dbSyncTime.toString(Qt::ISODate));
-    QDateTime detectedAt = version.detectedAt.isValid() ? version.detectedAt : QDateTime::currentDateTime();
+    QDateTime detectedAt =
+        version.detectedAt.isValid() ? version.detectedAt : QDateTime::currentDateTime();
     query.addBindValue(detectedAt.toString(Qt::ISODate));
 
     if (!query.exec()) {
@@ -1023,7 +1044,8 @@ QList<ConflictRecord> SyncDatabase::getUnresolvedConflicts() {
         record.localPath = query.value("local_path").toString();
         record.fileId = query.value("file_id").toString();
         record.conflictPath = query.value("conflict_path").toString();
-        record.detectedAt = QDateTime::fromString(query.value("detected_at").toString(), Qt::ISODate);
+        record.detectedAt =
+            QDateTime::fromString(query.value("detected_at").toString(), Qt::ISODate);
         record.resolved = query.value("resolved").toInt() == 1;
 
         QSqlQuery versionQuery(m_db);
@@ -1038,12 +1060,14 @@ QList<ConflictRecord> SyncDatabase::getUnresolvedConflicts() {
             while (versionQuery.next()) {
                 ConflictVersion version;
                 version.id = versionQuery.value("id").toInt();
-                version.localModifiedTime =
-                    QDateTime::fromString(versionQuery.value("local_modified_time").toString(), Qt::ISODate);
-                version.remoteModifiedTime =
-                    QDateTime::fromString(versionQuery.value("remote_modified_time").toString(), Qt::ISODate);
-                version.dbSyncTime = QDateTime::fromString(versionQuery.value("db_sync_time").toString(), Qt::ISODate);
-                version.detectedAt = QDateTime::fromString(versionQuery.value("detected_at").toString(), Qt::ISODate);
+                version.localModifiedTime = QDateTime::fromString(
+                    versionQuery.value("local_modified_time").toString(), Qt::ISODate);
+                version.remoteModifiedTime = QDateTime::fromString(
+                    versionQuery.value("remote_modified_time").toString(), Qt::ISODate);
+                version.dbSyncTime = QDateTime::fromString(
+                    versionQuery.value("db_sync_time").toString(), Qt::ISODate);
+                version.detectedAt = QDateTime::fromString(
+                    versionQuery.value("detected_at").toString(), Qt::ISODate);
                 record.versions.append(version);
             }
         }
@@ -1179,10 +1203,13 @@ FuseMetadata SyncDatabase::getFuseMetadata(const QString& fileId) const {
         metadata.isFolder = query.value("is_folder").toInt() == 1;
         metadata.size = query.value("size").toLongLong();
         metadata.mimeType = query.value("mime_type").toString();
-        metadata.createdTime = QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-        metadata.modifiedTime = QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
+        metadata.createdTime =
+            QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
+        metadata.modifiedTime =
+            QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
         metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-        metadata.lastAccessed = QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+        metadata.lastAccessed =
+            QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
     }
 
     return metadata;
@@ -1204,10 +1231,13 @@ FuseMetadata SyncDatabase::getFuseMetadataByPath(const QString& path) const {
         metadata.isFolder = query.value("is_folder").toInt() == 1;
         metadata.size = query.value("size").toLongLong();
         metadata.mimeType = query.value("mime_type").toString();
-        metadata.createdTime = QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-        metadata.modifiedTime = QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
+        metadata.createdTime =
+            QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
+        metadata.modifiedTime =
+            QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
         metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-        metadata.lastAccessed = QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+        metadata.lastAccessed =
+            QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
     }
 
     return metadata;
@@ -1276,10 +1306,14 @@ QList<FuseMetadata> SyncDatabase::getFuseChildren(const QString& parentId) const
             metadata.isFolder = query.value("is_folder").toInt() == 1;
             metadata.size = query.value("size").toLongLong();
             metadata.mimeType = query.value("mime_type").toString();
-            metadata.createdTime = QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-            metadata.modifiedTime = QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
-            metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-            metadata.lastAccessed = QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+            metadata.createdTime =
+                QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
+            metadata.modifiedTime =
+                QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
+            metadata.cachedAt =
+                QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
+            metadata.lastAccessed =
+                QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
             children.append(metadata);
         }
     }
@@ -1302,10 +1336,14 @@ QList<FuseMetadata> SyncDatabase::getAllFuseMetadata() const {
             metadata.isFolder = query.value("is_folder").toInt() == 1;
             metadata.size = query.value("size").toLongLong();
             metadata.mimeType = query.value("mime_type").toString();
-            metadata.createdTime = QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-            metadata.modifiedTime = QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
-            metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-            metadata.lastAccessed = QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+            metadata.createdTime =
+                QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
+            metadata.modifiedTime =
+                QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
+            metadata.cachedAt =
+                QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
+            metadata.lastAccessed =
+                QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
             result.append(metadata);
         }
     }
@@ -1334,8 +1372,9 @@ int SyncDatabase::updateFuseChildrenPaths(const QString& parentFileId, const QSt
 
         // Recurse into sub-directories
         if (updatedChild.isFolder) {
-            updated += updateFuseChildrenPaths(updatedChild.fileId, oldParentPath + "/" + child.name,
-                                               newParentPath + "/" + child.name);
+            updated +=
+                updateFuseChildrenPaths(updatedChild.fileId, oldParentPath + "/" + child.name,
+                                        newParentPath + "/" + child.name);
         }
     }
 
@@ -1354,8 +1393,10 @@ QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
             FuseDirtyFile entry;
             entry.fileId = query.value("file_id").toString();
             entry.path = query.value("path").toString();
-            entry.markedDirtyAt = QDateTime::fromString(query.value("marked_dirty_at").toString(), Qt::ISODate);
-            entry.lastUploadAttempt = QDateTime::fromString(query.value("last_upload_attempt").toString(), Qt::ISODate);
+            entry.markedDirtyAt =
+                QDateTime::fromString(query.value("marked_dirty_at").toString(), Qt::ISODate);
+            entry.lastUploadAttempt =
+                QDateTime::fromString(query.value("last_upload_attempt").toString(), Qt::ISODate);
             entry.uploadFailed = query.value("upload_failed").toInt() != 0;
             dirtyFiles.append(entry);
         }
@@ -1465,8 +1506,10 @@ QList<FuseCacheEntry> SyncDatabase::getFuseCacheEntries() const {
             entry.fileId = query.value("file_id").toString();
             entry.cachePath = query.value("cache_path").toString();
             entry.size = query.value("size").toLongLong();
-            entry.lastAccessed = QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
-            entry.downloadCompleted = QDateTime::fromString(query.value("download_completed").toString(), Qt::ISODate);
+            entry.lastAccessed =
+                QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+            entry.downloadCompleted =
+                QDateTime::fromString(query.value("download_completed").toString(), Qt::ISODate);
             entries.append(entry);
         }
     }
@@ -1474,7 +1517,8 @@ QList<FuseCacheEntry> SyncDatabase::getFuseCacheEntries() const {
     return entries;
 }
 
-bool SyncDatabase::recordFuseCacheEntry(const QString& fileId, const QString& cachePath, qint64 size) {
+bool SyncDatabase::recordFuseCacheEntry(const QString& fileId, const QString& cachePath,
+                                        qint64 size) {
     QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
@@ -1563,16 +1607,22 @@ bool SyncDatabase::clearAllData() {
 
     // Order matters: delete from child tables before parents to satisfy
     // any future foreign-key constraints without requiring PRAGMA changes.
-    static const char* tables[] = {"conflict_versions", "conflicts",          "deleted_files", "files",
-                                   "fuse_dirty_files",  "fuse_cache_entries", "fuse_metadata", "fuse_sync_state",
-                                   "settings"};
-
+    static const char* tables[] = {
+        "conflict_versions",  "conflicts",     "deleted_files",   "files",   "fuse_dirty_files",
+        "fuse_cache_entries", "fuse_metadata", "fuse_sync_state", "settings"};
     QSqlQuery query(m_db);
     for (const char* table : tables) {
-        const QString sql = QStringLiteral("DELETE FROM %1").arg(QLatin1String(table));
+        QString sql;
+        if (QLatin1String(table) == QLatin1String("settings")) {
+            // Preserve the schema version key so initialize() doesn't
+            // re-run migrations on the next startup (DAT-01 fix).
+            sql = QStringLiteral("DELETE FROM settings WHERE key != 'version'");
+        } else {
+            sql = QStringLiteral("DELETE FROM %1").arg(QLatin1String(table));
+        }
         if (!query.exec(sql)) {
-            logError("clearAllData",
-                     QStringLiteral("Failed to clear %1: %2").arg(QLatin1String(table), query.lastError().text()));
+            logError("clearAllData", QStringLiteral("Failed to clear %1: %2")
+                                         .arg(QLatin1String(table), query.lastError().text()));
             return false;
         }
     }
