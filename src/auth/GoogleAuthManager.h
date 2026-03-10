@@ -179,6 +179,7 @@ class GoogleAuthManager : public QObject {
 
     bool m_authenticated;
     bool m_refreshInFlight = false;  ///< Guards against concurrent token refreshes
+    QString m_expectedState;         ///< CSRF state token for in-flight auth
 
     // Google OAuth endpoints
     static const QString AUTH_URL;
