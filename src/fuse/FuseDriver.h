@@ -418,7 +418,7 @@ class FuseDriver : public QObject {
     // ========================================================================
     // FUSE Operation Callbacks (static, required by FUSE API)
     // These are registered with the FUSE library and called from the FUSE
-    // thread context. They use s_instance to access the FuseDriver object.
+    // thread context. They recover the FuseDriver instance via fuse_get_context()->private_data.
     // ========================================================================
 
     /**
@@ -703,13 +703,6 @@ class FuseDriver : public QObject {
     uint64_t m_nextFileHandle;                 ///< Next file handle to assign
     mutable QMutex m_openFilesMutex;           ///< Mutex for m_openFiles access
     QSemaphore m_mountReadySemaphore;          ///< Signals FUSE init completion
-
-    // Static instance for FUSE callbacks
-    // TODO (CON-03): Replace singleton with proper FUSE private_data context. Pass `this`
-    // via fuse_new() private_data and recover it in callbacks via fuse_get_context()->private_data.
-    // The current static pointer prevents multiple mount points and introduces unsynchronised
-    // global mutable state between the FUSE thread and the main thread.
-    static FuseDriver* s_instance;  ///< Singleton instance for callbacks
 };
 
 #endif  // FUSEDRIVER_H

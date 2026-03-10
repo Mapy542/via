@@ -33,10 +33,12 @@
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 
-// Static instance for FUSE callbacks
-FuseDriver* FuseDriver::s_instance = nullptr;
-
 namespace {
+
+/// Recover the FuseDriver instance from FUSE's per-mount private_data.
+static inline FuseDriver* self() {
+    return static_cast<FuseDriver*>(fuse_get_context()->private_data);
+}
 
 constexpr int FUSE_API_TIMEOUT_MS = 30000;
 
@@ -620,9 +622,6 @@ FuseDriver::FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, Q
     // Set default mount point
     m_mountPoint = QDir::homePath() + "/GoogleDriveFuse";
 
-    // Set static instance for FUSE callbacks
-    s_instance = this;
-
     qDebug() << "FuseDriver: Initialized with mount point:" << m_mountPoint;
 }
 
@@ -637,8 +636,6 @@ FuseDriver::~FuseDriver() {
 
     delete m_metadataCache;
     m_metadataCache = nullptr;
-
-    s_instance = nullptr;
 }
 
 // ============================================================================
@@ -1088,6 +1085,7 @@ void FuseDriver::flushDirtyFiles() {
 
 int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_file_info* fi) {
     Q_UNUSED(fi)
+    auto* drv = self();
 
     memset(stbuf, 0, sizeof(struct stat));
 
@@ -1109,11 +1107,11 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
     }
 
     // Look up in FUSE metadata database
-    if (s_instance && s_instance->m_database) {
-        FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+    if (drv && drv->m_database) {
+        FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
 
         // If not found, try lazy-populating the parent directory from the API
-        if (meta.fileId.isEmpty() && s_instance->m_driveClient) {
+        if (meta.fileId.isEmpty() && drv->m_driveClient) {
             // Extract parent path and entry name
             QString parentPath;
             int lastSlash = lookupPath.lastIndexOf('/');
@@ -1125,13 +1123,13 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
             // Find parent folder ID
             QString parentId;
             if (parentPath.isEmpty()) {
-                parentId = s_instance->m_metadataCache ? s_instance->m_metadataCache->rootFolderId()
+                parentId = drv->m_metadataCache ? drv->m_metadataCache->rootFolderId()
                                                        : QStringLiteral("root");
                 if (parentId.isEmpty()) {
                     parentId = QStringLiteral("root");
                 }
             } else {
-                FuseMetadata parentMeta = s_instance->m_database->getFuseMetadataByPath(parentPath);
+                FuseMetadata parentMeta = drv->m_database->getFuseMetadataByPath(parentPath);
                 if (!parentMeta.fileId.isEmpty()) {
                     parentId = parentMeta.fileId;
                 }
@@ -1140,15 +1138,15 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
             // Only fetch if we found the parent
             if (!parentId.isEmpty()) {
                 // Check if we already have children for this parent (avoid re-fetching)
-                QList<FuseMetadata> siblings = s_instance->m_database->getFuseChildren(parentId);
+                QList<FuseMetadata> siblings = drv->m_database->getFuseChildren(parentId);
                 if (siblings.isEmpty()) {
                     qDebug() << "FuseDriver::getattr: Cache miss for" << lookupPath
                              << ", fetching parent children from API...";
 
                     QList<DriveFile> apiFiles;
                     QMetaObject::invokeMethod(
-                        s_instance->m_driveClient,
-                        [&apiFiles, parentId, driveClient = s_instance->m_driveClient]() {
+                        drv->m_driveClient,
+                        [&apiFiles, parentId, driveClient = drv->m_driveClient]() {
                             apiFiles = driveClient->listFilesBlocking(parentId);
                         },
                         Qt::BlockingQueuedConnection);
@@ -1176,9 +1174,9 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                             newMeta.path = parentPath + "/" + file.name;
                         }
 
-                        s_instance->m_database->saveFuseMetadata(newMeta);
+                        drv->m_database->saveFuseMetadata(newMeta);
 
-                        if (s_instance->m_metadataCache) {
+                        if (drv->m_metadataCache) {
                             FuseFileMetadata cacheMeta;
                             cacheMeta.fileId = newMeta.fileId;
                             cacheMeta.path = newMeta.path;
@@ -1191,12 +1189,12 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                             cacheMeta.modifiedTime = newMeta.modifiedTime;
                             cacheMeta.cachedAt = newMeta.cachedAt;
                             cacheMeta.lastAccessed = newMeta.lastAccessed;
-                            s_instance->m_metadataCache->setMetadata(cacheMeta);
+                            drv->m_metadataCache->setMetadata(cacheMeta);
                         }
                     }
 
                     // Retry lookup after populating
-                    meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+                    meta = drv->m_database->getFuseMetadataByPath(lookupPath);
                 }
             }
         }
@@ -1231,6 +1229,7 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     Q_UNUSED(offset)
     Q_UNUSED(fi)
     Q_UNUSED(flags)
+    auto* drv = self();
 
     QString qpath = normalizePath(path);
 
@@ -1238,7 +1237,7 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     filler(buf, ".", nullptr, 0, FUSE_FILL_DIR_PLUS);
     filler(buf, "..", nullptr, 0, FUSE_FILL_DIR_PLUS);
 
-    if (!s_instance || !s_instance->m_database || !s_instance->m_driveClient) {
+    if (!drv || !drv->m_database || !drv->m_driveClient) {
         return 0;
     }
 
@@ -1253,9 +1252,9 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         cacheLookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
     }
 
-    if (s_instance->m_metadataCache &&
-        s_instance->m_metadataCache->hasChildrenCached(cacheLookupPath)) {
-        QList<FuseFileMetadata> cached = s_instance->m_metadataCache->getChildren(cacheLookupPath);
+    if (drv->m_metadataCache &&
+        drv->m_metadataCache->hasChildrenCached(cacheLookupPath)) {
+        QList<FuseFileMetadata> cached = drv->m_metadataCache->getChildren(cacheLookupPath);
         qDebug() << "FuseDriver::readdir: Serving" << cached.size() << "entries from cache for"
                  << qpath;
         for (const FuseFileMetadata& child : cached) {
@@ -1268,14 +1267,14 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     // Get parent folder ID
     QString parentId;
     if (qpath.isEmpty() || qpath == "/") {
-        parentId = s_instance->m_metadataCache ? s_instance->m_metadataCache->rootFolderId()
+        parentId = drv->m_metadataCache ? drv->m_metadataCache->rootFolderId()
                                                : QStringLiteral("root");
         if (parentId.isEmpty()) {
             parentId = QStringLiteral("root");
         }
     } else {
         QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
-        FuseMetadata parentMeta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+        FuseMetadata parentMeta = drv->m_database->getFuseMetadataByPath(lookupPath);
         if (!parentMeta.fileId.isEmpty()) {
             parentId = parentMeta.fileId;
         } else {
@@ -1289,8 +1288,8 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     QList<DriveFile> apiFiles;
     // Must invoke on main thread since QNetworkAccessManager lives there
     QMetaObject::invokeMethod(
-        s_instance->m_driveClient,
-        [&apiFiles, parentId, driveClient = s_instance->m_driveClient]() {
+        drv->m_driveClient,
+        [&apiFiles, parentId, driveClient = drv->m_driveClient]() {
             apiFiles = driveClient->listFilesBlocking(parentId);
         },
         Qt::BlockingQueuedConnection);
@@ -1325,11 +1324,11 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
             meta.path = parentPath + "/" + file.name;
         }
 
-        s_instance->m_database->saveFuseMetadata(meta);
+        drv->m_database->saveFuseMetadata(meta);
         children.append(meta);
 
         // Also update MetadataCache in-memory if available
-        if (s_instance->m_metadataCache) {
+        if (drv->m_metadataCache) {
             FuseFileMetadata cacheMeta;
             cacheMeta.fileId = meta.fileId;
             cacheMeta.path = meta.path;
@@ -1342,7 +1341,7 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
             cacheMeta.modifiedTime = meta.modifiedTime;
             cacheMeta.cachedAt = meta.cachedAt;
             cacheMeta.lastAccessed = meta.lastAccessed;
-            s_instance->m_metadataCache->setMetadata(cacheMeta);
+            drv->m_metadataCache->setMetadata(cacheMeta);
         }
     }
 
@@ -1354,15 +1353,16 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
 }
 
 int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
+    auto* drv = self();
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
-    if (!s_instance || !s_instance->m_database || !s_instance->m_fileCache) {
+    if (!drv || !drv->m_database || !drv->m_fileCache) {
         return -EIO;
     }
 
     // Get file metadata
-    FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
     }
@@ -1372,7 +1372,7 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
     }
 
     // Get cached file path (may trigger download)
-    QString cachePath = s_instance->m_fileCache->getCachedPath(meta.fileId, meta.size);
+    QString cachePath = drv->m_fileCache->getCachedPath(meta.fileId, meta.size);
     if (cachePath.isEmpty()) {
         return -EIO;
     }
@@ -1386,10 +1386,10 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
     openFile.writable = (fi->flags & O_WRONLY) || (fi->flags & O_RDWR);
     openFile.dirty = false;
 
-    fi->fh = s_instance->registerOpenFile(openFile);
+    fi->fh = drv->registerOpenFile(openFile);
 
-    if (s_instance) {
-        emit s_instance->fileAccessed(qpath);
+    if (drv) {
+        emit drv->fileAccessed(qpath);
     }
 
     return 0;
@@ -1398,20 +1398,21 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
 int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
                          struct fuse_file_info* fi) {
     Q_UNUSED(path)
+    auto* drv = self();
 
-    if (!s_instance) {
+    if (!drv) {
         return -EIO;
     }
 
-    auto openFileOpt = s_instance->getOpenFile(fi->fh);
+    auto openFileOpt = drv->getOpenFile(fi->fh);
     if (!openFileOpt) {
         return -EBADF;
     }
     FuseOpenFile openFile = *openFileOpt;
 
     // Update access time
-    if (s_instance->m_fileCache) {
-        s_instance->m_fileCache->updateAccessTime(openFile.fileId);
+    if (drv->m_fileCache) {
+        drv->m_fileCache->updateAccessTime(openFile.fileId);
     }
 
     // Read from cached file
@@ -1433,12 +1434,13 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
 int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t offset,
                           struct fuse_file_info* fi) {
     Q_UNUSED(path)
+    auto* drv = self();
 
-    if (!s_instance) {
+    if (!drv) {
         return -EIO;
     }
 
-    auto openFileOpt = s_instance->getOpenFile(fi->fh);
+    auto openFileOpt = drv->getOpenFile(fi->fh);
     if (!openFileOpt) {
         return -EBADF;
     }
@@ -1467,13 +1469,13 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
 
     // Mark file as dirty (for DirtySyncWorker to upload)
     if (!openFile.dirty) {
-        s_instance->markOpenFileDirty(fi->fh);
-        if (s_instance->m_fileCache) {
+        drv->markOpenFileDirty(fi->fh);
+        if (drv->m_fileCache) {
             QString lookupPath =
                 openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
-            s_instance->m_fileCache->markDirty(openFile.fileId, lookupPath);
+            drv->m_fileCache->markDirty(openFile.fileId, lookupPath);
         }
-        emit s_instance->fileModified(openFile.path);
+        emit drv->fileModified(openFile.path);
     }
 
     return written;
@@ -1481,38 +1483,39 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
 
 int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
     Q_UNUSED(path)
+    auto* drv = self();
 
-    if (s_instance) {
-        auto openFileOpt = s_instance->getOpenFile(fi->fh);
+    if (drv) {
+        auto openFileOpt = drv->getOpenFile(fi->fh);
 
         if (openFileOpt && openFileOpt->dirty && !openFileOpt->fileId.isEmpty()) {
             FuseOpenFile openFile = *openFileOpt;
 
             // Optimistic local metadata update so stat() returns
             // a reasonable size/mtime immediately after close.
-            if (s_instance->m_database) {
+            if (drv->m_database) {
                 QString lookupPath =
                     openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
-                FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+                FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
                 if (!meta.fileId.isEmpty()) {
                     meta.size = QFileInfo(openFile.cachePath).size();
                     meta.modifiedTime = QDateTime::currentDateTime();
                     meta.lastAccessed = QDateTime::currentDateTime();
-                    s_instance->m_database->saveFuseMetadata(meta);
+                    drv->m_database->saveFuseMetadata(meta);
                 }
             }
 
             // Kick the DirtySyncWorker so the upload starts promptly
             // instead of waiting for the next timer tick.
-            if (s_instance->m_dirtySyncWorker) {
-                QMetaObject::invokeMethod(s_instance->m_dirtySyncWorker, "syncNow",
+            if (drv->m_dirtySyncWorker) {
+                QMetaObject::invokeMethod(drv->m_dirtySyncWorker, "syncNow",
                                           Qt::QueuedConnection);
             }
 
             qDebug() << "FuseDriver: release – deferred upload for" << openFile.path;
         }
 
-        s_instance->unregisterOpenFile(fi->fh);
+        drv->unregisterOpenFile(fi->fh);
     }
 
     return 0;
@@ -1521,12 +1524,13 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
 int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info* fi) {
     Q_UNUSED(path)
     Q_UNUSED(datasync)
+    auto* drv = self();
 
-    if (!s_instance) {
+    if (!drv) {
         return -EIO;
     }
 
-    auto openFileOpt = s_instance->getOpenFile(fi->fh);
+    auto openFileOpt = drv->getOpenFile(fi->fh);
     if (!openFileOpt) {
         return -EBADF;
     }
@@ -1536,7 +1540,7 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
         return 0;
     }
 
-    if (!s_instance->m_driveClient) {
+    if (!drv->m_driveClient) {
         return -EIO;
     }
 
@@ -1547,23 +1551,23 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
 
     // Synchronous upload – the caller explicitly asked for data persistence.
     if (waitForUpdate(
-            s_instance->m_driveClient, openFile.fileId, &updatedFile,
+            drv->m_driveClient, openFile.fileId, &updatedFile,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                    s_instance->m_driveClient->updateFile(openFile.fileId, openFile.cachePath);
+                return invokeDriveCall(drv->m_driveClient, [&]() {
+                    drv->m_driveClient->updateFile(openFile.fileId, openFile.cachePath);
                 });
             },
             &error, &authFailure)) {
         // Upload succeeded – clear dirty state.
-        if (s_instance->m_fileCache) {
-            s_instance->m_fileCache->clearDirty(openFile.fileId);
+        if (drv->m_fileCache) {
+            drv->m_fileCache->clearDirty(openFile.fileId);
         }
-        s_instance->markOpenFileClean(fi->fh);
+        drv->markOpenFileClean(fi->fh);
 
-        if (s_instance->m_database) {
+        if (drv->m_database) {
             QString lookupPath =
                 openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
-            FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+            FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
             if (!meta.fileId.isEmpty()) {
                 meta.size = QFileInfo(openFile.cachePath).size();
                 if (updatedFile.modifiedTime.isValid()) {
@@ -1571,7 +1575,7 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
                 }
                 meta.lastAccessed = QDateTime::currentDateTime();
                 meta.cachedAt = QDateTime::currentDateTime();
-                s_instance->m_database->saveFuseMetadata(meta);
+                drv->m_database->saveFuseMetadata(meta);
             }
         }
         return 0;
@@ -1584,12 +1588,13 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
 
 int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     Q_UNUSED(mode)
+    auto* drv = self();
 
     QString qpath = normalizePath(path);
     QString parentPath = getParentPath(qpath);
     QString folderName = getFileName(qpath);
 
-    if (!s_instance || !s_instance->m_driveClient || !s_instance->m_database) {
+    if (!drv || !drv->m_driveClient || !drv->m_database) {
         return -EIO;
     }
 
@@ -1597,7 +1602,7 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     QString parentId = "root";
     if (!parentPath.isEmpty() && parentPath != "/") {
         QString lookupPath = parentPath.startsWith("/") ? parentPath.mid(1) : parentPath;
-        FuseMetadata parentMeta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+        FuseMetadata parentMeta = drv->m_database->getFuseMetadataByPath(lookupPath);
         if (!parentMeta.fileId.isEmpty()) {
             parentId = parentMeta.fileId;
         } else {
@@ -1611,10 +1616,10 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     DriveFile createdFolder;
     bool authFailure = false;
     if (!waitForFolderCreate(
-            s_instance->m_driveClient, requestLocalPath,
+            drv->m_driveClient, requestLocalPath,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                    s_instance->m_driveClient->createFolder(folderName, parentId, requestLocalPath);
+                return invokeDriveCall(drv->m_driveClient, [&]() {
+                    drv->m_driveClient->createFolder(folderName, parentId, requestLocalPath);
                 });
             },
             &createdFolder, &error, &authFailure)) {
@@ -1639,7 +1644,7 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     newMeta.cachedAt = QDateTime::currentDateTime();
     newMeta.lastAccessed = QDateTime::currentDateTime();
 
-    if (!s_instance->m_database->saveFuseMetadata(newMeta)) {
+    if (!drv->m_database->saveFuseMetadata(newMeta)) {
         return -EIO;
     }
 
@@ -1647,14 +1652,15 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
 }
 
 int FuseDriver::fuseRmdir(const char* path) {
+    auto* drv = self();
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
-    if (!s_instance || !s_instance->m_database || !s_instance->m_driveClient) {
+    if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
     }
 
-    FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
     }
@@ -1664,7 +1670,7 @@ int FuseDriver::fuseRmdir(const char* path) {
     }
 
     // Check if directory is empty
-    QList<FuseMetadata> children = s_instance->m_database->getFuseChildren(meta.fileId);
+    QList<FuseMetadata> children = drv->m_database->getFuseChildren(meta.fileId);
     if (!children.isEmpty()) {
         return -ENOTEMPTY;
     }
@@ -1673,10 +1679,10 @@ int FuseDriver::fuseRmdir(const char* path) {
     QString error;
     bool authFailure = false;
     if (!waitForDelete(
-            s_instance->m_driveClient, meta.fileId,
+            drv->m_driveClient, meta.fileId,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                    s_instance->m_driveClient->deleteFile(meta.fileId);
+                return invokeDriveCall(drv->m_driveClient, [&]() {
+                    drv->m_driveClient->deleteFile(meta.fileId);
                 });
             },
             &error, &authFailure)) {
@@ -1685,20 +1691,21 @@ int FuseDriver::fuseRmdir(const char* path) {
     }
 
     // Remove from metadata only after remote delete confirmed
-    s_instance->m_database->deleteFuseMetadata(meta.fileId);
+    drv->m_database->deleteFuseMetadata(meta.fileId);
 
     return 0;
 }
 
 int FuseDriver::fuseUnlink(const char* path) {
+    auto* drv = self();
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
-    if (!s_instance || !s_instance->m_database || !s_instance->m_driveClient) {
+    if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
     }
 
-    FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
     }
@@ -1711,10 +1718,10 @@ int FuseDriver::fuseUnlink(const char* path) {
     QString error;
     bool authFailure = false;
     if (!waitForDelete(
-            s_instance->m_driveClient, meta.fileId,
+            drv->m_driveClient, meta.fileId,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                    s_instance->m_driveClient->deleteFile(meta.fileId);
+                return invokeDriveCall(drv->m_driveClient, [&]() {
+                    drv->m_driveClient->deleteFile(meta.fileId);
                 });
             },
             &error, &authFailure)) {
@@ -1723,29 +1730,30 @@ int FuseDriver::fuseUnlink(const char* path) {
     }
 
     // Remove from cache only after remote delete confirmed
-    if (s_instance->m_fileCache) {
-        s_instance->m_fileCache->removeFromCache(meta.fileId);
+    if (drv->m_fileCache) {
+        drv->m_fileCache->removeFromCache(meta.fileId);
     }
 
     // Remove from metadata
-    s_instance->m_database->deleteFuseMetadata(meta.fileId);
+    drv->m_database->deleteFuseMetadata(meta.fileId);
 
     return 0;
 }
 
 int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags) {
     Q_UNUSED(flags)
+    auto* drv = self();
 
     QString fromPath = normalizePath(from);
     QString toPath = normalizePath(to);
     QString fromLookup = fromPath.startsWith("/") ? fromPath.mid(1) : fromPath;
     QString toLookup = toPath.startsWith("/") ? toPath.mid(1) : toPath;
 
-    if (!s_instance || !s_instance->m_database || !s_instance->m_driveClient) {
+    if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
     }
 
-    FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(fromLookup);
+    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(fromLookup);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
     }
@@ -1765,7 +1773,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
             QString newParentLookup =
                 newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
             FuseMetadata newParentMeta =
-                s_instance->m_database->getFuseMetadataByPath(newParentLookup);
+                drv->m_database->getFuseMetadataByPath(newParentLookup);
             if (newParentMeta.fileId.isEmpty() || !newParentMeta.isFolder) {
                 return -ENOENT;
             }
@@ -1781,10 +1789,10 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         DriveFile resultFile;
         bool authFailure = false;
         if (!waitForMoveAndRename(
-                s_instance->m_driveClient, meta.fileId, &resultFile,
+                drv->m_driveClient, meta.fileId, &resultFile,
                 [&]() {
-                    return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                        s_instance->m_driveClient->moveAndRenameFile(meta.fileId, newParentId,
+                    return invokeDriveCall(drv->m_driveClient, [&]() {
+                        drv->m_driveClient->moveAndRenameFile(meta.fileId, newParentId,
                                                                      oldParentId, newName);
                     });
                 },
@@ -1804,7 +1812,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
             QString newParentLookup =
                 newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
             FuseMetadata newParentMeta =
-                s_instance->m_database->getFuseMetadataByPath(newParentLookup);
+                drv->m_database->getFuseMetadataByPath(newParentLookup);
             if (newParentMeta.fileId.isEmpty() || !newParentMeta.isFolder) {
                 return -ENOENT;
             }
@@ -1820,10 +1828,10 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         DriveFile movedFile;
         bool authFailure = false;
         if (!waitForMove(
-                s_instance->m_driveClient, meta.fileId, &movedFile,
+                drv->m_driveClient, meta.fileId, &movedFile,
                 [&]() {
-                    return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                        s_instance->m_driveClient->moveFile(meta.fileId, newParentId, oldParentId);
+                    return invokeDriveCall(drv->m_driveClient, [&]() {
+                        drv->m_driveClient->moveFile(meta.fileId, newParentId, oldParentId);
                     });
                 },
                 &error, &authFailure)) {
@@ -1840,10 +1848,10 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         DriveFile renamedFile;
         bool authFailure = false;
         if (!waitForRename(
-                s_instance->m_driveClient, meta.fileId, &renamedFile,
+                drv->m_driveClient, meta.fileId, &renamedFile,
                 [&]() {
-                    return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                        s_instance->m_driveClient->renameFile(meta.fileId, newName);
+                    return invokeDriveCall(drv->m_driveClient, [&]() {
+                        drv->m_driveClient->renameFile(meta.fileId, newName);
                     });
                 },
                 &error, &authFailure)) {
@@ -1861,11 +1869,11 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
     meta.path = toLookup;
     meta.cachedAt = QDateTime::currentDateTime();
     meta.lastAccessed = QDateTime::currentDateTime();
-    s_instance->m_database->saveFuseMetadata(meta);
+    drv->m_database->saveFuseMetadata(meta);
 
     // H2 fix: recursively update paths of all descendants
     if (meta.isFolder) {
-        s_instance->m_database->updateFuseChildrenPaths(meta.fileId, fromLookup, toLookup);
+        drv->m_database->updateFuseChildrenPaths(meta.fileId, fromLookup, toLookup);
     }
 
     return 0;
@@ -1873,21 +1881,22 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
 
 int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
     Q_UNUSED(fi)
+    auto* drv = self();
 
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
-    if (!s_instance || !s_instance->m_database || !s_instance->m_fileCache) {
+    if (!drv || !drv->m_database || !drv->m_fileCache) {
         return -EIO;
     }
 
-    FuseMetadata meta = s_instance->m_database->getFuseMetadataByPath(lookupPath);
+    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
     }
 
     // M2 fix: Download file if not cached, so truncate works correctly
-    QString cachePath = s_instance->m_fileCache->getCachedPath(meta.fileId, meta.size);
+    QString cachePath = drv->m_fileCache->getCachedPath(meta.fileId, meta.size);
     if (cachePath.isEmpty()) {
         return -EIO;
     }
@@ -1902,20 +1911,21 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
     }
 
     // Mark as dirty for upload
-    s_instance->m_fileCache->markDirty(meta.fileId, lookupPath);
+    drv->m_fileCache->markDirty(meta.fileId, lookupPath);
 
     return 0;
 }
 
 int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
     Q_UNUSED(mode)
+    auto* drv = self();
 
     QString qpath = normalizePath(path);
     QString parentPath = getParentPath(qpath);
     QString fileName = getFileName(qpath);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
-    if (!s_instance || !s_instance->m_driveClient || !s_instance->m_fileCache) {
+    if (!drv || !drv->m_driveClient || !drv->m_fileCache) {
         return -EIO;
     }
 
@@ -1923,7 +1933,7 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     QString parentId = "root";
     if (!parentPath.isEmpty() && parentPath != "/") {
         QString parentLookup = parentPath.startsWith("/") ? parentPath.mid(1) : parentPath;
-        FuseMetadata parentMeta = s_instance->m_database->getFuseMetadataByPath(parentLookup);
+        FuseMetadata parentMeta = drv->m_database->getFuseMetadataByPath(parentLookup);
         if (parentMeta.fileId.isEmpty()) {
             // GPT5.3 #5 fix: return ENOENT instead of silently falling back to root
             return -ENOENT;
@@ -1935,7 +1945,7 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     QString tempId = QStringLiteral("temp_create_%1_%2")
                          .arg(QDateTime::currentMSecsSinceEpoch())
                          .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
-    QString tempCachePath = s_instance->m_fileCache->getCachePathForFile(tempId);
+    QString tempCachePath = drv->m_fileCache->getCachePathForFile(tempId);
     QDir().mkpath(QFileInfo(tempCachePath).path());
     QFile tempFile(tempCachePath);
     if (!tempFile.open(QIODevice::WriteOnly)) {
@@ -1948,10 +1958,10 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     DriveFile uploadedFile;
     bool authFailure = false;
     if (!waitForUpload(
-            s_instance->m_driveClient, tempCachePath, &uploadedFile,
+            drv->m_driveClient, tempCachePath, &uploadedFile,
             [&]() {
-                return invokeDriveCall(s_instance->m_driveClient, [&]() {
-                    s_instance->m_driveClient->uploadFile(tempCachePath, parentId, fileName);
+                return invokeDriveCall(drv->m_driveClient, [&]() {
+                    drv->m_driveClient->uploadFile(tempCachePath, parentId, fileName);
                 });
             },
             &error, &authFailure)) {
@@ -1966,7 +1976,7 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     }
 
     // Rename temp cache file to canonical fileId path
-    QString canonicalCachePath = s_instance->m_fileCache->getCachePathForFile(uploadedFile.id);
+    QString canonicalCachePath = drv->m_fileCache->getCachePathForFile(uploadedFile.id);
     QDir().mkpath(QFileInfo(canonicalCachePath).path());
     if (canonicalCachePath != tempCachePath) {
         QFile::remove(canonicalCachePath);
@@ -1975,7 +1985,7 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
         }
     }
 
-    s_instance->m_fileCache->recordCacheEntry(uploadedFile.id, canonicalCachePath,
+    drv->m_fileCache->recordCacheEntry(uploadedFile.id, canonicalCachePath,
                                               QFileInfo(canonicalCachePath).size());
 
     FuseMetadata newMeta;
@@ -1990,13 +2000,13 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     newMeta.modifiedTime = uploadedFile.modifiedTime;
     newMeta.cachedAt = QDateTime::currentDateTime();
     newMeta.lastAccessed = QDateTime::currentDateTime();
-    if (!s_instance->m_database->saveFuseMetadata(newMeta)) {
+    if (!drv->m_database->saveFuseMetadata(newMeta)) {
         // ROB-06: Clean up orphaned remote file since metadata save failed
         qWarning() << "FuseDriver: saveFuseMetadata failed for" << newMeta.fileId
                    << "- deleting orphaned remote file";
         QMetaObject::invokeMethod(
-            s_instance->m_driveClient,
-            [fileId = newMeta.fileId]() { s_instance->m_driveClient->deleteFile(fileId); },
+            drv->m_driveClient,
+            [fileId = newMeta.fileId, drv]() { drv->m_driveClient->deleteFile(fileId); },
             Qt::QueuedConnection);
         return -EIO;
     }
@@ -2008,7 +2018,7 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     openFile.writable = true;
     openFile.dirty = false;
 
-    fi->fh = s_instance->registerOpenFile(openFile);
+    fi->fh = drv->registerOpenFile(openFile);
 
     return 0;
 }
@@ -2017,7 +2027,8 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
 
 int FuseDriver::fuseStatfs(const char* path, struct statvfs* stbuf) {
     Q_UNUSED(path)
-    if (!s_instance) return -EIO;
+    auto* drv = self();
+    if (!drv) return -EIO;
 
     // Provide sensible defaults; a real implementation could query
     // GoogleDriveClient::getAboutInfo() for quota, but that is an
@@ -2072,7 +2083,7 @@ void* FuseDriver::fuseInit(struct fuse_conn_info* conn, struct fuse_config* cfg)
     }
 
     qDebug() << "FuseDriver: FUSE initialized";
-    return s_instance;
+    return fuse_get_context()->private_data;
 }
 
 void FuseDriver::fuseDestroy(void* private_data) {
