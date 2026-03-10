@@ -38,15 +38,17 @@ DirtySyncWorker::DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveC
 
     // Connect to GoogleDriveClient signals for upload completion
     if (m_driveClient) {
-        // Connect to fileUpdated signal (used by updateFile for existing files)
+        // Connect to fileUpdated signal (used by updateFile for existing files).
+        // DirectConnection: the slot must run on the emitting (main) thread so it
+        // can wake the worker thread blocked in m_uploadCondition.wait().
         connect(m_driveClient, &GoogleDriveClient::fileUpdated, this,
-                &DirtySyncWorker::onFileUploaded);
+                &DirtySyncWorker::onFileUploaded, Qt::DirectConnection);
         // Also connect to fileUploaded for new file uploads
         connect(m_driveClient, &GoogleDriveClient::fileUploaded, this,
-                &DirtySyncWorker::onFileUploaded);
+                &DirtySyncWorker::onFileUploaded, Qt::DirectConnection);
         // H5 fix: use errorDetailed so we can filter by fileId
         connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
-                &DirtySyncWorker::onUploadErrorDetailed);
+                &DirtySyncWorker::onUploadErrorDetailed, Qt::DirectConnection);
     }
 }
 
