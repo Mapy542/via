@@ -584,6 +584,81 @@ bool waitForDelete(GoogleDriveClient* driveClient, const QString& fileId, const 
     return success;
 }
 
+bool waitForListFiles(GoogleDriveClient* driveClient, const QString& parentId, QList<DriveFile>* resultFiles,
+                      QString* errorOut) {
+    if (!driveClient) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
+        }
+        return false;
+    }
+
+    if (!resultFiles) {
+        return false;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    bool success = false;
+    QString error;
+    QList<DriveFile> allFiles;
+
+    QMetaObject::Connection listedConn;
+    QMetaObject::Connection errorConn;
+    QMetaObject::Connection timeoutConn;
+
+    listedConn = QObject::connect(driveClient, &GoogleDriveClient::filesListed, &loop,
+                                  [&](const QList<DriveFile>& files, const QString& nextPageToken) {
+                                      allFiles.append(files);
+                                      if (nextPageToken.isEmpty()) {
+                                          // Final page — we're done
+                                          success = true;
+                                          loop.quit();
+                                      } else {
+                                          // More pages — dispatch next request and reset timeout
+                                          timeout.start(FUSE_API_TIMEOUT_MS);
+                                          invokeDriveCall(driveClient, [driveClient, parentId, nextPageToken]() {
+                                              driveClient->listFiles(parentId, nextPageToken);
+                                          });
+                                      }
+                                  });
+
+    errorConn =
+        QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
+                         [&](const QString& operation, const QString& errorMsg, int, const QString&, const QString&) {
+                             if (!operation.startsWith(QStringLiteral("listFiles"))) {
+                                 return;
+                             }
+                             error = errorMsg;
+                             loop.quit();
+                         });
+
+    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
+        error = QStringLiteral("listFiles timeout");
+        loop.quit();
+    });
+
+    if (!invokeDriveCall(driveClient, [driveClient, parentId]() { driveClient->listFiles(parentId); })) {
+        error = QStringLiteral("Failed to dispatch listFiles request");
+    } else {
+        timeout.start(FUSE_API_TIMEOUT_MS);
+        loop.exec();
+    }
+
+    QObject::disconnect(listedConn);
+    QObject::disconnect(errorConn);
+    QObject::disconnect(timeoutConn);
+
+    if (success) {
+        *resultFiles = allFiles;
+    } else if (errorOut) {
+        *errorOut = error.isEmpty() ? QStringLiteral("listFiles failed") : error;
+    }
+
+    return success;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -1060,11 +1135,6 @@ void FuseDriver::flushDirtyFiles() {
 // ============================================================================
 // FUSE Callback Implementations
 // ============================================================================
-// TODO (CON-02): All FUSE callbacks below block the calling FUSE thread waiting for
-// the Google Drive API on the main thread via Qt::BlockingQueuedConnection. If the
-// main thread is busy (UI events, token refresh) all FUSE ops stall and applications
-// using the mount point will hang. Consider a dedicated API worker thread, and serve
-// cached data while API calls are in flight instead of blocking.
 
 int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_file_info* fi) {
     Q_UNUSED(fi)
@@ -1126,12 +1196,10 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                              << ", fetching parent children from API...";
 
                     QList<DriveFile> apiFiles;
-                    QMetaObject::invokeMethod(
-                        drv->m_driveClient,
-                        [&apiFiles, parentId, driveClient = drv->m_driveClient]() {
-                            apiFiles = driveClient->listFilesBlocking(parentId);
-                        },
-                        Qt::BlockingQueuedConnection);
+                    QString listError;
+                    if (!waitForListFiles(drv->m_driveClient, parentId, &apiFiles, &listError)) {
+                        qWarning() << "FuseDriver::getattr: API fetch failed:" << listError;
+                    }
 
                     for (const DriveFile& file : apiFiles) {
                         if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
@@ -1263,13 +1331,11 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
              << ") from API...";
 
     QList<DriveFile> apiFiles;
-    // Must invoke on main thread since QNetworkAccessManager lives there
-    QMetaObject::invokeMethod(
-        drv->m_driveClient,
-        [&apiFiles, parentId, driveClient = drv->m_driveClient]() {
-            apiFiles = driveClient->listFilesBlocking(parentId);
-        },
-        Qt::BlockingQueuedConnection);
+    QString listError;
+    if (!waitForListFiles(drv->m_driveClient, parentId, &apiFiles, &listError)) {
+        qWarning() << "FuseDriver::readdir: API fetch failed:" << listError;
+        return -EIO;
+    }
 
     qDebug() << "FuseDriver::readdir: Fetched" << apiFiles.size() << "files from API";
 

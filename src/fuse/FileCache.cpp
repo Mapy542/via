@@ -24,15 +24,12 @@ FileCache::FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QOb
       m_maxCacheSize(DEFAULT_MAX_CACHE_SIZE),
       m_currentSize(0) {
     // Set default cache directory
-    m_cacheDirectory =
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/Via/files";
+    m_cacheDirectory = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/Via/files";
 
     // Connect to GoogleDriveClient signals for download completion
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this,
-                &FileCache::onFileDownloaded);
-        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
-                &FileCache::onDownloadError);
+        connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this, &FileCache::onFileDownloaded);
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this, &FileCache::onDownloadError);
     }
 }
 
@@ -171,21 +168,16 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
 
     emit downloadStarted(fileId);
 
-    // Request download from GoogleDriveClient
+    // Request download from GoogleDriveClient.
     // Must invoke on main thread since QNetworkAccessManager lives there.
-    // Use BlockingQueuedConnection so the QNetworkReply is created (and the
-    // HTTP request initiated) immediately, rather than being deferred via the
-    // event-loop queue.  With the old QueuedConnection the request could sit
-    // queued while the main thread was busy (e.g. servicing readdir), causing
-    // the underlying TCP connection to go stale and producing empty-reply
-    // errors from Google's CDN.
+    // QueuedConnection: the request is dispatched without blocking the calling
+    // thread until the main thread is free.  The FUSE thread waits for the
+    // download result via m_downloadCondition below.
     if (m_driveClient) {
         QMetaObject::invokeMethod(
             m_driveClient,
-            [driveClient = m_driveClient, fileId, cachePath]() {
-                driveClient->downloadFile(fileId, cachePath);
-            },
-            Qt::BlockingQueuedConnection);
+            [driveClient = m_driveClient, fileId, cachePath]() { driveClient->downloadFile(fileId, cachePath); },
+            Qt::QueuedConnection);
     } else {
         qWarning() << "FileCache: No GoogleDriveClient available for download";
         return QString();
@@ -280,8 +272,7 @@ void FileCache::invalidate(const QString& fileId) {
     // C1 fix: Never delete a dirty file — local modifications would be lost.
     // The file will be uploaded by DirtySyncWorker, then re-downloaded on next access.
     if (m_dirtyFiles.contains(fileId)) {
-        qWarning() << "FileCache: Skipping invalidation of dirty file" << fileId
-                   << "— local changes pending upload";
+        qWarning() << "FileCache: Skipping invalidation of dirty file" << fileId << "— local changes pending upload";
         return;
     }
 
@@ -518,8 +509,7 @@ void FileCache::onDownloadError(const QString& operation, const QString& errorMs
         } else {
             // Last resort: could not identify the failed file.
             // Only mark downloads as failed if we truly can't match.
-            qWarning() << "FileCache: Download error without file ID association:" << operation
-                       << errorMsg;
+            qWarning() << "FileCache: Download error without file ID association:" << operation << errorMsg;
 
             for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end(); ++it) {
                 if (!it.value()) {  // Still in progress
