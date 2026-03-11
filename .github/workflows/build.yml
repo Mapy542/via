@@ -9,6 +9,9 @@ on:
 permissions:
     contents: read
 
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
     build:
         runs-on: ubuntu-latest
@@ -34,6 +37,16 @@ jobs:
               with:
                   version: '6.7.3'
                   modules: 'qtnetworkauth'
+
+            - name: Install Qt6Keychain
+              run: |
+                  git clone https://github.com/frankosterfeld/qtkeychain.git --depth 1
+                  cmake -B qtkeychain/build -S qtkeychain \
+                    -DBUILD_WITH_QT6=ON \
+                    -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+                    -DCMAKE_INSTALL_PREFIX=/usr
+                  cmake --build qtkeychain/build --parallel
+                  sudo cmake --install qtkeychain/build
 
             - name: Configure CMake
               run: cmake -B build -DCMAKE_BUILD_TYPE=Release
