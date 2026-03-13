@@ -17,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QProcess>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -138,6 +139,17 @@ class SettingsWindow : public QDialog {
     QPushButton* m_applyButton;
     QPushButton* m_cancelButton;
     QPushButton* m_okButton;
+
+    // Snapshot of restart-required settings (captured on load)
+    QString m_originalSyncFolder;
+    QString m_originalSyncMode;
+    QString m_originalConflictStrategy;
+    QString m_originalSyncSystem;
+    QString m_originalFuseMountPoint;
+    int m_originalCacheSize = 0;
+
+    bool checkRestartRequired() const;
+    void promptRestart();
 };
 
 #endif  // SETTINGSWINDOW_H

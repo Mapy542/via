@@ -10,6 +10,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QProcess>
 #include <QShowEvent>
 #include <QStandardPaths>
 
@@ -21,8 +22,7 @@
 #include "utils/AutostartManager.h"
 
 SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
-                               ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
-                               QWidget* parent)
+                               ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient, QWidget* parent)
     : QDialog(parent),
       m_authManager(authManager),
       m_syncActionQueue(syncActionQueue),
@@ -75,6 +75,10 @@ void SettingsWindow::setupUi() {
     connect(m_cancelButton, &QPushButton::clicked, this, &SettingsWindow::onCancelClicked);
     connect(m_okButton, &QPushButton::clicked, this, [this]() {
         onApplyClicked();
+        // Only accept (close) when no restart is happening — promptRestart
+        // calls QApplication::quit() when the user chooses "Restart Now",
+        // so accept() would never run in that case anyway.  For "Later"
+        // (or no restart needed) we close the dialog normally.
         accept();
     });
 }
@@ -147,8 +151,7 @@ void SettingsWindow::setupAccountTab() {
     layout->addStretch();
 
     // Connect save credentials button
-    connect(m_saveCredentialsButton, &QPushButton::clicked, this,
-            &SettingsWindow::onSaveCredentialsClicked);
+    connect(m_saveCredentialsButton, &QPushButton::clicked, this, &SettingsWindow::onSaveCredentialsClicked);
 
     // Connect buttons
     connect(m_loginButton, &QPushButton::clicked, this, [this]() {
@@ -159,9 +162,8 @@ void SettingsWindow::setupAccountTab() {
 
     connect(m_logoutButton, &QPushButton::clicked, this, [this]() {
         if (m_authManager) {
-            QMessageBox::StandardButton reply =
-                QMessageBox::question(this, "Sign Out", "Are you sure you want to sign out?",
-                                      QMessageBox::Yes | QMessageBox::No);
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this, "Sign Out", "Are you sure you want to sign out?", QMessageBox::Yes | QMessageBox::No);
             if (reply == QMessageBox::Yes) {
                 m_authManager->logout();
             }
@@ -194,8 +196,7 @@ void SettingsWindow::setupAccountTab() {
 
     // Connect to storage info and user info signals
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::aboutInfoReceived, this,
-                &SettingsWindow::onStorageInfoReceived);
+        connect(m_driveClient, &GoogleDriveClient::aboutInfoReceived, this, &SettingsWindow::onStorageInfoReceived);
 
         connect(m_driveClient, &GoogleDriveClient::userInfoReceived, this,
                 [this](const QString& displayName, const QString& emailAddress) {
@@ -211,13 +212,11 @@ void SettingsWindow::setupAccountTab() {
                 });
 
         // Handle API errors for storage info
-        connect(m_driveClient, &GoogleDriveClient::error, this,
-                [this](const QString& operation, const QString& error) {
-                    if (operation == "getAboutInfo") {
-                        m_storageLabel->setText(
-                            QString("Unable to retrieve storage info: %1").arg(error));
-                    }
-                });
+        connect(m_driveClient, &GoogleDriveClient::error, this, [this](const QString& operation, const QString& error) {
+            if (operation == "getAboutInfo") {
+                m_storageLabel->setText(QString("Unable to retrieve storage info: %1").arg(error));
+            }
+        });
     }
 }
 
@@ -263,8 +262,7 @@ void SettingsWindow::setupSyncTab() {
     m_syncModeCombo = new QComboBox(m_syncTab);
     m_syncModeCombo->addItem("Keep Newest (bidirectional sync)", "keep-newest");
     m_syncModeCombo->addItem("Remote Read-Only (download only, never upload)", "remote-read-only");
-    m_syncModeCombo->addItem("Remote No Delete (sync but don't delete remote files)",
-                             "remote-no-delete");
+    m_syncModeCombo->addItem("Remote No Delete (sync but don't delete remote files)", "remote-no-delete");
     syncModeComboLayout->addWidget(m_syncModeCombo);
     syncModeComboLayout->addStretch();
     syncModeLayout->addLayout(syncModeComboLayout);
@@ -286,8 +284,7 @@ void SettingsWindow::setupSyncTab() {
     QGroupBox* conflictGroup = new QGroupBox("Conflict Resolution", m_syncTab);
     QVBoxLayout* conflictLayout = new QVBoxLayout(conflictGroup);
 
-    QLabel* conflictLabel =
-        new QLabel("When a file is modified both locally and remotely:", m_syncTab);
+    QLabel* conflictLabel = new QLabel("When a file is modified both locally and remotely:", m_syncTab);
     conflictLayout->addWidget(conflictLabel);
 
     QHBoxLayout* conflictComboLayout = new QHBoxLayout();
@@ -314,8 +311,7 @@ void SettingsWindow::setupSyncTab() {
     layout->addWidget(conflictGroup);
 
     // Connect buttons
-    connect(m_browseFolderButton, &QPushButton::clicked, this,
-            &SettingsWindow::onBrowseFolderClicked);
+    connect(m_browseFolderButton, &QPushButton::clicked, this, &SettingsWindow::onBrowseFolderClicked);
 }
 
 void SettingsWindow::setupAdvancedTab() {
@@ -416,25 +412,23 @@ void SettingsWindow::setupAdvancedTab() {
         m_cacheSize->setEnabled(fuseEnabled);
         clearCacheButton->setEnabled(fuseEnabled);
     };
-    connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            updateFuseWidgets);
+    connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, updateFuseWidgets);
     updateFuseWidgets();
 
     // Connect clear cache button
     connect(clearCacheButton, &QPushButton::clicked, this, [this]() {
-        QMessageBox::StandardButton reply = QMessageBox::question(
-            this, "Clear Cache",
-            "Are you sure you want to clear the cache?\n\n"
-            "This will remove all cached file data but won't affect your files.",
-            QMessageBox::Yes | QMessageBox::No);
+        QMessageBox::StandardButton reply =
+            QMessageBox::question(this, "Clear Cache",
+                                  "Are you sure you want to clear the cache?\n\n"
+                                  "This will remove all cached file data but won't affect your files.",
+                                  QMessageBox::Yes | QMessageBox::No);
         if (reply == QMessageBox::Yes) {
             // GPT5.3 #12: actually remove cached files
             QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
             QDir cacheDir(cachePath);
             if (cacheDir.exists()) {
                 // Remove all files / sub-dirs inside the cache dir
-                for (const QString& entry :
-                     cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
+                for (const QString& entry : cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
                     QString fullPath = cacheDir.filePath(entry);
                     QFileInfo fi(fullPath);
                     if (fi.isDir()) {
@@ -447,8 +441,7 @@ void SettingsWindow::setupAdvancedTab() {
 
             emit clearCacheRequested();
 
-            QMessageBox::information(this, "Cache Cleared",
-                                     "The cache has been cleared successfully.");
+            QMessageBox::information(this, "Cache Cleared", "The cache has been cleared successfully.");
         }
     });
 }
@@ -462,8 +455,7 @@ void SettingsWindow::loadSettings() {
     }
 
     // Sync settings
-    m_syncFolderEdit->setText(
-        m_settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString());
+    m_syncFolderEdit->setText(m_settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString());
 
     // Sync mode setting (string IDs with numeric fallback)
     const auto setComboById = [](QComboBox* combo, const QString& id) {
@@ -535,8 +527,7 @@ void SettingsWindow::loadSettings() {
 
     // Advanced settings
     m_startOnLoginCheck->setChecked(m_settings.value("advanced/startOnLogin", false).toBool());
-    m_showNotificationsCheck->setChecked(
-        m_settings.value("advanced/showNotifications", true).toBool());
+    m_showNotificationsCheck->setChecked(m_settings.value("advanced/showNotifications", true).toBool());
 
     // Theme override setting
     int themeOverride = m_settings.value("advanced/themeOverride", 0).toInt();
@@ -558,18 +549,24 @@ void SettingsWindow::loadSettings() {
         setComboById(m_syncSystemCombo, "mirror-only");
     }
     m_fuseMountPointEdit->setText(
-        m_settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse")
-            .toString());
+        m_settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse").toString());
     m_cacheSize->setValue(m_settings.value("advanced/cacheSize", 5000).toInt());
     m_debugModeCheck->setChecked(m_settings.value("advanced/debugMode", false).toBool());
+
+    // Capture snapshots of restart-required settings
+    m_originalSyncFolder = m_syncFolderEdit->text();
+    m_originalSyncMode = m_syncModeCombo->currentData().toString();
+    m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
+    m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
+    m_originalFuseMountPoint = m_fuseMountPointEdit->text();
+    m_originalCacheSize = m_cacheSize->value();
 }
 
 void SettingsWindow::saveSettings() {
     // Sync settings
     m_settings.setValue("sync/folder", m_syncFolderEdit->text());
     m_settings.setValue("sync/syncMode", m_syncModeCombo->currentData().toString());
-    m_settings.setValue("sync/conflictStrategy",
-                        m_conflictResolutionCombo->currentData().toString());
+    m_settings.setValue("sync/conflictStrategy", m_conflictResolutionCombo->currentData().toString());
 
     // Advanced settings
     m_settings.setValue("advanced/startOnLogin", m_startOnLoginCheck->isChecked());
@@ -586,7 +583,10 @@ void SettingsWindow::saveSettings() {
     emit settingsChanged();
 }
 
-void SettingsWindow::onApplyClicked() { saveSettings(); }
+void SettingsWindow::onApplyClicked() {
+    saveSettings();
+    promptRestart();
+}
 
 void SettingsWindow::onCancelClicked() {
     loadSettings();
@@ -595,8 +595,7 @@ void SettingsWindow::onCancelClicked() {
 
 void SettingsWindow::onBrowseFolderClicked() {
     QString folder = QFileDialog::getExistingDirectory(
-        this, "Select Sync Folder",
-        m_syncFolderEdit->text().isEmpty() ? QDir::homePath() : m_syncFolderEdit->text(),
+        this, "Select Sync Folder", m_syncFolderEdit->text().isEmpty() ? QDir::homePath() : m_syncFolderEdit->text(),
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
 
     if (!folder.isEmpty()) {
@@ -614,8 +613,7 @@ void SettingsWindow::onSaveCredentialsClicked() {
     }
 
     if (clientSecret.isEmpty() && m_settings.value("auth/clientSecret").toString().isEmpty()) {
-        QMessageBox::warning(this, "Missing Client Secret",
-                             "Please enter your OAuth Client Secret.");
+        QMessageBox::warning(this, "Missing Client Secret", "Please enter your OAuth Client Secret.");
         return;
     }
 
@@ -684,8 +682,49 @@ void SettingsWindow::onStorageInfoReceived(qint64 storageUsed, qint64 storageLim
     QString limitStr = formatBytes(storageLimit);
     double percentUsed = storageLimit > 0 ? (storageUsed * 100.0 / storageLimit) : 0.0;
 
-    m_storageLabel->setText(QString("Storage usage: %1 / %2 (%3%)")
-                                .arg(usedStr)
-                                .arg(limitStr)
-                                .arg(QString::number(percentUsed, 'f', 1)));
+    m_storageLabel->setText(
+        QString("Storage usage: %1 / %2 (%3%)").arg(usedStr).arg(limitStr).arg(QString::number(percentUsed, 'f', 1)));
+}
+
+bool SettingsWindow::checkRestartRequired() const {
+    if (m_syncFolderEdit->text() != m_originalSyncFolder) return true;
+    if (m_syncModeCombo->currentData().toString() != m_originalSyncMode) return true;
+    if (m_conflictResolutionCombo->currentData().toString() != m_originalConflictStrategy) return true;
+    if (m_syncSystemCombo->currentData().toString() != m_originalSyncSystem) return true;
+    if (m_fuseMountPointEdit->text() != m_originalFuseMountPoint) return true;
+    if (m_cacheSize->value() != m_originalCacheSize) return true;
+    return false;
+}
+
+void SettingsWindow::promptRestart() {
+    if (!checkRestartRequired()) {
+        return;
+    }
+
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle("Restart Required");
+    msgBox.setText(
+        "One or more settings you changed require a restart to take effect.\n\n"
+        "Would you like to restart Via now?");
+    msgBox.setIcon(QMessageBox::Question);
+    QPushButton* restartButton = msgBox.addButton("Restart Now", QMessageBox::AcceptRole);
+    QPushButton* laterButton = msgBox.addButton("Later", QMessageBox::RejectRole);
+    msgBox.setDefaultButton(restartButton);
+    Q_UNUSED(laterButton);
+
+    msgBox.exec();
+
+    if (msgBox.clickedButton() == restartButton) {
+        // Spawn a new instance and quit the current one
+        QProcess::startDetached(QCoreApplication::applicationFilePath(), QCoreApplication::arguments());
+        QApplication::quit();
+    } else {
+        // Update snapshots so the prompt doesn't re-trigger for the same change
+        m_originalSyncFolder = m_syncFolderEdit->text();
+        m_originalSyncMode = m_syncModeCombo->currentData().toString();
+        m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
+        m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
+        m_originalFuseMountPoint = m_fuseMountPointEdit->text();
+        m_originalCacheSize = m_cacheSize->value();
+    }
 }

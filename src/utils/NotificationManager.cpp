@@ -11,19 +11,14 @@
 #include <QSettings>
 
 NotificationManager::NotificationManager(QObject* parent)
-    : QObject(parent),
-      m_enabled(true),
-      m_trayIcon(nullptr),
-      m_dbusInterface(nullptr),
-      m_useDBus(false) {
+    : QObject(parent), m_enabled(true), m_trayIcon(nullptr), m_dbusInterface(nullptr), m_useDBus(false) {
     // Load settings
     QSettings settings;
     m_enabled = settings.value("advanced/showNotifications", true).toBool();
 
     // Try to connect to D-Bus notifications
-    m_dbusInterface =
-        new QDBusInterface("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-                           "org.freedesktop.Notifications", QDBusConnection::sessionBus(), this);
+    m_dbusInterface = new QDBusInterface("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                         "org.freedesktop.Notifications", QDBusConnection::sessionBus(), this);
 
     m_useDBus = m_dbusInterface->isValid();
 
@@ -31,15 +26,13 @@ NotificationManager::NotificationManager(QObject* parent)
         qDebug() << "Using D-Bus notifications";
 
         // Connect to notification signals
-        QDBusConnection::sessionBus().connect("org.freedesktop.Notifications",
-                                              "/org/freedesktop/Notifications",
-                                              "org.freedesktop.Notifications", "NotificationClosed",
-                                              this, SLOT(onNotificationClosed(uint, uint)));
+        QDBusConnection::sessionBus().connect("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                              "org.freedesktop.Notifications", "NotificationClosed", this,
+                                              SLOT(onNotificationClosed(uint, uint)));
 
-        QDBusConnection::sessionBus().connect("org.freedesktop.Notifications",
-                                              "/org/freedesktop/Notifications",
-                                              "org.freedesktop.Notifications", "ActionInvoked",
-                                              this, SLOT(onActionInvoked(uint, QString)));
+        QDBusConnection::sessionBus().connect("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                              "org.freedesktop.Notifications", "ActionInvoked", this,
+                                              SLOT(onActionInvoked(uint, QString)));
     } else {
         qDebug() << "D-Bus notifications not available, using system tray";
     }
@@ -58,8 +51,12 @@ void NotificationManager::setEnabled(bool enabled) {
 
 void NotificationManager::setTrayIcon(QSystemTrayIcon* trayIcon) { m_trayIcon = trayIcon; }
 
-void NotificationManager::showNotification(const QString& title, const QString& message,
-                                           Urgency urgency, int timeoutMs) {
+void NotificationManager::showNotification(const QString& title, const QString& message, Urgency urgency,
+                                           int timeoutMs) {
+    // Re-read the setting each time so changes take effect without restart
+    QSettings settings;
+    m_enabled = settings.value("advanced/showNotifications", true).toBool();
+
     if (!m_enabled) {
         return;
     }
@@ -112,19 +109,16 @@ void NotificationManager::showError(const QString& title, const QString& message
 
 void NotificationManager::showFileSynced(const QString& fileName, bool uploaded) {
     QString action = uploaded ? "uploaded to" : "downloaded from";
-    showNotification("File Synced", QString("%1 has been %2 Google Drive.").arg(fileName, action),
-                     Low, 3000);
+    showNotification("File Synced", QString("%1 has been %2 Google Drive.").arg(fileName, action), Low, 3000);
 }
 
 void NotificationManager::showConflict(const QString& fileName) {
-    showNotification(
-        "Sync Conflict",
-        QString("A conflict was detected for %1. A copy has been created.").arg(fileName), Normal,
-        10000);
+    showNotification("Sync Conflict", QString("A conflict was detected for %1. A copy has been created.").arg(fileName),
+                     Normal, 10000);
 }
 
-bool NotificationManager::sendDBusNotification(const QString& title, const QString& message,
-                                               const QString& icon, int timeout) {
+bool NotificationManager::sendDBusNotification(const QString& title, const QString& message, const QString& icon,
+                                               int timeout) {
     if (!m_dbusInterface || !m_dbusInterface->isValid()) {
         return false;
     }
@@ -143,8 +137,7 @@ bool NotificationManager::sendDBusNotification(const QString& title, const QStri
          << hints          // hints
          << timeout;       // expire_timeout
 
-    QDBusReply<uint> reply =
-        m_dbusInterface->callWithArgumentList(QDBus::AutoDetect, "Notify", args);
+    QDBusReply<uint> reply = m_dbusInterface->callWithArgumentList(QDBus::AutoDetect, "Notify", args);
 
     if (reply.isValid()) {
         return true;
