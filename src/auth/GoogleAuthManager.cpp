@@ -80,6 +80,7 @@ void GoogleAuthManager::setupOAuth() {
 #endif
 
     // Set scope - use the scope setter which accepts a space-separated string
+    // TODO: setScope() is deprecated in Qt6; migrate to requestedScopeTokens property instead
     m_oauth->setScope(SCOPE);
 
     // Set credentials if available

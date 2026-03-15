@@ -717,7 +717,7 @@ void SettingsWindow::promptRestart() {
     if (msgBox.clickedButton() == restartButton) {
         // Spawn a new instance and quit the current one
         QProcess::startDetached(QCoreApplication::applicationFilePath(), QCoreApplication::arguments());
-        QApplication::quit();
+        QCoreApplication::quit();
     } else {
         // Update snapshots so the prompt doesn't re-trigger for the same change
         m_originalSyncFolder = m_syncFolderEdit->text();
