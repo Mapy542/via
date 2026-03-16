@@ -94,6 +94,15 @@ class MainWindow : public QMainWindow {
      */
     void setAuthExpired(const QString& reason);
 
+   signals:
+    /**
+     * @brief Emitted when the user requests sign-out
+     *
+     * Connected in main.cpp so the dirty-file count and confirmation
+     * dialog can be shown with full context before logout() is called.
+     */
+    void logoutRequested();
+
    protected:
     /**
      * @brief Handle window close event

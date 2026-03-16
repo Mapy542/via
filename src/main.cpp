@@ -24,6 +24,7 @@
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
+#include "fuse/FileCache.h"
 #include "fuse/FuseDriver.h"
 #include "sync/ChangeProcessor.h"
 #include "sync/ChangeQueue.h"
@@ -448,6 +449,36 @@ int main(int argc, char* argv[]) {
                      &MainWindow::show);
     QObject::connect(&trayManager, &SystemTrayManager::quitRequested, &app, &QApplication::quit);
 
+    // Handle sign-out requests from MainWindow.  Check for pending dirty
+    // uploads and show a tailored confirmation so the user knows their
+    // unsaved changes will be uploaded before the session ends.
+    QObject::connect(
+        &mainWindow, &MainWindow::logoutRequested, &app,
+        [&fuseDriver, &authManager, &mainWindow, fuseEnabled]() {
+            int dirtyCount = 0;
+            if (fuseEnabled && fuseDriver.isMounted() && fuseDriver.fileCache()) {
+                dirtyCount = fuseDriver.fileCache()->getDirtyFiles().size();
+            }
+
+            QString msg = dirtyCount > 0
+                              ? QStringLiteral(
+                                    "You have %1 unsaved file(s) that will be uploaded to Google "
+                                    "Drive before you are signed out.\n\n"
+                                    "Are you sure you want to sign out?")
+                                    .arg(dirtyCount)
+                              : QStringLiteral(
+                                    "Are you sure you want to sign out?\n\n"
+                                    "Synchronization will stop and you will need to sign in again "
+                                    "to resume.");
+
+            auto reply = QMessageBox::question(&mainWindow, QStringLiteral("Sign Out"), msg,
+                                               QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply == QMessageBox::Yes) {
+                mainWindow.addRecentActivity("Signed out");
+                authManager.logout();
+            }
+        });
+
     // Connect tray "Sync Now" to full sync (only when mirror sync is enabled)
     if (mirrorEnabled) {
         QObject::connect(&trayManager, &SystemTrayManager::fullSyncRequested, &fullSync,
@@ -670,8 +701,22 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app,
-                     [&fuseDriver]() { stopFuseComponent(&fuseDriver); });
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&fuseDriver, fuseEnabled]() {
+        // Warn the user that we're about to block and upload any pending
+        // dirty files before quitting, so they don't force-kill the process.
+        if (fuseEnabled && fuseDriver.isMounted() && fuseDriver.fileCache()) {
+            int dirtyCount = fuseDriver.fileCache()->getDirtyFiles().size();
+            if (dirtyCount > 0) {
+                QMessageBox::information(
+                    nullptr, QStringLiteral("Uploading pending files"),
+                    QStringLiteral("Uploading %1 unsaved file(s) to Google Drive "
+                                   "before quitting.\n\n"
+                                   "Please wait — do not force-quit.")
+                        .arg(dirtyCount));
+            }
+        }
+        stopFuseComponent(&fuseDriver);
+    });
 
     // Show main window on first run or if not logged in
     if (!tokenStorage.hasValidTokens()) {

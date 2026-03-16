@@ -1124,7 +1124,9 @@ void FuseDriver::flushDirtyFiles() {
 
     int uploadedCount = 0;
     for (const DirtyFileEntry& entry : dirtyFiles) {
-        QString cachePath = m_fileCache->getCachePathForFile(entry.fileId);
+        // Use getContentPath so we read from the pending store if the file was
+        // moved there after its write handle was closed.
+        QString cachePath = m_fileCache->getContentPath(entry.fileId);
         if (QFile::exists(cachePath) && m_driveClient) {
             QString error;
             DriveFile updated;
@@ -1282,7 +1284,7 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                 // Without this, apps that stat() after a write get the stale remote
                 // size and may allocate too-small buffers or think the write failed.
                 if (drv->m_fileCache && drv->m_fileCache->isDirty(meta.fileId)) {
-                    QString localPath = drv->m_fileCache->getCachePathForFile(meta.fileId);
+                    QString localPath = drv->m_fileCache->getContentPath(meta.fileId);
                     QFileInfo localInfo(localPath);
                     if (localInfo.exists()) {
                         stbuf->st_size = localInfo.size();
@@ -1578,6 +1580,26 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
 
         if (openFileOpt && openFileOpt->dirty && !openFileOpt->fileId.isEmpty()) {
             FuseOpenFile openFile = *openFileOpt;
+
+            // Move dirty content out of the evictable LRU cache into the
+            // persistent pending-uploads store (~/.local/share/via/pending/).
+            // This must happen before the metadata update so the size is read
+            // from the correct location.
+            if (drv->m_fileCache) {
+                QString pendingPath = drv->m_fileCache->moveToDirtyStore(openFile.fileId);
+                if (!pendingPath.isEmpty()) {
+                    // Update all open handles for this fileId (e.g. concurrent
+                    // readers) to use the new path.  FUSE uses fuse_loop()
+                    // (single-threaded), so this update is safe here.
+                    QMutexLocker openLock(&drv->m_openFilesMutex);
+                    for (auto& oh : drv->m_openFiles) {
+                        if (oh.fileId == openFile.fileId) {
+                            oh.cachePath = pendingPath;
+                        }
+                    }
+                    openFile.cachePath = pendingPath;
+                }
+            }
 
             // Optimistic local metadata update so stat() returns
             // a reasonable size/mtime immediately after close.

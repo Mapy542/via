@@ -380,6 +380,13 @@ void GoogleAuthManager::logout() {
     qInfo() << "Logging out";
 
     m_refreshTimer->stop();
+
+    // Emit loggedOut BEFORE clearing the access token so that the cleanup
+    // handler (connected in main.cpp) can call flushDirtyFiles() while the
+    // bearer token is still valid.  Tokens are cleared after the handler
+    // returns so every upload in the flush succeeds.
+    emit loggedOut();
+
     m_accessToken.clear();
     m_refreshTokenValue.clear();
     m_accessTokenExpiry = QDateTime();
@@ -394,8 +401,6 @@ void GoogleAuthManager::logout() {
     if (m_tokenStorage) {
         m_tokenStorage->clearTokens();
     }
-
-    emit loggedOut();
 }
 
 void GoogleAuthManager::setCredentials(const QString& clientId, const QString& clientSecret) {

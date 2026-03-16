@@ -64,6 +64,12 @@ class TestFileCache : public QObject {
     // Dirty guard in getCachedPath
     void testGetCachedPath_DirtyFileSkipsDownload();
 
+    // Pending-store (dirty file migration)
+    void testMoveToDirtyStore_MovesFile();
+    void testGetContentPath_DirtyFile_ReturnsPendingPath();
+    void testGetContentPath_CleanFile_ReturnsCachePath();
+    void testClearDirty_RemovesPendingFile();
+
    private:
     void createTestDatabase();
     void destroyTestDatabase();
@@ -93,6 +99,12 @@ void TestFileCache::init() {
     QString cacheDir = m_tempDir->path() + "/cache";
     QDir().mkpath(cacheDir);
     m_cache->setCacheDirectory(cacheDir);
+
+    // Set pending-store dir inside temp (keeps tests hermetic)
+    QString dirtyDir = m_tempDir->path() + "/pending";
+    QDir().mkpath(dirtyDir);
+    m_cache->setDirtyDirectory(dirtyDir);
+
     QVERIFY(m_cache->initialize());
 }
 
@@ -263,6 +275,99 @@ void TestFileCache::testGetCachedPath_DirtyFileSkipsDownload() {
 
     // Cleanup
     QFile::remove(expectedPath);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — pending store (dirty file migration to ~/.local/share)
+// ---------------------------------------------------------------------------
+
+// After moveToDirtyStore the file must exist at the pending path, the old
+// cache path must be gone, the cache entry must be removed, and the dirty
+// flag must remain.
+void TestFileCache::testMoveToDirtyStore_MovesFile() {
+    const QString fileId = "move_me";
+    QString cacheDir = m_cache->cacheDirectory();
+
+    // Put a real file in cache
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write("dirty content");
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, 13);
+    m_cache->markDirty(fileId, "/move_me.txt");
+
+    QVERIFY(m_cache->isCached(fileId));
+    QVERIFY(m_cache->isDirty(fileId));
+
+    // Move to pending store
+    QString pendingPath = m_cache->moveToDirtyStore(fileId);
+
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+    QVERIFY(!QFile::exists(cachePath));
+    QVERIFY(!m_cache->isCached(fileId));  // removed from cache map
+    QVERIFY(m_cache->isDirty(fileId));    // still dirty
+
+    // Pending path must live under the dirty directory
+    QVERIFY(pendingPath.startsWith(m_cache->dirtyDirectory()));
+}
+
+// When a file is dirty and its content has already been moved to the pending
+// store, getContentPath must return the pending path — not the cache path.
+void TestFileCache::testGetContentPath_DirtyFile_ReturnsPendingPath() {
+    const QString fileId = "pending_content";
+
+    // Create content at the expected pending path
+    QString pendingPath = m_cache->getDirtyPathForFile(fileId);
+    QFileInfo pi(pendingPath);
+    QVERIFY(QDir().mkpath(pi.dir().absolutePath()));
+    QFile pf(pendingPath);
+    QVERIFY(pf.open(QIODevice::WriteOnly));
+    pf.write("data");
+    pf.close();
+
+    m_cache->markDirty(fileId, "/pending_content.txt");
+
+    QCOMPARE(m_cache->getContentPath(fileId), pendingPath);
+
+    QFile::remove(pendingPath);
+}
+
+// For a clean (non-dirty) cached file getContentPath must return the
+// standard cache path.
+void TestFileCache::testGetContentPath_CleanFile_ReturnsCachePath() {
+    const QString fileId = "clean_content";
+    QString cacheDir = m_cache->cacheDirectory();
+    seedCacheFile(m_cache, cacheDir, fileId, 50);
+
+    QString expected = m_cache->getCachePathForFile(fileId);
+    QCOMPARE(m_cache->getContentPath(fileId), expected);
+}
+
+// clearDirty must also delete the pending-store file so stale data is not
+// left behind after a successful upload.
+void TestFileCache::testClearDirty_RemovesPendingFile() {
+    const QString fileId = "to_clear";
+
+    // Place a file at the pending path
+    QString pendingPath = m_cache->getDirtyPathForFile(fileId);
+    QFileInfo pi(pendingPath);
+    QVERIFY(QDir().mkpath(pi.dir().absolutePath()));
+    QFile pf(pendingPath);
+    QVERIFY(pf.open(QIODevice::WriteOnly));
+    pf.write("data");
+    pf.close();
+
+    m_cache->markDirty(fileId, "/to_clear.txt");
+    QVERIFY(QFile::exists(pendingPath));
+
+    m_cache->clearDirty(fileId);
+
+    QVERIFY(!m_cache->isDirty(fileId));
+    QVERIFY(!QFile::exists(pendingPath));
 }
 
 QTEST_MAIN(TestFileCache)

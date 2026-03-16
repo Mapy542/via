@@ -15,8 +15,8 @@
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 
-DirtySyncWorker::DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient, SyncDatabase* database,
-                                 QObject* parent)
+DirtySyncWorker::DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient,
+                                 SyncDatabase* database, QObject* parent)
     : QObject(parent),
       m_fileCache(fileCache),
       m_driveClient(driveClient),
@@ -41,14 +41,14 @@ DirtySyncWorker::DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveC
         // Connect to fileUpdated signal (used by updateFile for existing files).
         // DirectConnection: the slot must run on the emitting (main) thread so it
         // can wake the worker thread blocked in m_uploadCondition.wait().
-        connect(m_driveClient, &GoogleDriveClient::fileUpdated, this, &DirtySyncWorker::onFileUploaded,
-                Qt::DirectConnection);
+        connect(m_driveClient, &GoogleDriveClient::fileUpdated, this,
+                &DirtySyncWorker::onFileUploaded, Qt::DirectConnection);
         // Also connect to fileUploaded for new file uploads
-        connect(m_driveClient, &GoogleDriveClient::fileUploaded, this, &DirtySyncWorker::onFileUploaded,
-                Qt::DirectConnection);
+        connect(m_driveClient, &GoogleDriveClient::fileUploaded, this,
+                &DirtySyncWorker::onFileUploaded, Qt::DirectConnection);
         // H5 fix: use errorDetailed so we can filter by fileId
-        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this, &DirtySyncWorker::onUploadErrorDetailed,
-                Qt::DirectConnection);
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
+                &DirtySyncWorker::onUploadErrorDetailed, Qt::DirectConnection);
     }
 }
 
@@ -176,7 +176,8 @@ void DirtySyncWorker::stop() {
 
     setState(DirtySyncWorkerState::Stopped);
 
-    qInfo() << "DirtySyncWorker: Stopped. Uploaded:" << m_uploadedCount << "Failed:" << m_failedCount;
+    qInfo() << "DirtySyncWorker: Stopped. Uploaded:" << m_uploadedCount
+            << "Failed:" << m_failedCount;
 }
 
 void DirtySyncWorker::pause() {
@@ -233,7 +234,8 @@ void DirtySyncWorker::flushAndStop() {
     if (m_fileCache) {
         QList<DirtyFileEntry> remaining = m_fileCache->getDirtyFiles();
         if (!remaining.isEmpty()) {
-            qWarning() << "DirtySyncWorker: Flush incomplete," << remaining.size() << "files still dirty";
+            qWarning() << "DirtySyncWorker: Flush incomplete," << remaining.size()
+                       << "files still dirty";
             success = false;
         }
     }
@@ -297,8 +299,9 @@ void DirtySyncWorker::onFileUploaded(const DriveFile& file) {
     }
 }
 
-void DirtySyncWorker::onUploadErrorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
-                                            const QString& fileId, const QString& localPath) {
+void DirtySyncWorker::onUploadErrorDetailed(const QString& operation, const QString& errorMsg,
+                                            int httpStatus, const QString& fileId,
+                                            const QString& localPath) {
     Q_UNUSED(httpStatus)
     Q_UNUSED(localPath)
 
@@ -311,7 +314,8 @@ void DirtySyncWorker::onUploadErrorDetailed(const QString& operation, const QStr
 
     // H5 fix: only react when the error is for the file we are uploading
     if (m_uploadInProgress && m_currentUploadFileId == fileId) {
-        qWarning() << "DirtySyncWorker: Upload error for" << fileId << ":" << operation << "-" << errorMsg;
+        qWarning() << "DirtySyncWorker: Upload error for" << fileId << ":" << operation << "-"
+                   << errorMsg;
         m_uploadSuccess = false;
         m_uploadDone = true;
         m_uploadError = errorMsg;
@@ -362,7 +366,8 @@ void DirtySyncWorker::processDirtyFiles() {
             QMutexLocker locker(&m_mutex);
             int retries = m_retryCounts.value(entry.fileId, 0);
             if (retries >= m_maxRetries) {
-                qWarning() << "DirtySyncWorker: Skipping" << entry.path << "- exceeded max retries (" << retries << ")";
+                qWarning() << "DirtySyncWorker: Skipping" << entry.path
+                           << "- exceeded max retries (" << retries << ")";
                 cycleFailed++;
                 m_failedCount++;
                 emit uploadFailed(entry.fileId, entry.path, QStringLiteral("Exceeded max retries"));
@@ -393,7 +398,7 @@ void DirtySyncWorker::processDirtyFiles() {
             if (m_database && uploaded.isValid()) {
                 FuseMetadata meta = m_database->getFuseMetadata(entry.fileId);
                 if (!meta.fileId.isEmpty()) {
-                    QString cachePath = m_fileCache->getCachePathForFile(entry.fileId);
+                    QString cachePath = m_fileCache->getContentPath(entry.fileId);
                     meta.size = QFileInfo(cachePath).size();
                     if (uploaded.modifiedTime.isValid()) {
                         meta.modifiedTime = uploaded.modifiedTime;
@@ -433,7 +438,8 @@ void DirtySyncWorker::processDirtyFiles() {
 
     emit syncCycleCompleted(cycleUploaded, cycleFailed);
 
-    qInfo() << "DirtySyncWorker: Sync cycle completed. Uploaded:" << cycleUploaded << "Failed:" << cycleFailed;
+    qInfo() << "DirtySyncWorker: Sync cycle completed. Uploaded:" << cycleUploaded
+            << "Failed:" << cycleFailed;
 }
 
 bool DirtySyncWorker::uploadFile(const QString& fileId, const QString& path) {
@@ -443,8 +449,9 @@ bool DirtySyncWorker::uploadFile(const QString& fileId, const QString& path) {
         return false;
     }
 
-    // Get the cached file path
-    QString cachePath = m_fileCache->getCachePathForFile(fileId);
+    // Get the content path — checks the pending store first (post-release),
+    // then falls back to the cache dir (handle still open).
+    QString cachePath = m_fileCache->getContentPath(fileId);
     if (cachePath.isEmpty() || !QFileInfo::exists(cachePath)) {
         qWarning() << "DirtySyncWorker: Cached file not found for" << fileId;
         return false;
@@ -464,8 +471,8 @@ bool DirtySyncWorker::uploadFile(const QString& fileId, const QString& path) {
 
     // Initiate upload on the drive client's thread (main thread) to avoid cross-thread
     // QNetworkAccessManager usage
-    QMetaObject::invokeMethod(m_driveClient, "updateFile", Qt::QueuedConnection, Q_ARG(QString, fileId),
-                              Q_ARG(QString, cachePath));
+    QMetaObject::invokeMethod(m_driveClient, "updateFile", Qt::QueuedConnection,
+                              Q_ARG(QString, fileId), Q_ARG(QString, cachePath));
 
     // Wait for upload completion with timeout
     {

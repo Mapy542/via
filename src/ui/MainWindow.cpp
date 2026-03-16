@@ -511,18 +511,9 @@ void MainWindow::onLoginClicked() {
 }
 
 void MainWindow::onLogoutClicked() {
-    QMessageBox::StandardButton reply = QMessageBox::question(
-        this, "Sign Out",
-        "Are you sure you want to sign out?\n\n"
-        "Synchronization will stop and you will need to sign in again to resume.",
-        QMessageBox::Yes | QMessageBox::No);
-
-    if (reply == QMessageBox::Yes) {
-        if (m_authManager) {
-            m_authManager->logout();
-            addRecentActivity("Signed out");
-        }
-    }
+    // Delegate to main.cpp via signal so the handler can check for pending
+    // dirty uploads and show an appropriately worded confirmation dialog.
+    emit logoutRequested();
 }
 
 void MainWindow::onSettingsClicked() {

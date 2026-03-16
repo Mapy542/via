@@ -118,7 +118,7 @@ class FileCache : public QObject {
     bool initialize();
 
     // ========================================================================
-    // Cache Configuration
+    // Cache & Pending-Store Configuration
     // ========================================================================
 
     /**
@@ -132,6 +132,23 @@ class FileCache : public QObject {
      * @param path New cache directory path
      */
     void setCacheDirectory(const QString& path);
+
+    /**
+     * @brief Get the pending-uploads directory path
+     *
+     * Dirty files are moved here on file-handle close so they are stored
+     * in persistent XDG_DATA_HOME (~/.local/share/via/pending/) rather
+     * than the evictable XDG_CACHE_HOME.
+     *
+     * @return Pending directory path
+     */
+    QString dirtyDirectory() const;
+
+    /**
+     * @brief Set the pending-uploads directory path
+     * @param path New pending directory path
+     */
+    void setDirtyDirectory(const QString& path);
 
     /**
      * @brief Get maximum cache size
@@ -197,6 +214,52 @@ class FileCache : public QObject {
      * @return Cache path for the file
      */
     QString getCachePathForFile(const QString& fileId) const;
+
+    /**
+     * @brief Get the deterministic path in the pending store for a file
+     *
+     * Returns where a dirty file would be stored in the pending store
+     * (XDG_DATA_HOME/via/pending/...). Does not check whether the file
+     * exists. Useful for tests and for callers that manage the pending
+     * store directly.
+     *
+     * @param fileId Google Drive file ID
+     * @return Pending-store path for the file
+     */
+    QString getDirtyPathForFile(const QString& fileId) const;
+
+    /**
+     * @brief Get the authoritative on-disk path for a file's current content
+     *
+     * Returns the pending-store path when the file is dirty (i.e. has been
+     * moved out of the LRU cache into persistent storage after the write
+     * handle was released). Falls back to the deterministic cache path when
+     * the file is not dirty or has not yet been moved.
+     *
+     * Use this everywhere content needs to be read or uploaded — it is
+     * the single source of truth for "where are the bytes right now?".
+     *
+     * @param fileId Google Drive file ID
+     * @return Absolute path to the file's content, may not exist on disk
+     */
+    QString getContentPath(const QString& fileId) const;
+
+    /**
+     * @brief Move dirty file content from LRU cache into persistent store
+     *
+     * Renames the cached file to the pending-uploads directory
+     * (~/.local/share/via/pending/) and removes the cache entry so that
+     * LRU eviction and clearCache() cannot touch it.  The dirty-files
+     * record is preserved.
+     *
+     * Called from FuseDriver::fuseRelease() when a dirty file handle is
+     * closed.  Must be followed by updating all open FuseOpenFile handles
+     * for this fileId to the returned path (FuseDriver responsibility).
+     *
+     * @param fileId Google Drive file ID
+     * @return New on-disk path on success, or empty string on failure
+     */
+    QString moveToDirtyStore(const QString& fileId);
 
     /**
      * @brief Update last accessed time for a cached file
@@ -377,6 +440,7 @@ class FileCache : public QObject {
    private:
     // Internal helpers
     QString generateCachePath(const QString& fileId) const;
+    QString generateDirtyPath(const QString& fileId) const;
     void loadCacheFromDatabase();
     void evictLRU();
     void updateCacheSizeFromDisk();
@@ -387,6 +451,7 @@ class FileCache : public QObject {
 
     // Cache state
     QString m_cacheDirectory;
+    QString m_dirtyDirectory;
     qint64 m_maxCacheSize;
     qint64 m_currentSize;
 
