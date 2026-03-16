@@ -21,8 +21,7 @@
 class FakeDriveClientFC : public GoogleDriveClient {
     Q_OBJECT
    public:
-    explicit FakeDriveClientFC(QObject* parent = nullptr)
-        : GoogleDriveClient(nullptr, parent) {}
+    explicit FakeDriveClientFC(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
     void downloadFile(const QString& /*fileId*/, const QString& /*localPath*/) override {}
     void uploadFile(const QString&, const QString&, const QString&) override {}
@@ -61,6 +60,9 @@ class TestFileCache : public QObject {
 
     // markUploadFailed
     void testMarkUploadFailed_SetsFlag();
+
+    // Dirty guard in getCachedPath
+    void testGetCachedPath_DirtyFileSkipsDownload();
 
    private:
     void createTestDatabase();
@@ -121,8 +123,8 @@ void TestFileCache::destroyTestDatabase() {
 // ---------------------------------------------------------------------------
 // Helpers — put a file into cache so invalidate / remove have something to act on
 // ---------------------------------------------------------------------------
-static void seedCacheFile(FileCache* cache, const QString& cacheDir,
-                          const QString& fileId, qint64 size = 100) {
+static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId,
+                          qint64 size = 100) {
     // Create a real file on disk inside the cache directory
     QString filePath = cacheDir + "/" + fileId;
     QFile f(filePath);
@@ -222,6 +224,45 @@ void TestFileCache::testMarkUploadFailed_SetsFlag() {
     QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
     QCOMPARE(dirty.size(), 1);
     QVERIFY(dirty.first().uploadFailed);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — dirty guard in getCachedPath
+// ---------------------------------------------------------------------------
+
+// When a file is dirty but its cache entry is absent (e.g. post-restart
+// rehydration race), getCachedPath must return the on-disk path WITHOUT
+// initiating a remote download, so local modifications are not overwritten.
+void TestFileCache::testGetCachedPath_DirtyFileSkipsDownload() {
+    const QString fileId = "dirty_no_entry";
+
+    // Find the deterministic cache path for this fileId.
+    QString expectedPath = m_cache->getCachePathForFile(fileId);
+    QVERIFY(!expectedPath.isEmpty());
+
+    // Create the file on disk (simulates content written before the crash/race).
+    QFileInfo fi(expectedPath);
+    QVERIFY(QDir().mkpath(fi.dir().absolutePath()));
+    QFile f(expectedPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("dirty content after write");
+    f.close();
+
+    // Mark dirty but deliberately skip recordCacheEntry so m_cacheEntries is empty.
+    m_cache->markDirty(fileId, "/dirty_no_entry.txt");
+    QVERIFY(!m_cache->isCached(fileId));  // confirm no cache entry
+
+    // getCachedPath must return the local path — not block on a download.
+    QString result = m_cache->getCachedPath(fileId);
+
+    QCOMPARE(result, expectedPath);
+    // Entry must now be rehydrated into the cache index.
+    QVERIFY(m_cache->isCached(fileId));
+    // Dirty flag must still be set; getCachedPath must not clear it.
+    QVERIFY(m_cache->isDirty(fileId));
+
+    // Cleanup
+    QFile::remove(expectedPath);
 }
 
 QTEST_MAIN(TestFileCache)
