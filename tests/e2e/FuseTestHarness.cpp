@@ -52,10 +52,8 @@ int main(int argc, char* argv[]) {
     const QString clientId = qEnvironmentVariable("VIA_CLIENT_ID");
     const QString clientSecret = qEnvironmentVariable("VIA_CLIENT_SECRET");
     const QString refreshToken = qEnvironmentVariable("VIA_REFRESH_TOKEN");
-    const QString mountPoint =
-        qEnvironmentVariable("VIA_MOUNT_POINT", "/tmp/via-fuse-test");
-    const qint64 cacheSizeMb =
-        qEnvironmentVariable("VIA_CACHE_SIZE_MB", "500").toLongLong();
+    const QString mountPoint = qEnvironmentVariable("VIA_MOUNT_POINT", "/tmp/via-fuse-test");
+    const qint64 cacheSizeMb = qEnvironmentVariable("VIA_CACHE_SIZE_MB", "500").toLongLong();
 
     if (clientId.isEmpty() || clientSecret.isEmpty() || refreshToken.isEmpty()) {
         qCritical() << "Missing required environment variables:";
@@ -81,10 +79,9 @@ int main(int argc, char* argv[]) {
     tokenStorage.saveCredentials(clientId, clientSecret);
     // Save a dummy access token + real refresh token; the auth manager
     // will refresh on first API call via ensureValidToken().
-    tokenStorage.saveTokens(
-        QString(),        // access token (empty — forces refresh)
-        refreshToken,
-        QDateTime::currentDateTimeUtc()  // already expired
+    tokenStorage.saveTokens(QString(),  // access token (empty — forces refresh)
+                            refreshToken,
+                            QDateTime::currentDateTimeUtc()  // already expired
     );
 
     GoogleAuthManager authManager(&tokenStorage);
