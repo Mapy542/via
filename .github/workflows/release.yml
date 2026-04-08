@@ -19,7 +19,16 @@ permissions:
     contents: write # Required for creating releases
 
 jobs:
-    build-release:
+    build:
+        uses: ./.github/workflows/build-reusable.yml
+        with:
+            build_type: Release
+            build_tests: false
+            artifact_name: via-release-build
+            cmake_install_prefix: /usr
+
+    package:
+        needs: build
         runs-on: ubuntu-latest
 
         steps:
@@ -30,16 +39,14 @@ jobs:
               run: |
                   sudo apt-get update
                   sudo apt-get install -y \
-                    build-essential \
-                    cmake \
-                    pkg-config \
                     libfuse3-dev \
                     libsecret-1-dev \
                     libdbus-1-dev \
                     libgl1-mesa-dev \
                     fuse3 \
                     file \
-                    desktop-file-utils
+                    desktop-file-utils \
+                    cmake
 
             - name: Install Qt
               uses: jurplel/install-qt-action@v4
@@ -57,17 +64,17 @@ jobs:
                   cmake --build qtkeychain/build --parallel
                   sudo cmake --install qtkeychain/build
 
+            - name: Download build artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: via-release-build
+                  path: build/
+
             - name: Install linuxdeploy
               run: |
                   wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
                   wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
                   chmod +x linuxdeploy*.AppImage
-
-            - name: Configure CMake
-              run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTS=OFF
-
-            - name: Build
-              run: cmake --build build --parallel
 
             - name: Install to AppDir
               run: |
@@ -98,8 +105,5 @@ jobs:
                   tag_name: ${{ env.RELEASE_VERSION }}
                   name: Via ${{ env.RELEASE_VERSION }}
                   files: Via-*.AppImage
-                  draft: false
-                  prerelease: false
-                  generate_release_notes: true
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

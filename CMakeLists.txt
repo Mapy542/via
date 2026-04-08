@@ -218,4 +218,12 @@ if(BUILD_TESTS)
     add_qt_test(test_TokenRefresh tests/auth/TestTokenRefresh.cpp)
     add_qt_test(test_AccountSwitch tests/auth/TestAccountSwitch.cpp)
 
+    # ==================================================================
+    # E2E FUSE Test Harness (headless mount for pjdfstest / fsstress)
+    # ==================================================================
+    add_executable(via_fuse_harness tests/e2e/FuseTestHarness.cpp)
+    target_link_libraries(via_fuse_harness PRIVATE
+        via_testable
+    )
+
 endif()

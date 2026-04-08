@@ -2,31 +2,33 @@ name: Build and Test
 
 on:
     push:
-        branches: [main, develop]
+        branches: [main]
     pull_request:
         branches: [main]
 
 permissions:
     contents: read
 
-env:
-    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
     build:
+        uses: ./.github/workflows/build-reusable.yml
+        with:
+            build_type: Release
+            build_tests: true
+            artifact_name: via-build
+
+    test:
+        needs: build
         runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+        env:
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-            - name: Install system dependencies
+        steps:
+            - name: Install runtime dependencies
               run: |
                   sudo apt-get update
                   sudo apt-get install -y \
-                    build-essential \
-                    cmake \
-                    pkg-config \
                     libfuse3-dev \
                     libsecret-1-dev \
                     libdbus-1-dev \
@@ -48,15 +50,16 @@ jobs:
                   cmake --build qtkeychain/build --parallel
                   sudo cmake --install qtkeychain/build
 
-            - name: Configure CMake
-              run: cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-            - name: Build
-              run: cmake --build build --parallel
-
-            - name: Upload build artifacts
-              uses: actions/upload-artifact@v4
+            - name: Download build artifacts
+              uses: actions/download-artifact@v4
               with:
                   name: via-build
-                  path: build/via
-                  retention-days: 7
+                  path: build/
+
+            - name: Make test binaries executable
+              run: |
+                  find build/ -name 'test_*' -exec chmod +x {} \;
+
+            - name: Run tests
+              run: |
+                  ctest --test-dir build --output-on-failure

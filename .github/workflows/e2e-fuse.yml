@@ -1,0 +1,93 @@
+name: E2E FUSE Tests
+
+on:
+    # Only run on explicit request — these tests hit real Google Drive APIs
+    workflow_dispatch:
+    # Optionally run on main merges (can be expensive, so commented out)
+    # push:
+    #     branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        uses: ./.github/workflows/build-reusable.yml
+        with:
+            build_type: Release
+            build_tests: true
+            artifact_name: via-e2e-build
+
+    e2e-fuse:
+        needs: build
+        runs-on: ubuntu-latest
+
+        env:
+            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+            VIA_CLIENT_ID: ${{ secrets.VIA_CLIENT_ID }}
+            VIA_CLIENT_SECRET: ${{ secrets.VIA_CLIENT_SECRET }}
+            VIA_REFRESH_TOKEN: ${{ secrets.VIA_REFRESH_TOKEN }}
+            VIA_MOUNT_POINT: /tmp/via-fuse-test
+            VIA_CACHE_SIZE_MB: '500'
+            QT_QPA_PLATFORM: offscreen
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Install system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    libfuse3-dev \
+                    fuse3 \
+                    libsecret-1-dev \
+                    libdbus-1-dev \
+                    libgl1-mesa-dev \
+                    perl \
+                    build-essential \
+                    cmake \
+                    pkg-config
+
+            - name: Install Qt
+              uses: jurplel/install-qt-action@v4
+              with:
+                  version: '6.7.3'
+                  modules: 'qtnetworkauth'
+
+            - name: Install Qt6Keychain
+              run: |
+                  git clone https://github.com/frankosterfeld/qtkeychain.git --depth 1
+                  cmake -B qtkeychain/build -S qtkeychain \
+                    -DBUILD_WITH_QT6=ON \
+                    -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+                    -DCMAKE_INSTALL_PREFIX=/usr
+                  cmake --build qtkeychain/build --parallel
+                  sudo cmake --install qtkeychain/build
+
+            - name: Load FUSE kernel module
+              run: |
+                  sudo modprobe fuse
+                  ls -la /dev/fuse
+
+            - name: Download build artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: via-e2e-build
+                  path: build/
+
+            - name: Make binaries executable
+              run: |
+                  chmod +x build/via_fuse_harness
+                  chmod +x scripts/run-pjdfstest.sh
+
+            - name: Run pjdfstest
+              run: ./scripts/run-pjdfstest.sh
+
+            - name: Upload test results
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: e2e-fuse-results
+                  path: build/e2e-results/
+                  retention-days: 30

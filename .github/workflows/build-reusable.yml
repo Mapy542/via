@@ -1,0 +1,81 @@
+name: Reusable Build
+
+on:
+    workflow_call:
+        inputs:
+            build_type:
+                description: 'CMake build type (Debug or Release)'
+                required: false
+                type: string
+                default: 'Release'
+            build_tests:
+                description: 'Whether to build tests'
+                required: false
+                type: boolean
+                default: false
+            artifact_name:
+                description: 'Name for the uploaded build artifact'
+                required: false
+                type: string
+                default: 'via-build'
+            cmake_install_prefix:
+                description: 'CMAKE_INSTALL_PREFIX value'
+                required: false
+                type: string
+                default: ''
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Install system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    build-essential \
+                    cmake \
+                    pkg-config \
+                    libfuse3-dev \
+                    libsecret-1-dev \
+                    libdbus-1-dev \
+                    libgl1-mesa-dev
+
+            - name: Install Qt
+              uses: jurplel/install-qt-action@v4
+              with:
+                  version: '6.7.3'
+                  modules: 'qtnetworkauth'
+
+            - name: Install Qt6Keychain
+              run: |
+                  git clone https://github.com/frankosterfeld/qtkeychain.git --depth 1
+                  cmake -B qtkeychain/build -S qtkeychain \
+                    -DBUILD_WITH_QT6=ON \
+                    -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+                    -DCMAKE_INSTALL_PREFIX=/usr
+                  cmake --build qtkeychain/build --parallel
+                  sudo cmake --install qtkeychain/build
+
+            - name: Configure CMake
+              run: |
+                  cmake -B build \
+                    -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+                    -DBUILD_TESTS=${{ inputs.build_tests && 'ON' || 'OFF' }} \
+                    ${{ inputs.cmake_install_prefix != '' && format('-DCMAKE_INSTALL_PREFIX={0}', inputs.cmake_install_prefix) || '' }}
+
+            - name: Build
+              run: cmake --build build --parallel
+
+            - name: Upload build directory
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ inputs.artifact_name }}
+                  path: build/
+                  retention-days: 7
