@@ -22,6 +22,7 @@
 #include <QMetaObject>
 #include <QMutexLocker>
 #include <QProcess>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
 #include <functional>
@@ -1349,7 +1350,12 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         QList<FuseFileMetadata> cached = drv->m_metadataCache->getChildren(cacheLookupPath);
         qDebug() << "FuseDriver::readdir: Serving" << cached.size() << "entries from cache for"
                  << qpath;
+        QSet<QString> seenNames;
         for (const FuseFileMetadata& child : cached) {
+            if (seenNames.contains(child.name)) {
+                continue;
+            }
+            seenNames.insert(child.name);
             filler(buf, child.name.toUtf8().constData(), nullptr, 0, FUSE_FILL_DIR_PLUS);
         }
         return 0;
@@ -1386,7 +1392,20 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
 
     qDebug() << "FuseDriver::readdir: Fetched" << apiFiles.size() << "files from API";
 
+    // Resolve actual root folder ID from the API response so that the
+    // MetadataCache signal handler (onApiChildrenReceived) can map root
+    // children correctly and mark the cache as fresh.
+    if ((qpath.isEmpty() || qpath == "/") && !apiFiles.isEmpty() && drv->m_metadataCache) {
+        QString actualRootId = apiFiles.first().parentId();
+        if (!actualRootId.isEmpty() && actualRootId != drv->m_metadataCache->rootFolderId()) {
+            qDebug() << "FuseDriver::readdir: Updating root folder ID from"
+                     << drv->m_metadataCache->rootFolderId() << "to" << actualRootId;
+            drv->m_metadataCache->setRootFolderId(actualRootId);
+        }
+    }
+
     // Build the definitive children list from API results, saving to DB/cache
+    QSet<QString> seenNames;
     QList<FuseMetadata> children;
     for (const DriveFile& file : apiFiles) {
         // Skip Google Docs (non-downloadable) but keep folders
@@ -1413,6 +1432,16 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
             QString parentPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
             meta.path = parentPath + "/" + file.name;
         }
+
+        // Google Drive allows duplicate file names in a folder. POSIX does
+        // not, so we must deduplicate: first fileId wins, subsequent ones are
+        // silently dropped from the directory listing.
+        if (seenNames.contains(meta.name)) {
+            qDebug() << "FuseDriver::readdir: Skipping duplicate name" << meta.name
+                     << "(fileId=" << meta.fileId << ")";
+            continue;
+        }
+        seenNames.insert(meta.name);
 
         drv->m_database->saveFuseMetadata(meta);
         children.append(meta);

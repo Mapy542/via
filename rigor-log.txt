@@ -1,0 +1,178 @@
+==> Skipping harness startup (--skip-harness)
+==> Using existing mount at: /home/eli/GoogleDriveFuse/
+
+================================================================
+  Via FUSE Rigour Test Suite
+  Mount: /home/eli/GoogleDriveFuse/
+  Iterations: 20
+================================================================
+
+==> Test 1: Baseline readdir — capture reference listing
+  ✓ Baseline captured: 24 entries
+==> Test 2: Repeated readdir (20x) — check for duplicates
+  ⚠ Iteration 2: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 3: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 4: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 5: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 6: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 7: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 8: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 9: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 10: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 11: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 12: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 13: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 14: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 15: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 16: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 17: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 18: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 19: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ⚠ Iteration 20: Entry count changed (baseline=24, now=27)
+0a1,2
+> Ch Arduino Planning
+> Common Room Items
+10a13
+> Professional Minimalist Slides
+  ✓ No duplicate entries across 20 readdir iterations
+==> Test 3: stat() every entry from baseline listing
+  ✓ All 24 entries stat'd successfully
+==> Test 4: Thumbnail-style access — stat + head on regular files
+  ⚠ Thumbnail read failed for: Create++1.0.1.zip
+  ⚠ Thumbnail read failed for: UA NASA Lunabotics Reforms
+  ⚠ 2/9 thumbnail reads failed
+==> Test 5: Directory navigation — enter subfolders then recheck root
+  ⚠ Entry count changed after visiting 'Completed Things' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'Depot Files' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'Employment' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'Etsy' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'FE Prep' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'JST SR Crimpt' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'Laser Cutter' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'RobotMainBody' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'cling street' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'laser09' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'laser11' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'scool' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'sr crimp photos' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'trimmed photos portfolio' (baseline=24, now=27)
+  ⚠ Entry count changed after visiting 'wch' (baseline=24, now=27)
+==> Test 6: Rapid-fire readdir (burst of 20 ls calls)
+  ✓ No duplicates in rapid-fire readdir burst
+==> Test 7: readdir during concurrent file reads
+  ⚠ Entry count changed during concurrent access 1 (baseline=24, now=27)
+  ⚠ Entry count changed during concurrent access 2 (baseline=24, now=27)
+  ⚠ Entry count changed during concurrent access 3 (baseline=24, now=27)
+  ⚠ Entry count changed during concurrent access 4 (baseline=24, now=27)
+  ⚠ Entry count changed during concurrent access 5 (baseline=24, now=27)
+  ✓ No duplicates during concurrent file reads
+==> Test 8: Inode stability across readdir calls
+  ✓ Inode numbers stable across readdir calls
+==> Test 9: Long-duration stability — readdir every 5s for ~60s
+  ✓ No duplicates over ~60s monitoring period
+==> Test 10: Negative lookup — stat non-existent file
+  ✓ Non-existent file correctly returns ENOENT
+
+================================================================
+  Results Summary
+================================================================
+
+  Passed:  8
+  Failed:  0
+  Warnings: 42
+
+  Detailed output saved to: /home/eli/bin/via/build/rigour-results/
+
+All tests passed.
+==> Cleaning up...
+eli@elidesk:~/bin/via$ 

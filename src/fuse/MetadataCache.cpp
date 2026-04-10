@@ -7,6 +7,7 @@
 
 #include <QDebug>
 #include <QReadLocker>
+#include <QSet>
 #include <QWriteLocker>
 
 #include "api/GoogleDriveClient.h"
@@ -53,6 +54,14 @@ MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveCli
                     QHash<QString, QList<FuseFileMetadata>> childrenByParent;
 
                     for (const DriveFile& file : files) {
+                        // Skip Google Docs (non-downloadable) — same filter
+                        // applied in FuseDriver::fuseReaddir's API path.
+                        // Without this, the cache serves unfiltered entries
+                        // on subsequent readdirs, causing entry count drift.
+                        if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
+                            continue;
+                        }
+
                         FuseFileMetadata metadata;
                         metadata.fileId = file.id;
                         metadata.name = file.name;
@@ -340,6 +349,13 @@ void MetadataCache::setMetadata(const FuseFileMetadata& metadata) {
             }
         }
 
+        // Clean up orphaned fileId mapping when a different fileId already
+        // occupies this path (Google Drive allows duplicate names).
+        auto existingIt = m_pathToMetadata.constFind(metadata.path);
+        if (existingIt != m_pathToMetadata.constEnd() && existingIt->fileId != metadata.fileId) {
+            m_fileIdToPath.remove(existingIt->fileId);
+        }
+
         m_pathToMetadata[metadata.path] = metadata;
         m_fileIdToPath[metadata.fileId] = metadata.path;
 
@@ -378,6 +394,13 @@ void MetadataCache::setMetadataBatch(const QList<FuseFileMetadata>& metadataList
             for (auto& children : m_parentToChildren) {
                 children.removeAll(oldPathIt.value());
             }
+        }
+
+        // Clean up orphaned fileId mapping when a different fileId already
+        // occupies this path (Google Drive allows duplicate names).
+        auto existingIt = m_pathToMetadata.constFind(metadata.path);
+        if (existingIt != m_pathToMetadata.constEnd() && existingIt->fileId != metadata.fileId) {
+            m_fileIdToPath.remove(existingIt->fileId);
         }
 
         m_pathToMetadata[metadata.path] = metadata;
@@ -738,12 +761,17 @@ void MetadataCache::onApiChildrenReceived(const QString& parentId,
 
     setMetadataBatch(childrenWithPaths);
 
-    // Update children cache time
+    // Update children cache time (deduplicate paths — Google Drive allows
+    // multiple files with the same name, but POSIX does not).
     {
         QWriteLocker locker(&m_lock);
         QList<QString> childPaths;
+        QSet<QString> seenPaths;
         for (const FuseFileMetadata& child : childrenWithPaths) {
-            childPaths.append(child.path);
+            if (!seenPaths.contains(child.path)) {
+                childPaths.append(child.path);
+                seenPaths.insert(child.path);
+            }
         }
         m_parentToChildren[parentPath] = childPaths;
         m_childrenCacheTime[parentPath] = QDateTime::currentDateTime();
