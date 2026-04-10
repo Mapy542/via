@@ -54,11 +54,16 @@ MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveCli
                     QHash<QString, QList<FuseFileMetadata>> childrenByParent;
 
                     for (const DriveFile& file : files) {
-                        // Skip Google Docs (non-downloadable) — same filter
-                        // applied in FuseDriver::fuseReaddir's API path.
-                        // Without this, the cache serves unfiltered entries
-                        // on subsequent readdirs, causing entry count drift.
-                        if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
+                        // Skip non-downloadable entries — same filter applied
+                        // in FuseDriver::fuseReaddir's API path.  Without this,
+                        // the cache serves unfiltered entries on subsequent
+                        // readdirs, causing entry count drift.
+                        // Shortcuts have no content; Google Docs can't be
+                        // downloaded as binary files.
+                        if (file.isShortcut) {
+                            continue;
+                        }
+                        if (file.isGoogleDoc() && !file.isFolder) {
                             continue;
                         }
 

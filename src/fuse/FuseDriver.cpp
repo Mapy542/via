@@ -1225,7 +1225,12 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                     }
 
                     for (const DriveFile& file : apiFiles) {
-                        if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
+                        // Skip non-downloadable entries: Google Docs and shortcuts.
+                        // Shortcuts have no content and cause -EIO on open().
+                        if (file.isShortcut) {
+                            continue;
+                        }
+                        if (file.isGoogleDoc() && !file.isFolder) {
                             continue;
                         }
 
@@ -1408,8 +1413,12 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     QSet<QString> seenNames;
     QList<FuseMetadata> children;
     for (const DriveFile& file : apiFiles) {
-        // Skip Google Docs (non-downloadable) but keep folders
-        if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
+        // Skip non-downloadable entries: Google Docs and shortcuts.
+        // Shortcuts have no content and cause -EIO on open().
+        if (file.isShortcut) {
+            continue;
+        }
+        if (file.isGoogleDoc() && !file.isFolder) {
             continue;
         }
 

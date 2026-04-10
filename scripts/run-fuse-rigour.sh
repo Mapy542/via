@@ -543,10 +543,44 @@ if [[ "${RUN_PJDFSTEST}" == true ]]; then
             fi
 
             if git clone --depth 1 https://github.com/pjd/pjdfstest.git "${PJDFSTEST_CLONE}" 2>/dev/null; then
-                cmake -B "${PJDFSTEST_CLONE}/build" -S "${PJDFSTEST_CLONE}" >/dev/null 2>&1
-                if cmake --build "${PJDFSTEST_CLONE}/build" --parallel >/dev/null 2>&1; then
-                    PJDFSTEST_DIR="${PJDFSTEST_CLONE}/build"
-                    PJDFSTEST_BIN="${PJDFSTEST_DIR}/pjdfstest"
+                PJDFSTEST_DIR="${PJDFSTEST_CLONE}"
+
+                # pjdfstest uses autotools.  Try autoreconf+configure first,
+                # fall back to direct gcc compile (single .c file).
+                BUILD_OK=false
+                if command -v autoreconf &>/dev/null; then
+                    info "  Building with autotools..."
+                    if (cd "${PJDFSTEST_CLONE}" && autoreconf -ifs 2>/dev/null \
+                        && ./configure --quiet 2>/dev/null \
+                        && make -j"$(nproc)" 2>/dev/null); then
+                        BUILD_OK=true
+                    fi
+                fi
+
+                if [[ "${BUILD_OK}" == false ]]; then
+                    info "  Autotools unavailable, compiling directly with gcc..."
+                    # Generate a minimal config.h for Linux
+                    cat > "${PJDFSTEST_CLONE}/config.h" << 'CFGEOF'
+#define HAVE_SYS_SYSMACROS_H 1
+#define HAVE_OPENAT 1
+#define HAVE_UNLINKAT 1
+#define HAVE_MKDIRAT 1
+#define HAVE_LINKAT 1
+#define HAVE_SYMLINKAT 1
+#define HAVE_RENAMEAT 1
+#define HAVE_MKFIFOAT 1
+#define HAVE_FCHOWNAT 1
+#define HAVE_UTIMENSAT 1
+#define _GNU_SOURCE 1
+CFGEOF
+                    if gcc -D_GNU_SOURCE -Wall -o "${PJDFSTEST_CLONE}/pjdfstest" \
+                           "${PJDFSTEST_CLONE}/pjdfstest.c" 2>/dev/null; then
+                        BUILD_OK=true
+                    fi
+                fi
+
+                if [[ "${BUILD_OK}" == true ]]; then
+                    PJDFSTEST_BIN="${PJDFSTEST_CLONE}/pjdfstest"
                     pass "pjdfstest built successfully"
                 else
                     fail "pjdfstest build failed"
@@ -572,7 +606,7 @@ if [[ "${RUN_PJDFSTEST}" == true ]]; then
         info "Skipping test groups: ${PJDFSTEST_SKIP}"
 
         # Find test scripts directory
-        PJDFSTEST_TESTS_DIR="${PJDFSTEST_DIR}/../tests"
+        PJDFSTEST_TESTS_DIR="${PJDFSTEST_DIR}/tests"
         if [[ ! -d "${PJDFSTEST_TESTS_DIR}" ]]; then
             PJDFSTEST_TESTS_DIR="${PJDFSTEST_CLONE}/tests"
         fi
