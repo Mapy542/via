@@ -2298,7 +2298,27 @@ void FuseDriver::startBackgroundWorkers() {
         connect(m_dirtySyncThread, &QThread::started, m_dirtySyncWorker, &DirtySyncWorker::start);
         connect(m_dirtySyncThread, &QThread::finished, m_dirtySyncWorker, &QObject::deleteLater);
 
+        // Relay upload activity signals so external consumers (tray icon) can
+        // track FUSE upload progress.
+        connect(m_dirtySyncWorker, &DirtySyncWorker::uploadStarted, this,
+                &FuseDriver::uploadStarted);
+        connect(m_dirtySyncWorker, &DirtySyncWorker::uploadCompleted, this,
+                &FuseDriver::uploadFinished);
+        connect(m_dirtySyncWorker, &DirtySyncWorker::uploadFailed, this,
+                [this](const QString& fileId, const QString& path, const QString&) {
+                    emit uploadFinished(fileId, path);
+                });
+
         m_dirtySyncThread->start();
+    }
+
+    // Relay file download activity signals from the cache.
+    if (m_fileCache) {
+        connect(m_fileCache, &FileCache::downloadStarted, this, &FuseDriver::downloadStarted);
+        connect(m_fileCache, &FileCache::downloadCompleted, this,
+                [this](const QString& fileId, const QString&) { emit downloadFinished(fileId); });
+        connect(m_fileCache, &FileCache::downloadFailed, this,
+                [this](const QString& fileId, const QString&) { emit downloadFinished(fileId); });
     }
 
     if (m_metadataCache && m_fileCache && m_database && m_driveClient && !m_metadataRefreshThread &&

@@ -66,6 +66,7 @@ set(SOURCES
     src/utils/NotificationManager.cpp
     src/utils/LogManager.cpp
     src/utils/FileInUseChecker.cpp
+    src/utils/SuspendMonitor.cpp
 )
 
 # Header files
@@ -99,6 +100,7 @@ set(HEADERS
     src/utils/FileInUseChecker.h
     src/utils/AutostartManager.h
     src/utils/UpdateChecker.h
+    src/utils/SuspendMonitor.h
 )
 
 # Resource files

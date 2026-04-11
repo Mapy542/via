@@ -40,6 +40,7 @@
 #include "utils/AutostartManager.h"
 #include "utils/LogManager.h"
 #include "utils/NotificationManager.h"
+#include "utils/SuspendMonitor.h"
 #include "utils/ThemeHelper.h"
 #include "utils/UpdateChecker.h"
 
@@ -364,6 +365,70 @@ int main(int argc, char* argv[]) {
         qInfo() << "QNetworkInformation: no backend available, skipping connectivity monitoring";
     }
 
+    // Detect system suspend/resume and recover after wake
+    SuspendMonitor suspendMonitor(&app);
+    QObject::connect(
+        &suspendMonitor, &SuspendMonitor::resumed, &app,
+        [&authManager, &remoteWatcher, &localWatcher, &changeProcessor, &syncActionThread,
+         &fullSync, &fullSyncLocalTimer, &fuseDriver, &trayManager, &notificationManager,
+         mirrorEnabled, fuseEnabled]() {
+            qInfo() << "Resume handler: refreshing auth and restarting components";
+            trayManager.updateSyncStatus("Recovering from sleep...");
+
+            // 1. Force a token refresh — connections are likely stale and the
+            //    access token may have expired while the machine was asleep.
+            if (!authManager.refreshToken().isEmpty()) {
+                authManager.refreshTokens();
+            }
+
+            // 2. After the refresh completes (or fails), restart workers that
+            //    may be stuck on dead connections.
+            auto* resumeConn = new QMetaObject::Connection;
+            auto doRestart =
+                [&, resumeConn]() {
+                    QObject::disconnect(*resumeConn);
+                    delete resumeConn;
+
+                    if (!authManager.isAuthenticated()) {
+                        qWarning()
+                            << "Resume handler: not authenticated after refresh, skipping restart";
+                        return;
+                    }
+
+                    // 3. Restart mirror sync components — they may be waiting on
+                    //    dead network sockets inside polling loops.
+                    if (mirrorEnabled) {
+                        remoteWatcher.stop();
+                        remoteWatcher.start();
+                        fullSyncLocalTimer.start();
+                        // Schedule a full sync to reconcile any changes that
+                        // happened while we were asleep.
+                        QTimer::singleShot(2000, &fullSync, &FullSync::fullSync);
+                    }
+
+                    // 4. Kick FUSE background workers.  Stopping and starting them
+                    //    resets their QTimers and clears any stalled API calls.
+                    if (fuseEnabled && fuseDriver.isMounted()) {
+                        fuseDriver.refreshMetadata();
+                    }
+
+                    trayManager.updateSyncStatus("Syncing...");
+                    qInfo() << "Resume handler: recovery complete";
+                };
+
+            // Connect to both success and failure so we always resume.
+            *resumeConn = QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed,
+                                           &authManager, doRestart, Qt::SingleShotConnection);
+            // Also handle the case where refresh fails — still restart workers
+            // so cached operations can proceed.
+            QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshError, &authManager,
+                             doRestart, Qt::SingleShotConnection);
+            // If there's no refresh token, trigger restart immediately.
+            if (authManager.refreshToken().isEmpty()) {
+                doRestart();
+            }
+        });
+
     // Connect signals for application-wide coordination
 
     // When authenticated, start sync components based on configured mode
@@ -538,6 +603,43 @@ int main(int argc, char* argv[]) {
             });
         QObject::connect(&fuseDriver, &FuseDriver::metadataRefreshed, &trayManager,
                          [&trayManager]() { trayManager.updateFuseStatus("Refreshing metadata"); });
+
+        // Track in-flight FUSE downloads and uploads so the tray icon shows
+        // sync-active while any API file transfer is happening.
+        auto* fuseActiveOps = new int(0);  // ref-count of in-flight operations
+        QTimer* fuseIdleTimer = new QTimer(&app);
+        fuseIdleTimer->setSingleShot(true);
+        fuseIdleTimer->setInterval(1500);
+        QObject::connect(fuseIdleTimer, &QTimer::timeout, &trayManager,
+                         [&trayManager, &fuseDriver, fuseActiveOps]() {
+                             if (*fuseActiveOps <= 0 && fuseDriver.isMounted()) {
+                                 trayManager.updateFuseStatus("Mounted");
+                             }
+                         });
+
+        QObject::connect(&fuseDriver, &FuseDriver::downloadStarted, &trayManager,
+                         [&trayManager, fuseActiveOps, fuseIdleTimer](const QString&) {
+                             ++(*fuseActiveOps);
+                             fuseIdleTimer->stop();
+                             trayManager.updateFuseStatus("Downloading...");
+                         });
+        QObject::connect(&fuseDriver, &FuseDriver::downloadFinished, &trayManager,
+                         [fuseActiveOps, fuseIdleTimer](const QString&) {
+                             *fuseActiveOps = qMax(0, *fuseActiveOps - 1);
+                             if (*fuseActiveOps == 0) fuseIdleTimer->start();
+                         });
+        QObject::connect(
+            &fuseDriver, &FuseDriver::uploadStarted, &trayManager,
+            [&trayManager, fuseActiveOps, fuseIdleTimer](const QString&, const QString&) {
+                ++(*fuseActiveOps);
+                fuseIdleTimer->stop();
+                trayManager.updateFuseStatus("Uploading...");
+            });
+        QObject::connect(&fuseDriver, &FuseDriver::uploadFinished, &trayManager,
+                         [fuseActiveOps, fuseIdleTimer](const QString&, const QString&) {
+                             *fuseActiveOps = qMax(0, *fuseActiveOps - 1);
+                             if (*fuseActiveOps == 0) fuseIdleTimer->start();
+                         });
     }
 
     // Periodically refresh storage info (every 10 minutes)
