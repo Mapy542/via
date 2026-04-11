@@ -1048,8 +1048,6 @@ void SyncActionThread::updateLocalMetadata(const QString& localPath,
     }
     file.close();
 
-    // TODO: Add other platform-specific metadata updates to ideally be cross platform compatible
-
     qInfo() << "Updated local file metadata for" << localPath << "to modified time"
             << modifiedTime.toString();
 }

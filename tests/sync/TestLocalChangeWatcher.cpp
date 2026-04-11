@@ -15,7 +15,7 @@
  * - Rapid successive changes (debouncing)
  * - Extended metadata preservation (Drive file ID in xattr)
  *
- * Relates to TODO in LocalChangeWatcher.h:
+ * Relates to issue in LocalChangeWatcher.h:
  * - Unified start/stop/pause/resume controls (line 94)
  */
 
@@ -375,7 +375,7 @@ void TestLocalChangeWatcher::testDetectFileCreate_NestedDirectory() {
     }
 
     // Accept either finding the file OR finding a directory was created
-    // Full recursive watching is a TODO enhancement
+    // TODO: Full recursive watching is a TODO enhancement
     if (!foundFile && !foundDir) {
         QWARN("Nested file creation not detected - recursive watching may need improvement");
     }

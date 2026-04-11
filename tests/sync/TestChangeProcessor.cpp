@@ -42,7 +42,7 @@ class TestChangeProcessor : public QObject {
     void testClassifyRemoteMove();
     void testRemoteModifyPathChangeReclassifiesMove();
 
-    // Conflict detection (relates to TODO in ChangeProcessor.cpp:393)
+    // Conflict detection (relates to issue in ChangeProcessor.cpp:393)
     void testConflictDetection_LocalAndRemoteModify();
     void testConflictDetection_DeleteVsModify();
     void testConflictResolution_PreferRemote();
@@ -60,13 +60,13 @@ class TestChangeProcessor : public QObject {
     void testRemoteConflict_DeleteBoundary_ConflictAtThreeSeconds();
     void testRemoteFolderPathChange_NoConflict_MoveActionQueued();
 
-    // Folder validation (relates to TODO in ChangeProcessor.cpp:293)
+    // Folder validation (relates to issue in ChangeProcessor.cpp:293)
     void testFolderValidation_Exists();
     void testFolderValidation_Permissions();
     void testFolderValidation_SharedDrive();
     void testFolderValidation_MultipleParents();
 
-    // Local origin re-lookup bug (relates to TODO in ChangeProcessor.cpp:306)
+    // Local origin re-lookup bug (relates to issue in ChangeProcessor.cpp:306)
     void testLocalOrigin_CacheHit();
     void testLocalOrigin_CacheMiss();
     void testLocalOrigin_StaleDataHandling();

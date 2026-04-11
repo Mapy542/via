@@ -2,13 +2,13 @@
  * @file GoogleDriveClient.cpp
  * @brief Implementation of Google Drive REST API client
  *
- * TODO (ROB-01): Implement API rate limiting. Google Drive allows ~12,000 queries/min per
- * user. Rapid full-sync or large Drives can hit this, causing 403/429 errors. Add a
+ * TODO (ROB-01): Implement API rate limiting. Google Drive allows ~12,000 queries/min per (LOW
+ * Priority) user. Rapid full-sync or large Drives can hit this, causing 403/429 errors. Add a
  * token-bucket or leaky-bucket limiter here so all callers are automatically throttled.
  *
- * TODO (CON-01): Multiple methods below use nested QEventLoop::exec() to block on network
- * replies. Mitigated with 30-second timeouts on all blocking loops and a re-entrancy guard
- * (m_inBlockingCall) that prevents nested event-loop entry. A full refactor to
+ * TODO (CON-01): Multiple methods below use nested QEventLoop::exec() to block on network (LOW
+ * Priority) replies. Mitigated with 30-second timeouts on all blocking loops and a re-entrancy
+ * guard (m_inBlockingCall) that prevents nested event-loop entry. A full refactor to
  * QtConcurrent/QFuture would eliminate nested loops entirely.
  */
 
