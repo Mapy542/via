@@ -383,6 +383,12 @@ void DirtySyncWorker::processDirtyFiles() {
         if (success) {
             // Clear dirty flag and reset retry count
             m_fileCache->clearDirty(entry.fileId);
+
+            // Fix 1: Record this upload so MetadataRefreshWorker will not
+            // treat our own change as a remote modification and invalidate
+            // the cache (which could pull the file out from under open handles).
+            m_fileCache->markRecentlyUploaded(entry.fileId);
+
             cycleUploaded++;
 
             // Update cached metadata with the server response so stat()
@@ -398,8 +404,20 @@ void DirtySyncWorker::processDirtyFiles() {
             if (m_database && uploaded.isValid()) {
                 FuseMetadata meta = m_database->getFuseMetadata(entry.fileId);
                 if (!meta.fileId.isEmpty()) {
-                    QString cachePath = m_fileCache->getContentPath(entry.fileId);
-                    meta.size = QFileInfo(cachePath).size();
+                    // Use the authoritative size from the Drive API response.
+                    // Fall back to the local on-disk size (the file was recycled
+                    // back into the cache by clearDirty) when the API response
+                    // omits the size field (returns 0).
+                    if (uploaded.size > 0) {
+                        meta.size = uploaded.size;
+                    } else {
+                        QString cachePath = m_fileCache->getContentPath(entry.fileId);
+                        QFileInfo localInfo(cachePath);
+                        if (localInfo.exists() && localInfo.size() > 0) {
+                            meta.size = localInfo.size();
+                        }
+                        // else: keep whatever meta.size was set by fuseRelease
+                    }
                     if (uploaded.modifiedTime.isValid()) {
                         meta.modifiedTime = uploaded.modifiedTime;
                     }

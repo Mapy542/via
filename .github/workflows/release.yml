@@ -29,7 +29,7 @@ jobs:
                       artifact_name: via-release-build-x86_64
                     - arch: aarch64
                       runner: ubuntu-24.04-arm
-                      qt_arch: linux_arm64
+                      qt_arch: gcc_arm64
                       artifact_name: via-release-build-aarch64
         uses: ./.github/workflows/build-reusable.yml
         with:
@@ -53,7 +53,7 @@ jobs:
                     - arch: aarch64
                       runner: ubuntu-24.04-arm
                       artifact_name: via-release-build-aarch64
-                      qt_arch: linux_arm64
+                      qt_arch: gcc_arm64
                       linuxdeploy_arch: aarch64
         runs-on: ${{ matrix.runner }}
 

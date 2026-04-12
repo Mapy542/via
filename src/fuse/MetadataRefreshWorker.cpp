@@ -285,7 +285,17 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
         if (existing.isValid()) {
             // File exists, this is a modification
             isModification = true;
-            invalidateFileCache(change.fileId);
+
+            // Fix 1: If this change was caused by our own upload, skip
+            // the invalidation — the local cache already has the correct
+            // content and invalidating would delete the file from under
+            // any open FUSE handles.
+            if (m_fileCache && m_fileCache->consumeRecentlyUploaded(change.fileId)) {
+                qDebug() << "MetadataRefreshWorker: Skipping invalidation of self-uploaded file"
+                         << change.fileId;
+            } else {
+                invalidateFileCache(change.fileId);
+            }
         }
     }
 
@@ -345,6 +355,14 @@ void MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
 }
 
 void MetadataRefreshWorker::removeFromCaches(const QString& fileId) {
+    // Fix 1: If this deletion change was caused by our own action and the
+    // file was recently uploaded, consume the marker.  In practice,
+    // removeFromCaches is only called for truly deleted/trashed files so
+    // this guard is a safety net.
+    if (m_fileCache) {
+        m_fileCache->consumeRecentlyUploaded(fileId);
+    }
+
     // Remove from metadata cache
     if (m_metadataCache) {
         m_metadataCache->removeByFileId(fileId);

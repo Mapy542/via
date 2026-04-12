@@ -25,8 +25,7 @@ class FakeDriveClientDSW : public GoogleDriveClient {
     Q_OBJECT
 
    public:
-    explicit FakeDriveClientDSW(QObject* parent = nullptr)
-        : GoogleDriveClient(nullptr, parent) {}
+    explicit FakeDriveClientDSW(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
     /// When updateFile is called, either succeed or fail depending on the
     /// set of file IDs configured to fail.
@@ -43,6 +42,7 @@ class FakeDriveClientDSW : public GoogleDriveClient {
                 DriveFile f;
                 f.id = fileId;
                 f.name = QFileInfo(localPath).fileName();
+                f.size = QFileInfo(localPath).size();
                 f.modifiedTime = QDateTime::currentDateTimeUtc();
                 emit fileUpdated(f);
             });
@@ -84,8 +84,27 @@ class TestDirtySyncWorker : public QObject {
     // GPT5.3 #8: retry budget
     void testRetryBudget_SkipsExceededFiles();
 
+    // Cache content recycling: clearDirty must recycle content into LRU cache
+    void testClearDirty_RecyclesContentToCache();
+    void testClearDirty_RecycledFileReadable();
+
+    // Metadata size correctness after upload (simulated)
+    void testUpload_MetadataSizeFromRecycledFile();
+    void testUpload_MetadataSizePrefersDriveApiSize();
+
+    // Self-upload marker: recently uploaded files skip invalidation
+    void testRecentlyUploaded_SkipsInvalidation();
+    void testRecentlyUploaded_ConsumedOnce();
+
+    // Open-handle protection: files with open handles resist eviction
+    void testOpenHandle_PreventsInvalidation();
+    void testOpenHandle_PreventsEviction();
+    void testOpenHandle_ReleasedAllowsInvalidation();
+
    private:
     void createCacheFile(const QString& fileId);
+    void createCacheFileWithContent(const QString& fileId, const QByteArray& content);
+    void createDirtyPendingFile(const QString& fileId, const QByteArray& content);
 
     QTemporaryDir* m_tempDir = nullptr;
     SyncDatabase* m_db = nullptr;
@@ -150,6 +169,27 @@ void TestDirtySyncWorker::createCacheFile(const QString& fileId) {
     m_fileCache->recordCacheEntry(fileId, path, 9);
 }
 
+void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId,
+                                                     const QByteArray& content) {
+    // Use the deterministic cache path so getCachePathForFile matches
+    QString path = m_fileCache->getCachePathForFile(fileId);
+    QDir().mkpath(QFileInfo(path).dir().absolutePath());
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(content);
+    f.close();
+    m_fileCache->recordCacheEntry(fileId, path, content.size());
+}
+
+void TestDirtySyncWorker::createDirtyPendingFile(const QString& fileId, const QByteArray& content) {
+    // Create file in cache first, then move to pending store (simulates release)
+    createCacheFileWithContent(fileId, content);
+    m_fileCache->markDirty(fileId, "/" + fileId + ".txt");
+    QString pendingPath = m_fileCache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+}
+
 // ---------------------------------------------------------------------------
 // H5: matching fileId → upload fails properly
 // ---------------------------------------------------------------------------
@@ -192,8 +232,8 @@ void TestDirtySyncWorker::testUploadError_MismatchedFileId_ErrorNotAttributed() 
 
     // Emit a stray error before starting (it will also fire during the
     // upload window because the synchronous signal runs before wait).
-    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500,
-                                      "totally_unrelated", "/elsewhere");
+    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated",
+                                      "/elsewhere");
 
     m_worker->start();
 
@@ -242,6 +282,276 @@ void TestDirtySyncWorker::testRetryBudget_SkipsExceededFiles() {
         }
     }
     QVERIFY2(foundSkipMessage, "Expected 'Exceeded max retries' message in uploadFailed signals");
+}
+
+// ---------------------------------------------------------------------------
+// Cache content recycling: clearDirty recycles to LRU cache
+// ---------------------------------------------------------------------------
+void TestDirtySyncWorker::testClearDirty_RecyclesContentToCache() {
+    const QString fid = "recycle_test";
+    const QByteArray content = "important lock file data";
+
+    createDirtyPendingFile(fid, content);
+
+    // Verify file is dirty and NOT in cache (it was moved to pending store)
+    QVERIFY(m_fileCache->isDirty(fid));
+    QVERIFY(!m_fileCache->isCached(fid));
+
+    // Simulate what DirtySyncWorker does after successful upload
+    m_fileCache->clearDirty(fid);
+
+    // After clearDirty, the file must be recycled back into the LRU cache
+    QVERIFY(!m_fileCache->isDirty(fid));
+    QVERIFY(m_fileCache->isCached(fid));
+}
+
+void TestDirtySyncWorker::testClearDirty_RecycledFileReadable() {
+    const QString fid = "readable_recycle";
+    const QByteArray content = "{\"user\": \"eli\", \"host\": \"workstation\"}";
+
+    createDirtyPendingFile(fid, content);
+    m_fileCache->clearDirty(fid);
+
+    // The recycled file must be readable with the original content
+    QString cachePath = m_fileCache->getCachePathForFile(fid);
+    QVERIFY(QFile::exists(cachePath));
+
+    QFile f(cachePath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    QCOMPARE(f.readAll(), content);
+    f.close();
+}
+
+// ---------------------------------------------------------------------------
+// Metadata size correctness: simulates the post-upload metadata update
+// path that DirtySyncWorker executes after a successful upload.
+//
+// In single-threaded Qt tests the full upload round-trip cannot complete
+// (QTimer::singleShot can't fire while the thread is blocked in
+// QWaitCondition::wait), so we directly exercise the clearDirty +
+// metadata update logic here.
+// ---------------------------------------------------------------------------
+void TestDirtySyncWorker::testUpload_MetadataSizeFromRecycledFile() {
+    const QString fid = "meta_recycle_sz";
+    const QByteArray content = "kicad lock file content here";
+
+    // Seed metadata with the correct initial size (as fuseRelease would)
+    FuseMetadata meta;
+    meta.fileId = fid;
+    meta.path = fid + ".lck";
+    meta.name = fid + ".lck";
+    meta.parentId = "root";
+    meta.isFolder = false;
+    meta.size = content.size();
+    meta.mimeType = "application/octet-stream";
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = QDateTime::currentDateTimeUtc();
+    meta.cachedAt = QDateTime::currentDateTimeUtc();
+    meta.lastAccessed = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    // Create the dirty file in the pending store
+    createDirtyPendingFile(fid, content);
+
+    // Simulate what DirtySyncWorker does after successful upload:
+    // 1. clearDirty — recycles content back to cache
+    m_fileCache->clearDirty(fid);
+    m_fileCache->markRecentlyUploaded(fid);
+
+    // 2. Simulate Drive API returning size=0 (the bug trigger)
+    //    DirtySyncWorker falls back to getContentPath → local file size
+    DriveFile uploaded;
+    uploaded.id = fid;
+    uploaded.size = 0;  // API omitted size
+    uploaded.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    // Execute the metadata update logic (mirrors DirtySyncWorker::processDirtyFiles)
+    FuseMetadata updatedMeta = m_db->getFuseMetadata(fid);
+    QVERIFY(!updatedMeta.fileId.isEmpty());
+
+    if (uploaded.size > 0) {
+        updatedMeta.size = uploaded.size;
+    } else {
+        QString cachePath = m_fileCache->getContentPath(fid);
+        QFileInfo localInfo(cachePath);
+        if (localInfo.exists() && localInfo.size() > 0) {
+            updatedMeta.size = localInfo.size();
+        }
+    }
+    updatedMeta.modifiedTime = uploaded.modifiedTime;
+    QVERIFY(m_db->saveFuseMetadata(updatedMeta));
+
+    // Verify: metadata must have the correct size, NOT zero
+    FuseMetadata finalMeta = m_db->getFuseMetadata(fid);
+    QVERIFY2(finalMeta.size > 0,
+             qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
+    QCOMPARE(finalMeta.size, static_cast<qint64>(content.size()));
+}
+
+void TestDirtySyncWorker::testUpload_MetadataSizePrefersDriveApiSize() {
+    const QString fid = "meta_api_sz";
+    const QByteArray content = "zip backup data here 12345";
+
+    FuseMetadata meta;
+    meta.fileId = fid;
+    meta.path = fid + ".zip";
+    meta.name = fid + ".zip";
+    meta.parentId = "root";
+    meta.isFolder = false;
+    meta.size = 0;  // deliberately wrong
+    meta.mimeType = "application/zip";
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = QDateTime::currentDateTimeUtc();
+    meta.cachedAt = QDateTime::currentDateTimeUtc();
+    meta.lastAccessed = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    createDirtyPendingFile(fid, content);
+    m_fileCache->clearDirty(fid);
+
+    // Simulate Drive API returning the correct size
+    DriveFile uploaded;
+    uploaded.id = fid;
+    uploaded.size = content.size();
+    uploaded.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    FuseMetadata updatedMeta = m_db->getFuseMetadata(fid);
+    if (uploaded.size > 0) {
+        updatedMeta.size = uploaded.size;
+    } else {
+        QString cachePath = m_fileCache->getContentPath(fid);
+        QFileInfo localInfo(cachePath);
+        if (localInfo.exists() && localInfo.size() > 0) {
+            updatedMeta.size = localInfo.size();
+        }
+    }
+    QVERIFY(m_db->saveFuseMetadata(updatedMeta));
+
+    FuseMetadata finalMeta = m_db->getFuseMetadata(fid);
+    QCOMPARE(finalMeta.size, static_cast<qint64>(content.size()));
+}
+
+// ---------------------------------------------------------------------------
+// Self-upload marker: recently uploaded files skip invalidation
+// ---------------------------------------------------------------------------
+void TestDirtySyncWorker::testRecentlyUploaded_SkipsInvalidation() {
+    const QString fid = "self_upload_inv";
+    const QByteArray content = "pcb design data";
+
+    // Put a file in cache
+    createCacheFileWithContent(fid, content);
+    QVERIFY(m_fileCache->isCached(fid));
+
+    // Simulate what DirtySyncWorker does: mark recently uploaded
+    m_fileCache->markRecentlyUploaded(fid);
+
+    // Now MetadataRefreshWorker would call consumeRecentlyUploaded —
+    // if it returns true, invalidation should be skipped
+    QVERIFY(m_fileCache->consumeRecentlyUploaded(fid));
+
+    // Since we consumed the marker (simulating the skip), verify the
+    // cache is still intact — the invalidation was not called
+    QVERIFY(m_fileCache->isCached(fid));
+
+    // Verify the actual content is still there
+    QString cachePath = m_fileCache->getCachePathForFile(fid);
+    QFile f(cachePath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    QCOMPARE(f.readAll(), content);
+    f.close();
+}
+
+void TestDirtySyncWorker::testRecentlyUploaded_ConsumedOnce() {
+    const QString fid = "consume_once";
+
+    m_fileCache->markRecentlyUploaded(fid);
+
+    // First consume succeeds
+    QVERIFY(m_fileCache->consumeRecentlyUploaded(fid));
+    // Second consume fails — marker was already consumed
+    QVERIFY(!m_fileCache->consumeRecentlyUploaded(fid));
+}
+
+// ---------------------------------------------------------------------------
+// Open-handle protection: files with open handles resist eviction/invalidation
+// ---------------------------------------------------------------------------
+void TestDirtySyncWorker::testOpenHandle_PreventsInvalidation() {
+    const QString fid = "open_handle_inv";
+    const QByteArray content = "kicad pcb data";
+
+    createCacheFileWithContent(fid, content);
+    QVERIFY(m_fileCache->isCached(fid));
+
+    // Simulate a FUSE open — adds open handle ref count
+    m_fileCache->addOpenHandle(fid);
+    QVERIFY(m_fileCache->hasOpenHandles(fid));
+
+    // Attempt invalidation — should be blocked by open handle
+    m_fileCache->invalidate(fid);
+
+    // File must still be cached
+    QVERIFY(m_fileCache->isCached(fid));
+
+    // Content must still be readable
+    QString cachePath = m_fileCache->getCachePathForFile(fid);
+    QFile f(cachePath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    QCOMPARE(f.readAll(), content);
+    f.close();
+
+    // Cleanup
+    m_fileCache->removeOpenHandle(fid);
+}
+
+void TestDirtySyncWorker::testOpenHandle_PreventsEviction() {
+    const QString protectedFid = "open_handle_evict";
+    const QString evictableFid = "evictable_file";
+    const QByteArray content = "data that must survive eviction";
+    const QByteArray evictContent = "this one can go";
+
+    // Create two files: one with an open handle, one without
+    createCacheFileWithContent(protectedFid, content);
+    createCacheFileWithContent(evictableFid, evictContent);
+
+    QVERIFY(m_fileCache->isCached(protectedFid));
+    QVERIFY(m_fileCache->isCached(evictableFid));
+
+    // Add open handle only to the protected file
+    m_fileCache->addOpenHandle(protectedFid);
+
+    // Shrink the max cache size to just below total content, forcing eviction.
+    // The protected file (31 bytes) + evictable file (15 bytes) = 46 bytes.
+    // Setting max to 32 bytes means we need to evict at least the evictable file.
+    m_fileCache->setMaxCacheSize(content.size() + 1);
+
+    // Protected file must still be cached (open handle prevents eviction)
+    QVERIFY(m_fileCache->isCached(protectedFid));
+    QString cachePath = m_fileCache->getCachePathForFile(protectedFid);
+    QVERIFY(QFile::exists(cachePath));
+
+    // The evictable file should have been evicted
+    QVERIFY(!m_fileCache->isCached(evictableFid));
+
+    // Cleanup — restore sane cache size and release handle
+    m_fileCache->setMaxCacheSize(10LL * 1024 * 1024 * 1024);
+    m_fileCache->removeOpenHandle(protectedFid);
+}
+
+void TestDirtySyncWorker::testOpenHandle_ReleasedAllowsInvalidation() {
+    const QString fid = "handle_release_inv";
+    const QByteArray content = "temporary data";
+
+    createCacheFileWithContent(fid, content);
+
+    // Add and then remove the handle
+    m_fileCache->addOpenHandle(fid);
+    QVERIFY(m_fileCache->hasOpenHandles(fid));
+    m_fileCache->removeOpenHandle(fid);
+    QVERIFY(!m_fileCache->hasOpenHandles(fid));
+
+    // Now invalidation should succeed
+    m_fileCache->invalidate(fid);
+    QVERIFY(!m_fileCache->isCached(fid));
 }
 
 QTEST_MAIN(TestDirtySyncWorker)

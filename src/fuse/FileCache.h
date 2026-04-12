@@ -25,6 +25,7 @@
 #include <QMap>
 #include <QMutex>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QWaitCondition>
 
@@ -354,6 +355,56 @@ class FileCache : public QObject {
     // Cache Management
     // ========================================================================
 
+    // ========================================================================
+    // Self-Upload Tracking (prevents MetadataRefreshWorker from
+    // invalidating files that we just uploaded ourselves)
+    // ========================================================================
+
+    /**
+     * @brief Record that a file was just uploaded by DirtySyncWorker
+     * @param fileId Google Drive file ID
+     */
+    void markRecentlyUploaded(const QString& fileId);
+
+    /**
+     * @brief Check and consume a recently-uploaded marker
+     *
+     * Returns true if the file was recently uploaded by us (and removes
+     * the marker so it is consumed only once).
+     *
+     * @param fileId Google Drive file ID
+     * @return true if the file was uploaded by us and should not be invalidated
+     */
+    bool consumeRecentlyUploaded(const QString& fileId);
+
+    // ========================================================================
+    // Open-Handle Tracking (prevents eviction / invalidation of files
+    // that are currently opened by a FUSE client)
+    // ========================================================================
+
+    /**
+     * @brief Increment the open-handle reference count for a file
+     * @param fileId Google Drive file ID
+     */
+    void addOpenHandle(const QString& fileId);
+
+    /**
+     * @brief Decrement the open-handle reference count for a file
+     * @param fileId Google Drive file ID
+     */
+    void removeOpenHandle(const QString& fileId);
+
+    /**
+     * @brief Check whether a file has any open FUSE handles
+     * @param fileId Google Drive file ID
+     * @return true if at least one handle is open
+     */
+    bool hasOpenHandles(const QString& fileId) const;
+
+    // ========================================================================
+    // Cache Management
+    // ========================================================================
+
     /**
      * @brief Evict files to free specified space
      *
@@ -460,6 +511,14 @@ class FileCache : public QObject {
 
     // In-memory dirty files (mirrors fuse_dirty_files table)
     QMap<QString, DirtyFileEntry> m_dirtyFiles;
+
+    // Self-upload tracking — fileIds uploaded by DirtySyncWorker that
+    // MetadataRefreshWorker should not invalidate (Fix 1)
+    QSet<QString> m_recentlyUploaded;
+
+    // Open-handle reference counts — files with open FUSE handles
+    // must not be evicted or invalidated (Fix 2)
+    QMap<QString, int> m_openHandleCounts;
 
     // Thread safety
     mutable QMutex m_mutex;

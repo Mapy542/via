@@ -347,8 +347,8 @@ void TestFileCache::testGetContentPath_CleanFile_ReturnsCachePath() {
     QCOMPARE(m_cache->getContentPath(fileId), expected);
 }
 
-// clearDirty must also delete the pending-store file so stale data is not
-// left behind after a successful upload.
+// clearDirty must recycle the pending-store file back into the LRU cache
+// so that file content is immediately available for subsequent reads.
 void TestFileCache::testClearDirty_RemovesPendingFile() {
     const QString fileId = "to_clear";
 
@@ -367,7 +367,16 @@ void TestFileCache::testClearDirty_RemovesPendingFile() {
     m_cache->clearDirty(fileId);
 
     QVERIFY(!m_cache->isDirty(fileId));
+    // Pending file should be gone (moved, not left behind)
     QVERIFY(!QFile::exists(pendingPath));
+    // File should now be in the LRU cache
+    QVERIFY(m_cache->isCached(fileId));
+    // The recycled cache file should contain the original content
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFile cached(cachePath);
+    QVERIFY(cached.open(QIODevice::ReadOnly));
+    QCOMPARE(cached.readAll(), QByteArray("data"));
+    cached.close();
 }
 
 QTEST_MAIN(TestFileCache)

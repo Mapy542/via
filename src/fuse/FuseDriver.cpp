@@ -1546,7 +1546,34 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
     // Read from cached file
     QFile file(openFile.cachePath);
     if (!file.open(QIODevice::ReadOnly)) {
-        return -EIO;
+        // Fix 3: The cached file was evicted or invalidated while this handle
+        // was still open (e.g. by MetadataRefreshWorker or LRU eviction).
+        // Attempt to re-acquire the content before giving up.
+        if (drv->m_fileCache) {
+            QString newPath = drv->m_fileCache->getCachedPath(openFile.fileId, openFile.size);
+            if (!newPath.isEmpty()) {
+                // Update the open handle so future reads use the new path
+                {
+                    QMutexLocker locker(&drv->m_openFilesMutex);
+                    if (drv->m_openFiles.contains(fi->fh)) {
+                        drv->m_openFiles[fi->fh].cachePath = newPath;
+                    }
+                }
+                file.setFileName(newPath);
+                if (file.open(QIODevice::ReadOnly)) {
+                    qWarning() << "FuseDriver: fuseRead recovered stale cache path for"
+                               << openFile.fileId;
+                } else {
+                    qCritical() << "FuseDriver: fuseRead recovery failed for" << openFile.fileId;
+                    return -EIO;
+                }
+            } else {
+                qCritical() << "FuseDriver: fuseRead could not re-acquire" << openFile.fileId;
+                return -EIO;
+            }
+        } else {
+            return -EIO;
+        }
     }
 
     if (!file.seek(offset)) {
@@ -1671,66 +1698,22 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
 int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info* fi) {
     Q_UNUSED(path)
     Q_UNUSED(datasync)
-    auto* drv = self();
+    Q_UNUSED(fi)
 
-    if (!drv) {
-        return -EIO;
-    }
-
-    auto openFileOpt = drv->getOpenFile(fi->fh);
-    if (!openFileOpt) {
-        return -EBADF;
-    }
-
-    // Nothing to sync if the file wasn't modified.
-    if (!openFileOpt->dirty || openFileOpt->fileId.isEmpty()) {
-        return 0;
-    }
-
-    if (!drv->m_driveClient) {
-        return -EIO;
-    }
-
-    FuseOpenFile openFile = *openFileOpt;
-    QString error;
-    DriveFile updatedFile;
-    bool authFailure = false;
-
-    // Synchronous upload – the caller explicitly asked for data persistence.
-    if (waitForUpdate(
-            drv->m_driveClient, openFile.fileId, &updatedFile,
-            [&]() {
-                return invokeDriveCall(drv->m_driveClient, [&]() {
-                    drv->m_driveClient->updateFile(openFile.fileId, openFile.cachePath);
-                });
-            },
-            &error, &authFailure)) {
-        // Upload succeeded – clear dirty state.
-        if (drv->m_fileCache) {
-            drv->m_fileCache->clearDirty(openFile.fileId);
-        }
-        drv->markOpenFileClean(fi->fh);
-
-        if (drv->m_database) {
-            QString lookupPath =
-                openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
-            FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
-            if (!meta.fileId.isEmpty()) {
-                meta.size = QFileInfo(openFile.cachePath).size();
-                if (updatedFile.modifiedTime.isValid()) {
-                    meta.modifiedTime = updatedFile.modifiedTime;
-                }
-                meta.lastAccessed = QDateTime::currentDateTime();
-                meta.cachedAt = QDateTime::currentDateTime();
-                drv->m_database->saveFuseMetadata(meta);
-            }
-        }
-        return 0;
-    }
-
-    qWarning() << "FuseDriver: fsync upload failed for" << openFile.path << ":" << error
-               << "authFailure=" << authFailure;
-    return -EIO;
+    // The file data has already been written to a local cache file by fuseWrite,
+    // so it is on stable local storage.  Doing a synchronous Drive upload here
+    // blocks the single-threaded FUSE loop for the full network round-trip
+    // (up to FUSE_API_TIMEOUT_MS = 30 s), which freezes every other FUSE
+    // operation and makes KiCad's UI hang whenever SQLite fsyncs its journal.
+    //
+    // Instead, the cloud upload is deferred:
+    //   fuseRelease() → moveToDirtyStore() → DirtySyncWorker uploads in the
+    //   background.
+    //
+    // This matches the semantics of every major cloud-backed FUSE filesystem
+    // (rclone, google-drive-ocamlfuse, etc.): fsync guarantees local durability,
+    // not remote durability.
+    return 0;
 }
 
 int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
@@ -1860,7 +1843,11 @@ int FuseDriver::fuseUnlink(const char* path) {
         return -EISDIR;
     }
 
-    // Delete via API (synchronous — H3 fix)
+    // Delete via API (synchronous — H3 fix).
+    // Treat "file not found" (404) as success — the file may have already been
+    // deleted from Drive by a concurrent operation (e.g. MetadataRefreshWorker
+    // processing a remote deletion, or a previous unlink that raced with an
+    // orphaned updateFile response).
     QString error;
     bool authFailure = false;
     if (!waitForDelete(
@@ -1870,8 +1857,14 @@ int FuseDriver::fuseUnlink(const char* path) {
                                        [&]() { drv->m_driveClient->deleteFile(meta.fileId); });
             },
             &error, &authFailure)) {
-        qWarning() << "FuseDriver: unlink delete failed for" << lookupPath << ":" << error;
-        return authFailure ? -EACCES : -EIO;
+        // Accept "not found" as success — the remote file is already gone.
+        bool notFound = error.contains(QLatin1String("not found"), Qt::CaseInsensitive)
+                     || error.contains(QLatin1String("404"));
+        if (!notFound) {
+            qWarning() << "FuseDriver: unlink delete failed for" << lookupPath << ":" << error;
+            return authFailure ? -EACCES : -EIO;
+        }
+        qDebug() << "FuseDriver: unlink – file already deleted from Drive:" << lookupPath;
     }
 
     // Remove from cache only after remote delete confirmed
@@ -2404,9 +2397,17 @@ QString FuseDriver::normalizePath(const char* fusePath) {
 }
 
 uint64_t FuseDriver::registerOpenFile(const FuseOpenFile& openFile) {
-    QMutexLocker locker(&m_openFilesMutex);
-    uint64_t handle = m_nextFileHandle++;
-    m_openFiles[handle] = openFile;
+    uint64_t handle;
+    {
+        QMutexLocker locker(&m_openFilesMutex);
+        handle = m_nextFileHandle++;
+        m_openFiles[handle] = openFile;
+    }
+    // Fix 2: Tell FileCache that this file has an active FUSE handle so it
+    // will not be evicted or invalidated while the handle is open.
+    if (m_fileCache && !openFile.fileId.isEmpty()) {
+        m_fileCache->addOpenHandle(openFile.fileId);
+    }
     return handle;
 }
 
@@ -2437,6 +2438,18 @@ bool FuseDriver::markOpenFileClean(uint64_t fh) {
 }
 
 void FuseDriver::unregisterOpenFile(uint64_t fh) {
-    QMutexLocker locker(&m_openFilesMutex);
-    m_openFiles.remove(fh);
+    QString fileId;
+    {
+        QMutexLocker locker(&m_openFilesMutex);
+        auto it = m_openFiles.find(fh);
+        if (it != m_openFiles.end()) {
+            fileId = it->fileId;
+            m_openFiles.erase(it);
+        }
+    }
+    // Fix 2: Decrement the open-handle count so the file becomes eligible
+    // for eviction and invalidation once all handles are closed.
+    if (m_fileCache && !fileId.isEmpty()) {
+        m_fileCache->removeOpenHandle(fileId);
+    }
 }

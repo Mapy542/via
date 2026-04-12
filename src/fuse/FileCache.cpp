@@ -117,7 +117,11 @@ void FileCache::setMaxCacheSize(qint64 bytes) {
 
     // Trigger eviction if current size exceeds new max
     while (m_currentSize > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
+        qint64 sizeBefore = m_currentSize;
         evictLRU();
+        if (m_currentSize == sizeBefore) {
+            break;
+        }
     }
 }
 
@@ -209,7 +213,11 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
         if (m_currentSize + expectedSize > m_maxCacheSize) {
             // Need to evict to make space
             while (m_currentSize + expectedSize > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
+                qint64 sizeBefore = m_currentSize;
                 evictLRU();
+                if (m_currentSize == sizeBefore) {
+                    break;
+                }
             }
         }
     }
@@ -349,6 +357,14 @@ void FileCache::invalidate(const QString& fileId) {
         return;
     }
 
+    // Fix 2: Never invalidate a file with open FUSE handles — readers/writers
+    // would get I/O errors on their next system call.
+    if (m_openHandleCounts.value(fileId, 0) > 0) {
+        qWarning() << "FileCache: Skipping invalidation of file" << fileId
+                   << "— open FUSE handles exist";
+        return;
+    }
+
     CacheEntry entry = m_cacheEntries.take(fileId);
 
     // Delete the cached file from disk
@@ -469,12 +485,55 @@ void FileCache::clearDirty(const QString& fileId) {
 
     qDebug() << "FileCache: Clearing dirty flag for" << fileId;
 
-    // Remove the pending-store file — upload succeeded, so the canonical copy
-    // is now on the remote and the local pending file is no longer needed.
+    // Recycle the pending-store file back into the LRU cache so the content
+    // remains available for immediate reads.  Without this there is a window
+    // where no on-disk content exists — stat() would report the stale remote
+    // size (often 0 for newly created files) and reads would require a full
+    // re-download from Drive.
     QString pendingPath = generateDirtyPath(fileId);
     if (QFile::exists(pendingPath)) {
-        QFile::remove(pendingPath);
-        qDebug() << "FileCache: Removed pending file" << pendingPath;
+        QString cachePath = generateCachePath(fileId);
+        QFileInfo pendingInfo(pendingPath);
+        qint64 fileSize = pendingInfo.size();
+
+        // Ensure parent directory exists
+        QDir().mkpath(QFileInfo(cachePath).path());
+
+        // Remove any stale cache copy first
+        if (QFile::exists(cachePath)) {
+            QFile::remove(cachePath);
+        }
+
+        // Rename (atomic on same fs) or copy+delete across filesystems
+        bool recycled = QFile::rename(pendingPath, cachePath);
+        if (!recycled) {
+            recycled = QFile::copy(pendingPath, cachePath);
+            if (recycled) {
+                QFile::remove(pendingPath);
+            }
+        }
+
+        if (recycled) {
+            CacheEntry entry;
+            entry.fileId = fileId;
+            entry.cachePath = cachePath;
+            entry.size = fileSize;
+            entry.lastAccessed = QDateTime::currentDateTime();
+            entry.downloadCompleted = QDateTime::currentDateTime();
+            m_cacheEntries[fileId] = entry;
+            m_currentSize += fileSize;
+
+            if (m_database) {
+                m_database->recordFuseCacheEntry(fileId, cachePath, fileSize);
+            }
+
+            qDebug() << "FileCache: Recycled pending file back into cache for" << fileId << "("
+                     << fileSize << "bytes)";
+        } else {
+            // Last resort — delete so it doesn't linger
+            QFile::remove(pendingPath);
+            qWarning() << "FileCache: Could not recycle pending file for" << fileId << ", deleted";
+        }
     }
 
     m_dirtyFiles.remove(fileId);
@@ -514,7 +573,13 @@ bool FileCache::evictToFreeSpace(qint64 bytesNeeded) {
     qint64 available = m_maxCacheSize - m_currentSize;
 
     while (available < bytesNeeded && !m_cacheEntries.isEmpty()) {
+        qint64 sizeBefore = m_currentSize;
         evictLRU();
+        // If evictLRU could not evict anything (all remaining entries are
+        // dirty or have open handles), break to avoid an infinite loop.
+        if (m_currentSize == sizeBefore) {
+            break;
+        }
         available = m_maxCacheSize - m_currentSize;
     }
 
@@ -527,7 +592,11 @@ bool FileCache::recordCacheEntry(const QString& fileId, const QString& localPath
     // Check if we need to evict first
     if (m_currentSize + size > m_maxCacheSize) {
         while (m_currentSize + size > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
+            qint64 sizeBefore = m_currentSize;
             evictLRU();
+            if (m_currentSize == sizeBefore) {
+                break;
+            }
         }
     }
 
@@ -548,6 +617,44 @@ bool FileCache::recordCacheEntry(const QString& fileId, const QString& localPath
 
     emit cacheSizeChanged(m_currentSize);
     return true;
+}
+
+// ============================================================================
+// Self-Upload Tracking (Fix 1)
+// ============================================================================
+
+void FileCache::markRecentlyUploaded(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
+    m_recentlyUploaded.insert(fileId);
+}
+
+bool FileCache::consumeRecentlyUploaded(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
+    return m_recentlyUploaded.remove(fileId);
+}
+
+// ============================================================================
+// Open-Handle Tracking (Fix 2)
+// ============================================================================
+
+void FileCache::addOpenHandle(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
+    m_openHandleCounts[fileId]++;
+}
+
+void FileCache::removeOpenHandle(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
+    auto it = m_openHandleCounts.find(fileId);
+    if (it != m_openHandleCounts.end()) {
+        if (--(*it) <= 0) {
+            m_openHandleCounts.erase(it);
+        }
+    }
+}
+
+bool FileCache::hasOpenHandles(const QString& fileId) const {
+    QMutexLocker locker(&m_mutex);
+    return m_openHandleCounts.value(fileId, 0) > 0;
 }
 
 // ============================================================================
@@ -751,7 +858,7 @@ void FileCache::loadCacheFromDatabase() {
 void FileCache::evictLRU() {
     // Find least recently used entry that is NOT dirty
     QString lruFileId;
-    QDateTime lruTime = QDateTime::currentDateTime();
+    QDateTime lruTime;
 
     for (auto it = m_cacheEntries.constBegin(); it != m_cacheEntries.constEnd(); ++it) {
         // Skip dirty files - they must not be evicted
@@ -759,14 +866,19 @@ void FileCache::evictLRU() {
             continue;
         }
 
-        if (it.value().lastAccessed < lruTime) {
+        // Fix 2: Skip files with open FUSE handles
+        if (m_openHandleCounts.value(it.key(), 0) > 0) {
+            continue;
+        }
+
+        if (lruFileId.isEmpty() || it.value().lastAccessed < lruTime) {
             lruTime = it.value().lastAccessed;
             lruFileId = it.key();
         }
     }
 
     if (lruFileId.isEmpty()) {
-        qWarning() << "FileCache: Cannot evict - all cached files are dirty";
+        qWarning() << "FileCache: Cannot evict - all cached files are dirty or have open handles";
         return;
     }
 
