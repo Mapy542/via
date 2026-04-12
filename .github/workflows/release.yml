@@ -20,16 +20,42 @@ permissions:
 
 jobs:
     build:
+        strategy:
+            matrix:
+                include:
+                    - arch: x86_64
+                      runner: ubuntu-latest
+                      qt_arch: ''
+                      artifact_name: via-release-build-x86_64
+                    - arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      qt_arch: linux_arm64
+                      artifact_name: via-release-build-aarch64
         uses: ./.github/workflows/build-reusable.yml
         with:
             build_type: Release
             build_tests: false
-            artifact_name: via-release-build
+            artifact_name: ${{ matrix.artifact_name }}
             cmake_install_prefix: /usr
+            runner: ${{ matrix.runner }}
+            qt_arch: ${{ matrix.qt_arch }}
 
     package:
         needs: build
-        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                include:
+                    - arch: x86_64
+                      runner: ubuntu-latest
+                      artifact_name: via-release-build-x86_64
+                      qt_arch: ''
+                      linuxdeploy_arch: x86_64
+                    - arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      artifact_name: via-release-build-aarch64
+                      qt_arch: linux_arm64
+                      linuxdeploy_arch: aarch64
+        runs-on: ${{ matrix.runner }}
 
         steps:
             - name: Checkout code
@@ -53,6 +79,7 @@ jobs:
               with:
                   version: '6.7.3'
                   modules: 'qtnetworkauth'
+                  arch: ${{ matrix.qt_arch }}
 
             - name: Install Qt6Keychain
               run: |
@@ -67,13 +94,13 @@ jobs:
             - name: Download build artifacts
               uses: actions/download-artifact@v4
               with:
-                  name: via-release-build
+                  name: ${{ matrix.artifact_name }}
                   path: build/
 
             - name: Install linuxdeploy
               run: |
-                  wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-                  wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+                  wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.linuxdeploy_arch }}.AppImage
+                  wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${{ matrix.linuxdeploy_arch }}.AppImage
                   chmod +x linuxdeploy*.AppImage
 
             - name: Install to AppDir
@@ -93,11 +120,11 @@ jobs:
                   export APPIMAGE_EXTRACT_AND_RUN=1
                   export QMAKE=$(which qmake6 2>/dev/null || which qmake)
                   export EXTRA_QT_PLUGINS="svg;"
-                  ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage
+                  ./linuxdeploy-${{ matrix.linuxdeploy_arch }}.AppImage --appdir AppDir --plugin qt --output appimage
 
             - name: Rename AppImage
               run: |
-                  mv Via*.AppImage Via-${{ env.RELEASE_VERSION }}-x86_64.AppImage
+                  mv Via*.AppImage Via-${{ env.RELEASE_VERSION }}-${{ matrix.arch }}.AppImage
 
             - name: Create Release
               uses: softprops/action-gh-release@v1
