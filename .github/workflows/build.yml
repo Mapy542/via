@@ -11,15 +11,39 @@ permissions:
 
 jobs:
     build:
+        strategy:
+            matrix:
+                include:
+                    - arch: x86_64
+                      runner: ubuntu-latest
+                      qt_arch: ''
+                      artifact_name: via-build-x86_64
+                    - arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      qt_arch: linux_arm64
+                      artifact_name: via-build-aarch64
         uses: ./.github/workflows/build-reusable.yml
         with:
             build_type: Release
             build_tests: true
-            artifact_name: via-build
+            artifact_name: ${{ matrix.artifact_name }}
+            runner: ${{ matrix.runner }}
+            qt_arch: ${{ matrix.qt_arch }}
 
     test:
         needs: build
-        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                include:
+                    - arch: x86_64
+                      runner: ubuntu-latest
+                      qt_arch: ''
+                      artifact_name: via-build-x86_64
+                    - arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      qt_arch: linux_arm64
+                      artifact_name: via-build-aarch64
+        runs-on: ${{ matrix.runner }}
 
         env:
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -39,6 +63,7 @@ jobs:
               with:
                   version: '6.7.3'
                   modules: 'qtnetworkauth'
+                  arch: ${{ matrix.qt_arch }}
 
             - name: Install Qt6Keychain
               run: |
@@ -53,7 +78,7 @@ jobs:
             - name: Download build artifacts
               uses: actions/download-artifact@v4
               with:
-                  name: via-build
+                  name: ${{ matrix.artifact_name }}
                   path: build/
 
             - name: Make test binaries executable
