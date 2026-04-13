@@ -104,8 +104,7 @@ class FileCache : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient,
-                       QObject* parent = nullptr);
+    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent = nullptr);
 
     ~FileCache() override;
 
@@ -486,8 +485,8 @@ class FileCache : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
-                         const QString& fileId, const QString& localPath);
+    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
+                         const QString& localPath);
 
    private:
     // Internal helpers

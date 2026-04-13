@@ -46,6 +46,7 @@ class TestFileCache : public QObject {
 
     // Dirty tracking
     void testMarkDirty_SetsDirtyFlag();
+    void testMarkDirty_RepeatedWriteAdvancesGeneration();
     void testClearDirty_RemovesDirtyFlag();
     void testIsDirty_ReturnsFalseForUnknown();
     void testGetDirtyFiles_ReturnsAll();
@@ -69,6 +70,8 @@ class TestFileCache : public QObject {
     void testGetContentPath_DirtyFile_ReturnsPendingPath();
     void testGetContentPath_CleanFile_ReturnsCachePath();
     void testClearDirty_RemovesPendingFile();
+    void testClearDirty_SkipsStaleGeneration();
+    void testClearDirty_SkipsWhenOpenHandleExists();
 
    private:
     void createTestDatabase();
@@ -135,8 +138,7 @@ void TestFileCache::destroyTestDatabase() {
 // ---------------------------------------------------------------------------
 // Helpers — put a file into cache so invalidate / remove have something to act on
 // ---------------------------------------------------------------------------
-static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId,
-                          qint64 size = 100) {
+static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId, qint64 size = 100) {
     // Create a real file on disk inside the cache directory
     QString filePath = cacheDir + "/" + fileId;
     QFile f(filePath);
@@ -156,15 +158,25 @@ void TestFileCache::testMarkDirty_SetsDirtyFlag() {
     QVERIFY(m_cache->isDirty("f1"));
 }
 
+void TestFileCache::testMarkDirty_RepeatedWriteAdvancesGeneration() {
+    m_cache->markDirty("f1", "/file1.txt");
+    QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    QCOMPARE(dirty.first().generation, static_cast<quint64>(1));
+
+    m_cache->markDirty("f1", "/file1.txt");
+    dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    QCOMPARE(dirty.first().generation, static_cast<quint64>(2));
+}
+
 void TestFileCache::testClearDirty_RemovesDirtyFlag() {
     m_cache->markDirty("f1", "/file1.txt");
     m_cache->clearDirty("f1");
     QVERIFY(!m_cache->isDirty("f1"));
 }
 
-void TestFileCache::testIsDirty_ReturnsFalseForUnknown() {
-    QVERIFY(!m_cache->isDirty("nonexistent"));
-}
+void TestFileCache::testIsDirty_ReturnsFalseForUnknown() { QVERIFY(!m_cache->isDirty("nonexistent")); }
 
 void TestFileCache::testGetDirtyFiles_ReturnsAll() {
     m_cache->markDirty("a", "/a.txt");
@@ -377,6 +389,76 @@ void TestFileCache::testClearDirty_RemovesPendingFile() {
     QVERIFY(cached.open(QIODevice::ReadOnly));
     QCOMPARE(cached.readAll(), QByteArray("data"));
     cached.close();
+}
+
+void TestFileCache::testClearDirty_SkipsStaleGeneration() {
+    const QString fileId = "stale_generation";
+
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write("v1");
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, 2);
+    m_cache->markDirty(fileId, "/stale_generation.txt");
+
+    QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    quint64 firstGeneration = dirty.first().generation;
+
+    QString pendingPath = m_cache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+
+    QFile pending(pendingPath);
+    QVERIFY(pending.open(QIODevice::Append));
+    pending.write("_v2");
+    pending.close();
+
+    m_cache->markDirty(fileId, "/stale_generation.txt");
+    dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    QCOMPARE(dirty.first().generation, firstGeneration + 1);
+
+    QVERIFY(!m_cache->clearDirty(fileId, firstGeneration));
+    QVERIFY(m_cache->isDirty(fileId));
+    QVERIFY(QFile::exists(pendingPath));
+    QVERIFY(!m_cache->isCached(fileId));
+}
+
+void TestFileCache::testClearDirty_SkipsWhenOpenHandleExists() {
+    const QString fileId = "busy_generation";
+
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write("busy");
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, 4);
+    m_cache->markDirty(fileId, "/busy_generation.txt");
+
+    QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    quint64 generation = dirty.first().generation;
+
+    QString pendingPath = m_cache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+
+    m_cache->addOpenHandle(fileId);
+    QVERIFY(!m_cache->clearDirty(fileId, generation));
+    QVERIFY(m_cache->isDirty(fileId));
+    QVERIFY(QFile::exists(pendingPath));
+    QVERIFY(!m_cache->isCached(fileId));
+
+    m_cache->removeOpenHandle(fileId);
+    QVERIFY(m_cache->clearDirty(fileId, generation));
+    QVERIFY(!m_cache->isDirty(fileId));
+    QVERIFY(m_cache->isCached(fileId));
 }
 
 QTEST_MAIN(TestFileCache)

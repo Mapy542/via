@@ -33,6 +33,7 @@ class FakeDriveClientDSW : public GoogleDriveClient {
     /// the real GoogleDriveClient behaviour and avoid waking the wait
     /// condition before the caller has entered wait().
     void updateFile(const QString& fileId, const QString& localPath) override {
+        m_updateCalls[fileId]++;
         if (m_failIds.contains(fileId)) {
             QTimer::singleShot(0, this, [this, fileId, localPath]() {
                 emit errorDetailed("updateFile", "Simulated failure", 500, fileId, localPath);
@@ -52,6 +53,7 @@ class FakeDriveClientDSW : public GoogleDriveClient {
     /// Mark a fileId as one that should fail uploads
     void setFailForFileId(const QString& id) { m_failIds.insert(id); }
     void clearFailForFileId(const QString& id) { m_failIds.remove(id); }
+    int updateCallCountForFileId(const QString& id) const { return m_updateCalls.value(id, 0); }
 
     // Stubs required by base class
     void downloadFile(const QString&, const QString&) override {}
@@ -65,6 +67,7 @@ class FakeDriveClientDSW : public GoogleDriveClient {
 
    private:
     QSet<QString> m_failIds;
+    QMap<QString, int> m_updateCalls;
 };
 
 // ---------------------------------------------------------------------------
@@ -100,6 +103,7 @@ class TestDirtySyncWorker : public QObject {
     void testOpenHandle_PreventsInvalidation();
     void testOpenHandle_PreventsEviction();
     void testOpenHandle_ReleasedAllowsInvalidation();
+    void testSyncNow_SkipsFileWithOpenHandle();
 
    private:
     void createCacheFile(const QString& fileId);
@@ -161,7 +165,8 @@ void TestDirtySyncWorker::cleanup() {
 }
 
 void TestDirtySyncWorker::createCacheFile(const QString& fileId) {
-    QString path = m_cacheDir + "/" + fileId;
+    QString path = m_fileCache->getCachePathForFile(fileId);
+    QDir().mkpath(QFileInfo(path).dir().absolutePath());
     QFile f(path);
     QVERIFY(f.open(QIODevice::WriteOnly));
     f.write("test data");
@@ -169,8 +174,7 @@ void TestDirtySyncWorker::createCacheFile(const QString& fileId) {
     m_fileCache->recordCacheEntry(fileId, path, 9);
 }
 
-void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId,
-                                                     const QByteArray& content) {
+void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId, const QByteArray& content) {
     // Use the deterministic cache path so getCachePathForFile matches
     QString path = m_fileCache->getCachePathForFile(fileId);
     QDir().mkpath(QFileInfo(path).dir().absolutePath());
@@ -232,8 +236,7 @@ void TestDirtySyncWorker::testUploadError_MismatchedFileId_ErrorNotAttributed() 
 
     // Emit a stray error before starting (it will also fire during the
     // upload window because the synchronous signal runs before wait).
-    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated",
-                                      "/elsewhere");
+    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated", "/elsewhere");
 
     m_worker->start();
 
@@ -383,8 +386,7 @@ void TestDirtySyncWorker::testUpload_MetadataSizeFromRecycledFile() {
 
     // Verify: metadata must have the correct size, NOT zero
     FuseMetadata finalMeta = m_db->getFuseMetadata(fid);
-    QVERIFY2(finalMeta.size > 0,
-             qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
+    QVERIFY2(finalMeta.size > 0, qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
     QCOMPARE(finalMeta.size, static_cast<qint64>(content.size()));
 }
 
@@ -552,6 +554,25 @@ void TestDirtySyncWorker::testOpenHandle_ReleasedAllowsInvalidation() {
     // Now invalidation should succeed
     m_fileCache->invalidate(fid);
     QVERIFY(!m_fileCache->isCached(fid));
+}
+
+void TestDirtySyncWorker::testSyncNow_SkipsFileWithOpenHandle() {
+    const QString fid = "open_handle_upload_skip";
+
+    createCacheFileWithContent(fid, "content that must not upload while open");
+    m_fileCache->markDirty(fid, "/open_handle_upload_skip.txt");
+    m_fileCache->addOpenHandle(fid);
+
+    QSignalSpy cycleSpy(m_worker, &DirtySyncWorker::syncCycleCompleted);
+
+    m_worker->start();
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 1, 5000);
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 0);
+    QVERIFY(m_fileCache->isDirty(fid));
+
+    m_worker->stop();
+    m_fileCache->removeOpenHandle(fid);
 }
 
 QTEST_MAIN(TestDirtySyncWorker)
