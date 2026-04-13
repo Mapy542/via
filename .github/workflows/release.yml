@@ -117,9 +117,14 @@ jobs:
                   mkdir -p AppDir/usr/share/applications
                   cp res/via.desktop AppDir/usr/share/applications/
 
-            - name: Remove unsupported Qt SQL drivers
+            - name: Keep only SQLite Qt SQL driver
               run: |
-                  rm -f "$QT_ROOT_DIR/plugins/sqldrivers/libqsqlmimer.so"
+                  set -euo pipefail
+                  sql_driver_dir="$QT_ROOT_DIR/plugins/sqldrivers"
+                  if [ -d "$sql_driver_dir" ]; then
+                      find "$sql_driver_dir" -maxdepth 1 -type f -name 'libqsql*.so' ! -name 'libqsqlite.so' -print -delete
+                      ls -1 "$sql_driver_dir"
+                  fi
 
             - name: Create AppImage
               run: |
