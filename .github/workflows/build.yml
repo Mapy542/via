@@ -16,11 +16,13 @@ jobs:
                 include:
                     - arch: x86_64
                       runner: ubuntu-latest
+                      qt_host: linux
                       qt_arch: ''
                       artifact_name: via-build-x86_64
                     - arch: aarch64
                       runner: ubuntu-24.04-arm
-                      qt_arch: gcc_arm64
+                      qt_host: linux_arm64
+                      qt_arch: linux_gcc_arm64
                       artifact_name: via-build-aarch64
         uses: ./.github/workflows/build-reusable.yml
         with:
@@ -28,6 +30,7 @@ jobs:
             build_tests: true
             artifact_name: ${{ matrix.artifact_name }}
             runner: ${{ matrix.runner }}
+            qt_host: ${{ matrix.qt_host }}
             qt_arch: ${{ matrix.qt_arch }}
 
     test:
@@ -37,11 +40,13 @@ jobs:
                 include:
                     - arch: x86_64
                       runner: ubuntu-latest
+                      qt_host: linux
                       qt_arch: ''
                       artifact_name: via-build-x86_64
                     - arch: aarch64
                       runner: ubuntu-24.04-arm
-                      qt_arch: gcc_arm64
+                      qt_host: linux_arm64
+                      qt_arch: linux_gcc_arm64
                       artifact_name: via-build-aarch64
         runs-on: ${{ matrix.runner }}
 
@@ -63,7 +68,7 @@ jobs:
               with:
                   version: '6.7.3'
                   modules: 'qtnetworkauth'
-                  host: linux
+                  host: ${{ matrix.qt_host }}
                   arch: ${{ matrix.qt_arch }}
 
             - name: Install Qt6Keychain

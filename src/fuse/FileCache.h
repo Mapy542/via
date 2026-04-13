@@ -68,6 +68,7 @@ struct DirtyFileEntry {
     QDateTime markedDirtyAt;      ///< When file was marked dirty
     QDateTime lastUploadAttempt;  ///< Last upload attempt time
     bool uploadFailed;            ///< Whether last upload failed
+    quint64 generation = 0;       ///< In-memory version to detect stale uploads
 };
 
 Q_DECLARE_METATYPE(CacheEntry)
@@ -323,7 +324,7 @@ class FileCache : public QObject {
      *
      * @param fileId Google Drive file ID
      */
-    void clearDirty(const QString& fileId);
+    bool clearDirty(const QString& fileId, quint64 expectedGeneration = 0);
 
     /**
      * @brief Mark a dirty file upload as failed

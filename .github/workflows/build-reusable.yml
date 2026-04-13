@@ -28,8 +28,13 @@ on:
                 required: false
                 type: string
                 default: 'ubuntu-latest'
+            qt_host:
+                description: 'Qt host for install-qt-action (linux for x86_64, linux_arm64 for ARM64)'
+                required: false
+                type: string
+                default: 'linux'
             qt_arch:
-                description: 'Qt architecture for install-qt-action (e.g. linux_arm64 for ARM64; empty for x86_64)'
+                description: 'Qt architecture for install-qt-action (e.g. linux_gcc_arm64 for ARM64; empty for x86_64)'
                 required: false
                 type: string
                 default: ''
@@ -62,7 +67,7 @@ jobs:
               with:
                   version: '6.7.3'
                   modules: 'qtnetworkauth'
-                  host: linux
+                  host: ${{ inputs.qt_host }}
                   arch: ${{ inputs.qt_arch }}
 
             - name: Install Qt6Keychain
