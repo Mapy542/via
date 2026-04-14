@@ -49,6 +49,10 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         QString fileId;
     };
 
+    struct TrashCall {
+        QString fileId;
+    };
+
     struct DownloadCall {
         QString fileId;
         QString localPath;
@@ -60,8 +64,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         QString localPath;
     };
 
-    explicit FakeGoogleDriveClient(QObject* parent = nullptr)
-        : GoogleDriveClient(nullptr, parent) {}
+    explicit FakeGoogleDriveClient(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
     void setFolderIdForPath(const QString& path, const QString& id) {
         QString normalized = QDir::cleanPath(path);
@@ -76,8 +79,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         m_parentByFileId.insert(fileId, parentId);
     }
 
-    void injectOperationError(const QString& operation, const QString& errorMsg, int httpStatus,
-                              int remaining = 1) {
+    void injectOperationError(const QString& operation, const QString& errorMsg, int httpStatus, int remaining = 1) {
         InjectedError injected;
         injected.errorMsg = errorMsg;
         injected.httpStatus = httpStatus;
@@ -90,6 +92,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
     MoveCall lastMoveCall() const { return m_lastMoveCall; }
     RenameCall lastRenameCall() const { return m_lastRenameCall; }
     DeleteCall lastDeleteCall() const { return m_lastDeleteCall; }
+    TrashCall lastTrashCall() const { return m_lastTrashCall; }
     DownloadCall lastDownloadCall() const { return m_lastDownloadCall; }
     FolderCall lastFolderCall() const { return m_lastFolderCall; }
     int uploadCallCount() const { return m_uploadCallCount; }
@@ -108,8 +111,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         emit fileDownloaded(fileId, localPath);
     }
 
-    void uploadFile(const QString& localPath, const QString& parentId,
-                    const QString& fileName) override {
+    void uploadFile(const QString& localPath, const QString& parentId, const QString& fileName) override {
         ++m_uploadCallCount;
         m_lastUploadCall = {localPath, parentId, fileName};
         if (emitInjectedError("uploadFile", QString(), localPath)) {
@@ -133,8 +135,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         emit fileUpdated(file);
     }
 
-    void moveFile(const QString& fileId, const QString& newParentId,
-                  const QString& oldParentId) override {
+    void moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId) override {
         m_lastMoveCall = {fileId, newParentId, oldParentId};
         emit fileMoved(fileId);
         DriveFile file;
@@ -158,8 +159,12 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         emit fileDeleted(fileId);
     }
 
-    void createFolder(const QString& name, const QString& parentId,
-                      const QString& localPath) override {
+    void trashFile(const QString& fileId) override {
+        m_lastTrashCall = {fileId};
+        emit fileTrashed(fileId);
+    }
+
+    void createFolder(const QString& name, const QString& parentId, const QString& localPath) override {
         ++m_folderCallCount;
         m_lastFolderCall = {name, parentId, localPath};
         if (emitInjectedError("createFolder", QString(), localPath)) {
@@ -196,8 +201,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
    private:
     QString nextId() { return QString("fake-%1").arg(++m_nextId); }
 
-    bool emitInjectedError(const QString& operation, const QString& fileId,
-                           const QString& localPath) {
+    bool emitInjectedError(const QString& operation, const QString& fileId, const QString& localPath) {
         if (!m_injectedErrors.contains(operation)) {
             return false;
         }
@@ -223,6 +227,7 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
     MoveCall m_lastMoveCall;
     RenameCall m_lastRenameCall;
     DeleteCall m_lastDeleteCall;
+    TrashCall m_lastTrashCall;
     DownloadCall m_lastDownloadCall;
     FolderCall m_lastFolderCall;
     QHash<QString, QString> m_folderIdByPath;
@@ -260,6 +265,9 @@ class TestSyncActionThread : public QObject {
     void testDeleteRemoteById();
     void testDeleteRemoteFromDb();
     void testDeleteRemoteFolderMarksDescendants();
+    void testTrashRemoteById();
+    void testTrashRemoteFromDb();
+    void testTrashRemoteFolderMarksDescendants();
     void testMoveRemote();
     void testMoveRemoteToRootUpdatesDbPath();
     void testMoveRemoteToRootKeepsExactPathWhenLocalExists();
@@ -276,8 +284,7 @@ class TestSyncActionThread : public QObject {
     QByteArray m_originalHome;
 
     QString createFile(const QString& relPath, const QByteArray& data = "data");
-    void enqueueAndWait(const SyncActionItem& action, int expectedCompleted = 1,
-                        int expectedFailed = 0);
+    void enqueueAndWait(const SyncActionItem& action, int expectedCompleted = 1, int expectedFailed = 0);
 };
 
 void TestSyncActionThread::init() {
@@ -336,8 +343,7 @@ QString TestSyncActionThread::createFile(const QString& relPath, const QByteArra
     return absPath;
 }
 
-void TestSyncActionThread::enqueueAndWait(const SyncActionItem& action, int expectedCompleted,
-                                          int expectedFailed) {
+void TestSyncActionThread::enqueueAndWait(const SyncActionItem& action, int expectedCompleted, int expectedFailed) {
     QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
     QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
 
@@ -765,6 +771,54 @@ void TestSyncActionThread::testDeleteRemoteFolderMarksDescendants() {
     QVERIFY(m_db->wasFileDeleted("folder/child.txt"));
     QVERIFY(m_db->wasFileDeleted("folder/sub"));
     QVERIFY(m_db->wasFileDeleted("folder/sub/grand.txt"));
+}
+
+void TestSyncActionThread::testTrashRemoteById() {
+    SyncActionItem action;
+    action.actionType = SyncActionType::TrashRemote;
+    action.fileId = "trash-id-1";
+
+    enqueueAndWait(action);
+    QCOMPARE(m_drive->lastTrashCall().fileId, QString("trash-id-1"));
+}
+
+void TestSyncActionThread::testTrashRemoteFromDb() {
+    QString relPath = "remote/trash.txt";
+    m_db->setFileId(relPath, "trash-id-2");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::TrashRemote;
+    action.localPath = relPath;
+
+    enqueueAndWait(action);
+    QCOMPARE(m_drive->lastTrashCall().fileId, QString("trash-id-2"));
+}
+
+void TestSyncActionThread::testTrashRemoteFolderMarksDescendants() {
+    FileSyncState folder;
+    folder.localPath = "tfolder";
+    folder.fileId = "tfolder-id";
+    folder.modifiedTimeAtSync = QDateTime::currentDateTimeUtc();
+    folder.isFolder = true;
+
+    FileSyncState childFile;
+    childFile.localPath = "tfolder/child.txt";
+    childFile.fileId = "tchild-id";
+    childFile.modifiedTimeAtSync = QDateTime::currentDateTimeUtc();
+    childFile.isFolder = false;
+
+    m_db->saveFileState(folder);
+    m_db->saveFileState(childFile);
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::TrashRemote;
+    action.fileId = "tfolder-id";
+    action.localPath = "tfolder";
+
+    enqueueAndWait(action);
+
+    QVERIFY(m_db->wasFileDeleted("tfolder"));
+    QVERIFY(m_db->wasFileDeleted("tfolder/child.txt"));
 }
 
 void TestSyncActionThread::testMoveRemote() {

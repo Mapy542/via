@@ -24,7 +24,8 @@ enum class SyncActionType {
     Upload,        ///< Upload local file to remote
     Download,      ///< Download remote file to local
     DeleteLocal,   ///< Delete file from local filesystem
-    DeleteRemote,  ///< Delete file from Google Drive
+    DeleteRemote,  ///< Delete file from Google Drive (permanent)
+    TrashRemote,   ///< Move file to Google Drive trash
     MoveLocal,     ///< Move/rename file locally
     MoveRemote,    ///< Move/rename file on Google Drive
     RenameLocal,   ///< Rename file locally (same directory)
@@ -70,6 +71,7 @@ struct SyncActionItem {
             case SyncActionType::RenameRemote:
                 return !fileId.isEmpty();
             case SyncActionType::DeleteRemote:
+            case SyncActionType::TrashRemote:
                 return !fileId.isEmpty() || !localPath.isEmpty();
             default:
                 return false;
@@ -82,8 +84,7 @@ struct SyncActionItem {
      * @return true if items represent the same action
      */
     bool operator==(const SyncActionItem& other) const {
-        return actionType == other.actionType && localPath == other.localPath &&
-               fileId == other.fileId;
+        return actionType == other.actionType && localPath == other.localPath && fileId == other.fileId;
     }
 };
 

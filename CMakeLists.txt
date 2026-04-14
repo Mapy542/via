@@ -58,6 +58,7 @@ set(SOURCES
     src/sync/FileFilter.cpp
     src/sync/FullSync.cpp
     src/sync/SyncSettings.cpp
+    src/sync/TrashPolicy.cpp
     src/fuse/FuseDriver.cpp
     src/fuse/FileCache.cpp
     src/fuse/DirtySyncWorker.cpp
@@ -90,6 +91,7 @@ set(HEADERS
     src/sync/FileFilter.h
     src/sync/FullSync.h
     src/sync/SyncSettings.h
+    src/sync/TrashPolicy.h
     src/fuse/FuseDriver.h
     src/fuse/FileCache.h
     src/fuse/DirtySyncWorker.h
@@ -210,6 +212,7 @@ if(BUILD_TESTS)
     add_qt_test(test_LocalChangeWatcher tests/sync/TestLocalChangeWatcher.cpp)
     add_qt_test(test_RemoteChangeWatcher tests/sync/TestRemoteChangeWatcher.cpp)
     add_qt_test(test_FullSync tests/sync/TestFullSync.cpp)
+    add_qt_test(test_TrashPolicy tests/sync/TestTrashPolicy.cpp)
 
     # FUSE subsystem tests
     add_qt_test(test_FileCache tests/fuse/TestFileCache.cpp)

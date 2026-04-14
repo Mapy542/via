@@ -35,6 +35,7 @@ class TestChangeProcessor : public QObject {
     void testClassifyLocalCreate();
     void testClassifyLocalModify();
     void testClassifyLocalDelete();
+    void testClassifyLocalDeleteMapsToTrashRemote();
     void testClassifyLocalMove();
     void testClassifyRemoteCreate();
     void testClassifyRemoteModify();
@@ -103,10 +104,9 @@ class TestChangeProcessor : public QObject {
     void cleanupTestDatabase();
     ChangeQueueItem makeChange(ChangeType type, ChangeOrigin origin, const QString& localPath,
                                const QString& fileId = QString());
-    void saveState(const QString& localPath, const QString& fileId,
-                   const QDateTime& modifiedTimeAtSync, bool isFolder = false);
-    QDateTime writeFileWithMtime(const QString& absPath, const QByteArray& data,
-                                 const QDateTime& modifiedTime);
+    void saveState(const QString& localPath, const QString& fileId, const QDateTime& modifiedTimeAtSync,
+                   bool isFolder = false);
+    QDateTime writeFileWithMtime(const QString& absPath, const QByteArray& data, const QDateTime& modifiedTime);
     static QDateTime toWholeSecondUtc(const QDateTime& dateTime);
     static qint64 absSecondDelta(const QDateTime& lhs, const QDateTime& rhs);
     static QString md5Hex(const QByteArray& data);
@@ -157,8 +157,8 @@ void TestChangeProcessor::cleanupTestDatabase() {
     QStandardPaths::setTestModeEnabled(false);
 }
 
-ChangeQueueItem TestChangeProcessor::makeChange(ChangeType type, ChangeOrigin origin,
-                                                const QString& localPath, const QString& fileId) {
+ChangeQueueItem TestChangeProcessor::makeChange(ChangeType type, ChangeOrigin origin, const QString& localPath,
+                                                const QString& fileId) {
     ChangeQueueItem change;
     change.changeType = type;
     change.origin = origin;
@@ -242,14 +242,13 @@ void TestChangeProcessor::testClassifyLocalModify() {
 
 void TestChangeProcessor::testClassifyLocalDelete() {
     m_actionQueue->clear();
-    ChangeQueueItem change =
-        makeChange(ChangeType::Delete, ChangeOrigin::Local, "c.txt", "file-123");
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Local, "c.txt", "file-123");
 
     m_processor->determineAndQueueActions(change);
 
     QCOMPARE(m_actionQueue->count(), 1);
     SyncActionItem action = m_actionQueue->dequeue();
-    QCOMPARE(action.actionType, SyncActionType::DeleteRemote);
+    QCOMPARE(action.actionType, SyncActionType::TrashRemote);
     QCOMPARE(action.fileId, QString("file-123"));
 }
 
@@ -269,8 +268,7 @@ void TestChangeProcessor::testClassifyLocalMove() {
 
 void TestChangeProcessor::testClassifyRemoteCreate() {
     m_actionQueue->clear();
-    ChangeQueueItem change =
-        makeChange(ChangeType::Create, ChangeOrigin::Remote, "e.txt", "file-e");
+    ChangeQueueItem change = makeChange(ChangeType::Create, ChangeOrigin::Remote, "e.txt", "file-e");
 
     m_processor->determineAndQueueActions(change);
 
@@ -283,8 +281,7 @@ void TestChangeProcessor::testClassifyRemoteCreate() {
 
 void TestChangeProcessor::testClassifyRemoteModify() {
     m_actionQueue->clear();
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "f.txt", "file-f");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, "f.txt", "file-f");
 
     m_processor->determineAndQueueActions(change);
 
@@ -325,8 +322,8 @@ void TestChangeProcessor::testRemoteModifyPathChangeReclassifiesMove() {
     QDateTime dbSyncTime = QDateTime::currentDateTime().addSecs(-120);
     saveState("ILOVEYOUSENDNUDES.pwmx", "file-1", dbSyncTime);
 
-    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote,
-                                        "mario/ILOVEYOUSENDNUDES.pwmx", "file-1");
+    ChangeQueueItem change =
+        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "mario/ILOVEYOUSENDNUDES.pwmx", "file-1");
 
     QVERIFY(m_processor->validateChange(change));
     QCOMPARE(change.changeType, ChangeType::Move);
@@ -352,8 +349,7 @@ void TestChangeProcessor::testConflictDetection_LocalAndRemoteModify() {
     version.dbSyncTime = QDateTime::currentDateTime().addSecs(-20);
     m_db->addConflictVersion(conflictId, version);
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "conflict.txt", "file-1");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, "conflict.txt", "file-1");
     change.modifiedTime = QDateTime::currentDateTime();
 
     QSignalSpy conflictSpy(m_processor, &ChangeProcessor::conflictDetected);
@@ -372,8 +368,7 @@ void TestChangeProcessor::testConflictDetection_LocalAndRemoteModify() {
 }
 
 void TestChangeProcessor::testConflictDetection_DeleteVsModify() {
-    ChangeQueueItem change =
-        makeChange(ChangeType::Delete, ChangeOrigin::Local, "deleted.txt", "file-2");
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Local, "deleted.txt", "file-2");
     m_db->markFileDeleted("deleted.txt", "file-2");
 
     QVERIFY(!m_processor->validateChange(change));
@@ -457,8 +452,7 @@ void TestChangeProcessor::testConflictAppendWhenUnresolved() {
     version.dbSyncTime = QDateTime::currentDateTime().addSecs(-30);
     m_db->addConflictVersion(conflictId, version);
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Local, "existing.txt", "file-7");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Local, "existing.txt", "file-7");
 
     QSignalSpy conflictSpy(m_processor, &ChangeProcessor::conflictDetected);
     m_processor->appendConflictVersionForChange(change);
@@ -479,8 +473,7 @@ void TestChangeProcessor::testRemoteConflict_LocalUnchanged_NoConflict() {
 
     saveState(relPath, "remote-id-10", observedMtime);
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-10");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-10");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -495,11 +488,9 @@ void TestChangeProcessor::testRemoteConflict_LocalNewer_Conflict() {
     const QDateTime observedMtime = writeFileWithMtime(absPath, "data", baseTime.addSecs(10));
     QVERIFY(observedMtime.isValid());
 
-    saveState(relPath, "remote-id-11",
-              observedMtime.addSecs(-(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1)));
+    saveState(relPath, "remote-id-11", observedMtime.addSecs(-(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1)));
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-11");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-11");
     change.modifiedTime = observedMtime;
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -517,8 +508,7 @@ void TestChangeProcessor::testRemoteDelete_LocalUnchanged_NoConflict() {
 
     saveState(relPath, "remote-id-12", observedMtime);
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Delete, ChangeOrigin::Remote, relPath, "remote-id-12");
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Remote, relPath, "remote-id-12");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -534,8 +524,7 @@ void TestChangeProcessor::testRemoteConflict_ModifyBoundary_NoConflictAtOneSecon
     QVERIFY(observedMtime.isValid());
     saveState(relPath, "remote-id-mod-1", observedMtime.addSecs(-1));
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-mod-1");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-mod-1");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -547,14 +536,12 @@ void TestChangeProcessor::testRemoteConflict_ModifyBoundary_NoConflictAtTwoSecon
     const QString relPath = "remote/boundary-modify-2.txt";
     const QString absPath = m_tempDir->filePath(relPath);
 
-    const QDateTime observedMtime = writeFileWithMtime(
-        absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS));
+    const QDateTime observedMtime =
+        writeFileWithMtime(absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS));
     QVERIFY(observedMtime.isValid());
-    saveState(relPath, "remote-id-mod-2",
-              observedMtime.addSecs(-ChangeProcessor::MIN_CHANGE_DIFF_SECS));
+    saveState(relPath, "remote-id-mod-2", observedMtime.addSecs(-ChangeProcessor::MIN_CHANGE_DIFF_SECS));
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-mod-2");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-mod-2");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -566,14 +553,12 @@ void TestChangeProcessor::testRemoteConflict_ModifyBoundary_ConflictAtThreeSecon
     const QString relPath = "remote/boundary-modify-3.txt";
     const QString absPath = m_tempDir->filePath(relPath);
 
-    const QDateTime observedMtime = writeFileWithMtime(
-        absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1));
+    const QDateTime observedMtime =
+        writeFileWithMtime(absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1));
     QVERIFY(observedMtime.isValid());
-    saveState(relPath, "remote-id-mod-3",
-              observedMtime.addSecs(-(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1)));
+    saveState(relPath, "remote-id-mod-3", observedMtime.addSecs(-(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1)));
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-mod-3");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, relPath, "remote-id-mod-3");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -585,14 +570,12 @@ void TestChangeProcessor::testRemoteConflict_DeleteBoundary_NoConflictAtTwoSecon
     const QString relPath = "remote/boundary-delete-2.txt";
     const QString absPath = m_tempDir->filePath(relPath);
 
-    const QDateTime observedMtime = writeFileWithMtime(
-        absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS));
+    const QDateTime observedMtime =
+        writeFileWithMtime(absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS));
     QVERIFY(observedMtime.isValid());
-    saveState(relPath, "remote-id-del-2",
-              observedMtime.addSecs(-ChangeProcessor::MIN_CHANGE_DIFF_SECS));
+    saveState(relPath, "remote-id-del-2", observedMtime.addSecs(-ChangeProcessor::MIN_CHANGE_DIFF_SECS));
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Delete, ChangeOrigin::Remote, relPath, "remote-id-del-2");
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Remote, relPath, "remote-id-del-2");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -604,14 +587,12 @@ void TestChangeProcessor::testRemoteConflict_DeleteBoundary_ConflictAtThreeSecon
     const QString relPath = "remote/boundary-delete-3.txt";
     const QString absPath = m_tempDir->filePath(relPath);
 
-    const QDateTime observedMtime = writeFileWithMtime(
-        absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1));
+    const QDateTime observedMtime =
+        writeFileWithMtime(absPath, "data", baseTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1));
     QVERIFY(observedMtime.isValid());
-    saveState(relPath, "remote-id-del-3",
-              observedMtime.addSecs(-(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1)));
+    saveState(relPath, "remote-id-del-3", observedMtime.addSecs(-(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1)));
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Delete, ChangeOrigin::Remote, relPath, "remote-id-del-3");
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Remote, relPath, "remote-id-del-3");
     change.modifiedTime = observedMtime.addSecs(10);
 
     ConflictInfo conflict = m_processor->checkForConflict(change);
@@ -630,8 +611,7 @@ void TestChangeProcessor::testRemoteFolderPathChange_NoConflict_MoveActionQueued
 
     saveState(oldPath, "folder-id-remote-move", QDateTime::currentDateTime().addDays(-10), true);
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, newPath, "folder-id-remote-move");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, newPath, "folder-id-remote-move");
     change.isDirectory = true;
     change.modifiedTime = QDateTime::currentDateTime().addDays(-6);
 
@@ -783,27 +763,22 @@ void TestChangeProcessor::testValidateChange_AllTypesLocal() {
 
     saveState("local-existing.txt", "local-id-1", baseTime);
 
-    ChangeQueueItem createChange =
-        makeChange(ChangeType::Create, ChangeOrigin::Local, "local-new.txt");
+    ChangeQueueItem createChange = makeChange(ChangeType::Create, ChangeOrigin::Local, "local-new.txt");
     createChange.modifiedTime = baseTime.addSecs(5);
     QVERIFY(m_processor->validateChange(createChange));
 
-    ChangeQueueItem modifyChange =
-        makeChange(ChangeType::Modify, ChangeOrigin::Local, "local-existing.txt");
+    ChangeQueueItem modifyChange = makeChange(ChangeType::Modify, ChangeOrigin::Local, "local-existing.txt");
     modifyChange.modifiedTime = baseTime.addSecs(5);
     QVERIFY(m_processor->validateChange(modifyChange));
 
-    ChangeQueueItem deleteChange =
-        makeChange(ChangeType::Delete, ChangeOrigin::Local, "local-existing.txt");
+    ChangeQueueItem deleteChange = makeChange(ChangeType::Delete, ChangeOrigin::Local, "local-existing.txt");
     QVERIFY(m_processor->validateChange(deleteChange));
 
-    ChangeQueueItem moveChange =
-        makeChange(ChangeType::Move, ChangeOrigin::Local, "local-existing.txt");
+    ChangeQueueItem moveChange = makeChange(ChangeType::Move, ChangeOrigin::Local, "local-existing.txt");
     moveChange.moveDestination = "moved/local-existing.txt";
     QVERIFY(m_processor->validateChange(moveChange));
 
-    ChangeQueueItem renameChange =
-        makeChange(ChangeType::Rename, ChangeOrigin::Local, "local-existing.txt");
+    ChangeQueueItem renameChange = makeChange(ChangeType::Rename, ChangeOrigin::Local, "local-existing.txt");
     renameChange.renameTo = "local-renamed.txt";
     QVERIFY(m_processor->validateChange(renameChange));
 }
@@ -842,8 +817,7 @@ void TestChangeProcessor::testValidateChange_RemotePathChangeAllowsStaleMtime() 
     const QDateTime baseTime = QDateTime::currentDateTime().addSecs(-10);
     saveState("old/path.txt", "remote-id-2", baseTime);
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "new/path.txt", "remote-id-2");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, "new/path.txt", "remote-id-2");
     change.modifiedTime = baseTime;
 
     QVERIFY(m_processor->validateChange(change));
@@ -935,8 +909,7 @@ void TestChangeProcessor::testDetermineAndQueueActions_LocalRenameMissingFileIdS
 void TestChangeProcessor::testDetermineAndQueueActions_DuplicateSuppressed() {
     m_actionQueue->clear();
 
-    ChangeQueueItem first =
-        makeChange(ChangeType::Modify, ChangeOrigin::Local, "queue-dupe.txt", "queue-dupe-id");
+    ChangeQueueItem first = makeChange(ChangeType::Modify, ChangeOrigin::Local, "queue-dupe.txt", "queue-dupe-id");
     QSignalSpy skippedSpy(m_processor, &ChangeProcessor::changeSkipped);
 
     m_processor->determineAndQueueActions(first);
@@ -956,14 +929,31 @@ void TestChangeProcessor::testDetermineAndQueueActions_DuplicateSuppressed() {
 void TestChangeProcessor::testDetermineAndQueueActions_RemoteModifySameHashSkipped() {
     m_actionQueue->clear();
 
-    ChangeQueueItem change =
-        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "remote-noop.txt", "remote-noop-id");
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote, "remote-noop.txt", "remote-noop-id");
     change.remoteMd5 = md5Hex("same-content");
     change.localContentHash = md5Hex("same-content");
 
     m_processor->determineAndQueueActions(change);
 
     QCOMPARE(m_actionQueue->count(), 0);
+}
+
+// ===========================================================================
+//  Trash-specific classification
+// ===========================================================================
+
+void TestChangeProcessor::testClassifyLocalDeleteMapsToTrashRemote() {
+    // A local delete must produce TrashRemote (soft-delete), NOT DeleteRemote
+    m_actionQueue->clear();
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Local, "trashed.txt", "trash-id-1");
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::TrashRemote);
+    QCOMPARE(action.fileId, QString("trash-id-1"));
+    QCOMPARE(action.localPath, QString("trashed.txt"));
 }
 
 QTEST_MAIN(TestChangeProcessor)

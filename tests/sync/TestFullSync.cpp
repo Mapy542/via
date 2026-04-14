@@ -41,8 +41,7 @@ class FakeDriveClientForFS : public GoogleDriveClient {
     QList<FilePage> filePages;
     int listFilesCallCount = 0;
 
-    void listFiles(const QString& /*folderId*/ = "root",
-                   const QString& pageToken = QString()) override {
+    void listFiles(const QString& /*folderId*/ = "root", const QString& pageToken = QString()) override {
         ++listFilesCallCount;
         int pageIdx = 0;
         if (!pageToken.isEmpty()) {
@@ -82,9 +81,8 @@ class FakeDriveClientForFS : public GoogleDriveClient {
 // ---------------------------------------------------------------------------
 //  Helper to build DriveFile
 // ---------------------------------------------------------------------------
-static DriveFile makeFile(const QString& id, const QString& name, const QString& parentId,
-                          bool isFolder = false, bool trashed = false, bool ownedByMe = true,
-                          const QString& mimeType = "text/plain") {
+static DriveFile makeFile(const QString& id, const QString& name, const QString& parentId, bool isFolder = false,
+                          bool trashed = false, bool ownedByMe = true, const QString& mimeType = "text/plain") {
     DriveFile f;
     f.id = id;
     f.name = name;
@@ -152,6 +150,11 @@ class TestFullSync : public QObject {
     void testStartWithoutSyncFolderEmitsError();
     void testStartWithMissingSyncFolderEmitsError();
 
+    // Trash subtree exclusion during local scan
+    void testLocalScanSkipsTrashDirectory();
+    void testLocalScanSkipsNestedTrashFiles();
+    void testLocalScanCountsExcludesTrash();
+
    private:
     QTemporaryDir* m_tempDir = nullptr;
     ChangeQueue* m_changeQueue = nullptr;
@@ -178,8 +181,7 @@ void TestFullSync::init() {
     m_syncActionQueue = new SyncActionQueue();
     m_driveClient = new FakeDriveClientForFS();
 
-    m_changeProcessor =
-        new ChangeProcessor(m_changeQueue, m_syncActionQueue, m_syncDatabase, m_driveClient);
+    m_changeProcessor = new ChangeProcessor(m_changeQueue, m_syncActionQueue, m_syncDatabase, m_driveClient);
 
     m_fullSync = new FullSync(m_changeQueue, m_syncDatabase, m_driveClient, m_changeProcessor);
 }
@@ -744,6 +746,107 @@ void TestFullSync::testStartWithMissingSyncFolderEmitsError() {
 
     QTRY_VERIFY(errorSpy.count() >= 1);
     QVERIFY(errorSpy.first().first().toString().contains("does not exist", Qt::CaseInsensitive));
+}
+
+// ---------------------------------------------------------------------------
+//  Trash subtree exclusion during local scan
+// ---------------------------------------------------------------------------
+
+void TestFullSync::testLocalScanSkipsTrashDirectory() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+
+    // Create normal files
+    QFile normal1(syncDir + "/document.txt");
+    QVERIFY(normal1.open(QIODevice::WriteOnly));
+    normal1.write("content");
+    normal1.close();
+
+    // Create trash directory with files
+    QDir().mkpath(syncDir + "/.Trash-1000/files");
+    QDir().mkpath(syncDir + "/.Trash-1000/info");
+    QFile trashed(syncDir + "/.Trash-1000/files/trashed.txt");
+    QVERIFY(trashed.open(QIODevice::WriteOnly));
+    trashed.write("trashed content");
+    trashed.close();
+    QFile trashInfo(syncDir + "/.Trash-1000/info/trashed.txt.trashinfo");
+    QVERIFY(trashInfo.open(QIODevice::WriteOnly));
+    trashInfo.write("[Trash Info]\nPath=/document.txt");
+    trashInfo.close();
+
+    m_fullSync->setSyncFolder(syncDir);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSyncLocal();
+    QTRY_VERIFY(completedSpy.count() >= 1);
+
+    // Only the normal file should be queued, not trash contents
+    int count = 0;
+    while (!m_changeQueue->isEmpty()) {
+        ChangeQueueItem item = m_changeQueue->dequeue();
+        QVERIFY2(!item.localPath.contains(".Trash-"),
+                 qPrintable("Trash file leaked into sync queue: " + item.localPath));
+        ++count;
+    }
+    QCOMPARE(count, 1);
+}
+
+void TestFullSync::testLocalScanSkipsNestedTrashFiles() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+
+    // Create deeply nested trash structure
+    QDir().mkpath(syncDir + "/.Trash-1000/files/subdir/deep");
+    QFile deep(syncDir + "/.Trash-1000/files/subdir/deep/buried.txt");
+    QVERIFY(deep.open(QIODevice::WriteOnly));
+    deep.write("buried");
+    deep.close();
+
+    // Create a normal file for comparison
+    QFile normal(syncDir + "/normal.txt");
+    QVERIFY(normal.open(QIODevice::WriteOnly));
+    normal.write("normal");
+    normal.close();
+
+    m_fullSync->setSyncFolder(syncDir);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSyncLocal();
+    QTRY_VERIFY(completedSpy.count() >= 1);
+
+    while (!m_changeQueue->isEmpty()) {
+        ChangeQueueItem item = m_changeQueue->dequeue();
+        QVERIFY2(!item.localPath.contains(".Trash-"), qPrintable("Deep trash file leaked: " + item.localPath));
+    }
+}
+
+void TestFullSync::testLocalScanCountsExcludesTrash() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+
+    // 2 normal files + 3 trash files
+    for (int i = 0; i < 2; ++i) {
+        QFile f(syncDir + "/real" + QString::number(i) + ".txt");
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("real");
+        f.close();
+    }
+    QDir().mkpath(syncDir + "/.Trash-1000/files");
+    for (int i = 0; i < 3; ++i) {
+        QFile f(syncDir + "/.Trash-1000/files/junk" + QString::number(i) + ".txt");
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("junk");
+        f.close();
+    }
+
+    m_fullSync->setSyncFolder(syncDir);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSyncLocal();
+    QTRY_VERIFY(completedSpy.count() >= 1);
+
+    // localFileCount should reflect only real files (2), not trash files
+    QCOMPARE(m_fullSync->localFileCount(), 2);
 }
 
 QTEST_MAIN(TestFullSync)

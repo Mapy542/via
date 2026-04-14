@@ -91,8 +91,7 @@ class GoogleDriveClient : public QObject {
      * @param newParentId New parent folder ID
      * @param oldParentId Old parent folder ID
      */
-    virtual void moveFile(const QString& fileId, const QString& newParentId,
-                          const QString& oldParentId);
+    virtual void moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId);
 
     /**
      * @brief Move and rename a file atomically in a single PATCH request
@@ -101,8 +100,8 @@ class GoogleDriveClient : public QObject {
      * @param oldParentId Old parent folder ID
      * @param newName New name for the file
      */
-    virtual void moveAndRenameFile(const QString& fileId, const QString& newParentId,
-                                   const QString& oldParentId, const QString& newName);
+    virtual void moveAndRenameFile(const QString& fileId, const QString& newParentId, const QString& oldParentId,
+                                   const QString& newName);
 
     /**
      * @brief Rename a file
@@ -116,6 +115,18 @@ class GoogleDriveClient : public QObject {
      * @param fileId File ID
      */
     virtual void deleteFile(const QString& fileId);
+
+    /**
+     * @brief Move a file to the Google Drive trash (sets trashed=true)
+     * @param fileId File ID
+     */
+    virtual void trashFile(const QString& fileId);
+
+    /**
+     * @brief Restore a file from the Google Drive trash (sets trashed=false)
+     * @param fileId File ID
+     */
+    virtual void untrashFile(const QString& fileId);
 
     /**
      * @brief Create a new folder
@@ -258,6 +269,18 @@ class GoogleDriveClient : public QObject {
     void fileDeleted(const QString& fileId);
 
     /**
+     * @brief Emitted when file is moved to trash
+     * @param fileId File ID
+     */
+    void fileTrashed(const QString& fileId);
+
+    /**
+     * @brief Emitted when file is restored from trash
+     * @param fileId File ID
+     */
+    void fileUntrashed(const QString& fileId);
+
+    /**
      * @brief Emitted when folder is created
      * @param folder Created folder metadata
      */
@@ -276,8 +299,7 @@ class GoogleDriveClient : public QObject {
      * @param newStartPageToken Token for next check
      * @param hasMorePages True if there are more pages to fetch
      */
-    void changesReceived(const QList<DriveChange>& changes, const QString& newStartPageToken,
-                         bool hasMorePages);
+    void changesReceived(const QList<DriveChange>& changes, const QString& newStartPageToken, bool hasMorePages);
 
     /**
      * @brief Emitted when start page token is received
@@ -330,8 +352,8 @@ class GoogleDriveClient : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void errorDetailed(const QString& operation, const QString& errorMsg, int httpStatus,
-                       const QString& fileId, const QString& localPath);
+    void errorDetailed(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
+                       const QString& localPath);
 
     /**
      * @brief Emitted when an API call fails due to authentication/authorization

@@ -66,6 +66,8 @@ class FakeDriveClientAS : public GoogleDriveClient {
     void moveFile(const QString&, const QString&, const QString&) override {}
     void renameFile(const QString&, const QString&) override {}
     void deleteFile(const QString&) override {}
+    void trashFile(const QString&) override {}
+    void untrashFile(const QString&) override {}
     void createFolder(const QString&, const QString&, const QString&) override {}
     void listFiles(const QString&, const QString&) override {}
     void listChanges(const QString&) override {}

@@ -585,6 +585,84 @@ bool waitForDelete(GoogleDriveClient* driveClient, const QString& fileId, const 
     return success;
 }
 
+bool waitForTrash(GoogleDriveClient* driveClient, const QString& fileId, const std::function<bool()>& startRequest,
+                  QString* errorOut, bool* authFailureOut = nullptr) {
+    if (!driveClient) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
+        }
+        return false;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    bool success = false;
+    QString error;
+    int errorStatus = 0;
+
+    QMetaObject::Connection trashedConn;
+    QMetaObject::Connection errorConn;
+    QMetaObject::Connection timeoutConn;
+
+    trashedConn = QObject::connect(driveClient, &GoogleDriveClient::fileTrashed, &loop, [&](const QString& trashedId) {
+        if (trashedId != fileId) {
+            return;
+        }
+        success = true;
+        loop.quit();
+    });
+
+    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
+                                 [&](const QString& operation, const QString& errorMsg, int httpStatus,
+                                     const QString& errorFileId, const QString&) {
+                                     if (operation != QStringLiteral("trashFile")) {
+                                         return;
+                                     }
+                                     if (!errorFileId.isEmpty() && errorFileId != fileId) {
+                                         return;
+                                     }
+                                     error = errorMsg;
+                                     errorStatus = httpStatus;
+                                     loop.quit();
+                                 });
+
+    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
+        error = QStringLiteral("trashFile timeout");
+        loop.quit();
+    });
+
+    timeout.start(FUSE_DRIVE_TIMEOUT_MS);
+
+    if (!startRequest()) {
+        QObject::disconnect(trashedConn);
+        QObject::disconnect(errorConn);
+        QObject::disconnect(timeoutConn);
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to start trashFile request");
+        }
+        return false;
+    }
+
+    if (!success && error.isEmpty()) {
+        loop.exec();
+    }
+
+    QObject::disconnect(trashedConn);
+    QObject::disconnect(errorConn);
+    QObject::disconnect(timeoutConn);
+
+    if (!success && errorOut) {
+        *errorOut = error.isEmpty() ? QStringLiteral("trashFile failed") : error;
+    }
+
+    if (authFailureOut) {
+        *authFailureOut = isAuthOrPermissionFailure(errorStatus, error);
+    }
+
+    return success;
+}
+
 bool waitForListFiles(GoogleDriveClient* driveClient, const QString& parentId, QList<DriveFile>* resultFiles,
                       QString* errorOut) {
     if (!driveClient) {
@@ -1782,20 +1860,20 @@ int FuseDriver::fuseRmdir(const char* path) {
         return -ENOTEMPTY;
     }
 
-    // Delete via API (synchronous — H3 fix)
+    // Trash via API (synchronous) — moves to Drive trash instead of permanent delete
     QString error;
     bool authFailure = false;
-    if (!waitForDelete(
+    if (!waitForTrash(
             drv->m_driveClient, meta.fileId,
             [&]() {
-                return invokeDriveCall(drv->m_driveClient, [&]() { drv->m_driveClient->deleteFile(meta.fileId); });
+                return invokeDriveCall(drv->m_driveClient, [&]() { drv->m_driveClient->trashFile(meta.fileId); });
             },
             &error, &authFailure)) {
-        qWarning() << "FuseDriver: rmdir delete failed for" << lookupPath << ":" << error;
+        qWarning() << "FuseDriver: rmdir trash failed for" << lookupPath << ":" << error;
         return authFailure ? -EACCES : -EIO;
     }
 
-    // Remove from metadata only after remote delete confirmed
+    // Remove from metadata only after remote trash confirmed
     drv->m_database->deleteFuseMetadata(meta.fileId);
 
     return 0;
@@ -1819,24 +1897,24 @@ int FuseDriver::fuseUnlink(const char* path) {
         return -EISDIR;
     }
 
-    // Delete via API (synchronous — H3 fix).
+    // Trash via API (synchronous) — moves to Drive trash instead of permanent delete.
     // Treat "file not found" (404) as success — the file may have already been
     // deleted from Drive by a concurrent operation (e.g. MetadataRefreshWorker
     // processing a remote deletion, or a previous unlink that raced with an
     // orphaned updateFile response).
     QString error;
     bool authFailure = false;
-    if (!waitForDelete(
+    if (!waitForTrash(
             drv->m_driveClient, meta.fileId,
             [&]() {
-                return invokeDriveCall(drv->m_driveClient, [&]() { drv->m_driveClient->deleteFile(meta.fileId); });
+                return invokeDriveCall(drv->m_driveClient, [&]() { drv->m_driveClient->trashFile(meta.fileId); });
             },
             &error, &authFailure)) {
         // Accept "not found" as success — the remote file is already gone.
         bool notFound =
             error.contains(QLatin1String("not found"), Qt::CaseInsensitive) || error.contains(QLatin1String("404"));
         if (!notFound) {
-            qWarning() << "FuseDriver: unlink delete failed for" << lookupPath << ":" << error;
+            qWarning() << "FuseDriver: unlink trash failed for" << lookupPath << ":" << error;
             return authFailure ? -EACCES : -EIO;
         }
         qDebug() << "FuseDriver: unlink – file already deleted from Drive:" << lookupPath;
