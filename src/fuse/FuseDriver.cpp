@@ -516,75 +516,6 @@ bool waitForMoveAndRename(GoogleDriveClient* driveClient, const QString& fileId,
     return success;
 }
 
-bool waitForDelete(GoogleDriveClient* driveClient, const QString& fileId, const std::function<bool()>& startRequest,
-                   QString* errorOut, bool* authFailureOut = nullptr) {
-    if (!driveClient) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
-        }
-        return false;
-    }
-
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    bool success = false;
-    QString error;
-    int errorStatus = 0;
-
-    QMetaObject::Connection deletedConn;
-    QMetaObject::Connection errorConn;
-    QMetaObject::Connection timeoutConn;
-
-    deletedConn = QObject::connect(driveClient, &GoogleDriveClient::fileDeleted, &loop, [&](const QString& deletedId) {
-        if (deletedId != fileId) {
-            return;
-        }
-        success = true;
-        loop.quit();
-    });
-
-    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg, int httpStatus,
-                                     const QString& errorFileId, const QString&) {
-                                     if (operation != QStringLiteral("deleteFile")) {
-                                         return;
-                                     }
-                                     if (!errorFileId.isEmpty() && errorFileId != fileId) {
-                                         return;
-                                     }
-                                     error = errorMsg;
-                                     errorStatus = httpStatus;
-                                     loop.quit();
-                                 });
-
-    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
-        error = QStringLiteral("deleteFile timeout");
-        loop.quit();
-    });
-
-    if (!startRequest || !startRequest()) {
-        error = QStringLiteral("Failed to dispatch deleteFile request");
-    } else {
-        timeout.start(FUSE_API_TIMEOUT_MS);
-        loop.exec();
-    }
-
-    QObject::disconnect(deletedConn);
-    QObject::disconnect(errorConn);
-    QObject::disconnect(timeoutConn);
-
-    if (!success && errorOut) {
-        *errorOut = error.isEmpty() ? QStringLiteral("deleteFile failed") : error;
-    }
-
-    if (authFailureOut) {
-        *authFailureOut = isAuthOrPermissionFailure(errorStatus, error);
-    }
-
-    return success;
-}
-
 bool waitForTrash(GoogleDriveClient* driveClient, const QString& fileId, const std::function<bool()>& startRequest,
                   QString* errorOut, bool* authFailureOut = nullptr) {
     if (!driveClient) {
@@ -632,7 +563,7 @@ bool waitForTrash(GoogleDriveClient* driveClient, const QString& fileId, const s
         loop.quit();
     });
 
-    timeout.start(FUSE_DRIVE_TIMEOUT_MS);
+    timeout.start(FUSE_API_TIMEOUT_MS);
 
     if (!startRequest()) {
         QObject::disconnect(trashedConn);
