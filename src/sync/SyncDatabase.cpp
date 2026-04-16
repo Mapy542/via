@@ -43,6 +43,34 @@ bool addColumnIfMissing(QSqlDatabase& db, const QString& tableName, const QStrin
     QSqlQuery query(db);
     return query.exec(QString("ALTER TABLE %1 ADD COLUMN %2").arg(tableName, columnDef));
 }
+
+FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
+    FuseMetadata metadata;
+    metadata.fileId = query.value("file_id").toString();
+    metadata.path = query.value("path").toString();
+    metadata.name = query.value("name").toString();
+
+    const int remoteNameIndex = query.record().indexOf("remote_name");
+    if (remoteNameIndex >= 0) {
+        metadata.remoteName = query.value(remoteNameIndex).toString();
+    }
+    if (metadata.remoteName.isEmpty()) {
+        metadata.remoteName = metadata.name;
+    }
+
+    metadata.parentId = query.value("parent_id").toString();
+    metadata.isFolder = query.value("is_folder").toInt() == 1;
+    metadata.size = query.value("size").toLongLong();
+    metadata.mimeType = query.value("mime_type").toString();
+    metadata.createdTime =
+        QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
+    metadata.modifiedTime =
+        QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
+    metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
+    metadata.lastAccessed =
+        QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+    return metadata;
+}
 }  // namespace
 
 SyncDatabase::SyncDatabase(QObject* parent) : QObject(parent), m_concurrentAccessCount(0) {
@@ -1131,6 +1159,11 @@ bool SyncDatabase::createFuseTables() {
         return false;
     }
 
+    if (!addColumnIfMissing(m_db, "fuse_metadata", "remote_name TEXT")) {
+        logError("createFuseTables (fuse_metadata.remote_name)", query.lastError().text());
+        return false;
+    }
+
     // FUSE dirty files table
     QString createFuseDirtyFilesTable = R"(
         CREATE TABLE IF NOT EXISTS fuse_dirty_files (
@@ -1196,20 +1229,7 @@ FuseMetadata SyncDatabase::getFuseMetadata(const QString& fileId) const {
     query.addBindValue(fileId);
 
     if (query.exec() && query.next()) {
-        metadata.fileId = query.value("file_id").toString();
-        metadata.path = query.value("path").toString();
-        metadata.name = query.value("name").toString();
-        metadata.parentId = query.value("parent_id").toString();
-        metadata.isFolder = query.value("is_folder").toInt() == 1;
-        metadata.size = query.value("size").toLongLong();
-        metadata.mimeType = query.value("mime_type").toString();
-        metadata.createdTime =
-            QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-        metadata.modifiedTime =
-            QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
-        metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-        metadata.lastAccessed =
-            QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+        metadata = readFuseMetadataRow(query);
     }
 
     return metadata;
@@ -1224,20 +1244,7 @@ FuseMetadata SyncDatabase::getFuseMetadataByPath(const QString& path) const {
     query.addBindValue(path);
 
     if (query.exec() && query.next()) {
-        metadata.fileId = query.value("file_id").toString();
-        metadata.path = query.value("path").toString();
-        metadata.name = query.value("name").toString();
-        metadata.parentId = query.value("parent_id").toString();
-        metadata.isFolder = query.value("is_folder").toInt() == 1;
-        metadata.size = query.value("size").toLongLong();
-        metadata.mimeType = query.value("mime_type").toString();
-        metadata.createdTime =
-            QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-        metadata.modifiedTime =
-            QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
-        metadata.cachedAt = QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-        metadata.lastAccessed =
-            QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+        metadata = readFuseMetadataRow(query);
     }
 
     return metadata;
@@ -1247,16 +1254,27 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
     QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
+    QSqlQuery deleteConflictQuery(m_db);
+    deleteConflictQuery.prepare("DELETE FROM fuse_metadata WHERE path = ? AND file_id != ?");
+    deleteConflictQuery.addBindValue(metadata.path);
+    deleteConflictQuery.addBindValue(metadata.fileId);
+    if (!deleteConflictQuery.exec()) {
+        logError("saveFuseMetadata (delete conflicting path)",
+                 deleteConflictQuery.lastError().text());
+        return false;
+    }
+
     query.prepare(R"(
         INSERT OR REPLACE INTO fuse_metadata 
-        (file_id, path, name, parent_id, is_folder, size, mime_type, 
+        (file_id, path, name, remote_name, parent_id, is_folder, size, mime_type, 
          created_time, modified_time, cached_at, last_accessed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )");
 
     query.addBindValue(metadata.fileId);
     query.addBindValue(metadata.path);
     query.addBindValue(metadata.name);
+    query.addBindValue(metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName);
     query.addBindValue(metadata.parentId);
     query.addBindValue(metadata.isFolder ? 1 : 0);
     query.addBindValue(metadata.size);
@@ -1298,23 +1316,7 @@ QList<FuseMetadata> SyncDatabase::getFuseChildren(const QString& parentId) const
 
     if (query.exec()) {
         while (query.next()) {
-            FuseMetadata metadata;
-            metadata.fileId = query.value("file_id").toString();
-            metadata.path = query.value("path").toString();
-            metadata.name = query.value("name").toString();
-            metadata.parentId = query.value("parent_id").toString();
-            metadata.isFolder = query.value("is_folder").toInt() == 1;
-            metadata.size = query.value("size").toLongLong();
-            metadata.mimeType = query.value("mime_type").toString();
-            metadata.createdTime =
-                QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-            metadata.modifiedTime =
-                QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
-            metadata.cachedAt =
-                QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-            metadata.lastAccessed =
-                QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
-            children.append(metadata);
+            children.append(readFuseMetadataRow(query));
         }
     }
 
@@ -1328,23 +1330,7 @@ QList<FuseMetadata> SyncDatabase::getAllFuseMetadata() const {
     QSqlQuery query(m_db);
     if (query.exec("SELECT * FROM fuse_metadata")) {
         while (query.next()) {
-            FuseMetadata metadata;
-            metadata.fileId = query.value("file_id").toString();
-            metadata.path = query.value("path").toString();
-            metadata.name = query.value("name").toString();
-            metadata.parentId = query.value("parent_id").toString();
-            metadata.isFolder = query.value("is_folder").toInt() == 1;
-            metadata.size = query.value("size").toLongLong();
-            metadata.mimeType = query.value("mime_type").toString();
-            metadata.createdTime =
-                QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
-            metadata.modifiedTime =
-                QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
-            metadata.cachedAt =
-                QDateTime::fromString(query.value("cached_at").toString(), Qt::ISODate);
-            metadata.lastAccessed =
-                QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
-            result.append(metadata);
+            result.append(readFuseMetadataRow(query));
         }
     }
 

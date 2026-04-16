@@ -18,6 +18,7 @@
 #include "ChangeProcessor.h"
 #include "ChangeQueue.h"
 #include "FileFilter.h"
+#include "MirrorPathResolver.h"
 #include "SyncDatabase.h"
 #include "SyncSettings.h"
 #include "TrashPolicy.h"
@@ -123,7 +124,8 @@ void FullSync::startInternal(Mode mode) {
         }
     }
 
-    qInfo() << "FullSync started for folder:" << m_syncFolder << (m_mode == Mode::LocalOnly ? "(local-only)" : "");
+    qInfo() << "FullSync started for folder:" << m_syncFolder
+            << (m_mode == Mode::LocalOnly ? "(local-only)" : "");
     emit stateChanged(State::ScanningLocal);
 
     // Start scanning local files (use singleShot to avoid blocking)
@@ -169,7 +171,8 @@ void FullSync::scanLocalFiles() {
     emit progressUpdated("Scanning local files...", 0, 0);
 
     // Iterate through all files and directories in the sync folder
-    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
 
     int count = 0;
     while (it.hasNext()) {
@@ -373,9 +376,12 @@ void FullSync::buildRemoteFolderStructure() {
 
     unsigned long iterations = 0;
     std::vector<FileTreeNode*> currentBranchDepthParents;
-    currentBranchDepthParents.push_back(m_remoteTree);  // list of parent IDs at current depth to reduce search time
+    currentBranchDepthParents.push_back(
+        m_remoteTree);  // list of parent IDs at current depth to reduce search time
+    QSet<QString> claimedPaths = m_discoveredLocalPaths;
 
-    unsigned long maxIterations = m_allRemoteItems.size() * 10;  // arbitrary limit to avoid infinite loops
+    unsigned long maxIterations =
+        m_allRemoteItems.size() * 10;  // arbitrary limit to avoid infinite loops
     while (!m_allRemoteItems.isEmpty() && iterations < maxIterations) {
         // store all items added this iteration to remove them after
         QList<qsizetype> itemsToRemove;
@@ -389,13 +395,13 @@ void FullSync::buildRemoteFolderStructure() {
                     FileTreeNode* newNode = new FileTreeNode();
                     newNode->name = file.name;
                     newNode->isFolder = file.isFolder;
-                    // GPT-6: Sanitize remote name before building local path
-                    QString safeName = PathUtils::sanitizeRemoteFileName(file.name);
-                    newNode->relativePath =
-                        parentNode->relativePath.isEmpty() ? safeName : parentNode->relativePath + "/" + safeName;
+                    newNode->relativePath = MirrorPathResolver::resolveRemoteLocalPath(
+                        parentNode->relativePath, file.name, file.id, m_database, m_settings,
+                        m_syncFolder, &claimedPaths);
                     newNode->modifiedTime = file.modifiedTime;
                     newNode->fileId = file.id;
                     parentNode->children.insert(file.id, newNode);
+                    claimedPaths.insert(newNode->relativePath);
 
                     // Queue this remote file for processing
                     queueRemoteFile(file, newNode->relativePath);
@@ -474,7 +480,8 @@ void FullSync::finishSync() {
     }
 
     emit stateChanged(State::Complete);
-    emit progressUpdated("Full sync complete", localCount + effectiveRemoteCount, localCount + effectiveRemoteCount);
+    emit progressUpdated("Full sync complete", localCount + effectiveRemoteCount,
+                         localCount + effectiveRemoteCount);
     emit completed(localCount, effectiveRemoteCount);
 
     // Note: The ChangeProcessor remains in initial sync mode until all queued

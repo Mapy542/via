@@ -11,6 +11,7 @@
 
 #include "ChangeQueue.h"
 #include "FileFilter.h"
+#include "MirrorPathResolver.h"
 #include "SyncDatabase.h"
 #include "SyncSettings.h"
 #include "api/DriveChange.h"
@@ -136,6 +137,7 @@ void RemoteChangeWatcher::stop() {
 void RemoteChangeWatcher::clearChangeToken() {
     QMutexLocker locker(&m_mutex);
     m_changeToken.clear();
+    m_folderIdToPath.clear();
     m_recentlyProcessedFileIds.clear();
     qInfo() << "RemoteChangeWatcher: change token and dedup cache cleared (account sign-out)";
 }
@@ -381,9 +383,7 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
 }
 
 QString RemoteChangeWatcher::resolvePath(const DriveFile& file) {
-    QMutexLocker locker(&m_mutex);
-
-    QString parentId = file.parentId();
+    const QString parentId = file.parentId();
     if (parentId.isEmpty()) {
         // Files without a parent ID are typically shared files or files not in
         // the user's My Drive hierarchy. Return empty to signal this.
@@ -391,18 +391,45 @@ QString RemoteChangeWatcher::resolvePath(const DriveFile& file) {
         return QString();
     }
 
-    // Look up parent path in the folder ID to path mapping
-    if (m_folderIdToPath.contains(parentId)) {
-        QString parentPath = m_folderIdToPath.value(parentId);
-        QString safeName = PathUtils::sanitizeRemoteFileName(file.name);
-        if (parentPath.isEmpty()) {
-            // Parent is the root folder (empty path = My Drive root)
-            return safeName;
+    const QString rootId = m_driveClient ? m_driveClient->getRootFolderId() : QString();
+    QString parentPath;
+    QSet<QString> folderClaims;
+    bool haveParentPath = false;
+
+    {
+        QMutexLocker locker(&m_mutex);
+        for (auto it = m_folderIdToPath.constBegin(); it != m_folderIdToPath.constEnd(); ++it) {
+            folderClaims.insert(it.value());
         }
-        return parentPath + "/" + safeName;
+
+        if (!rootId.isEmpty() && parentId == rootId) {
+            haveParentPath = true;
+        } else if (m_folderIdToPath.contains(parentId)) {
+            parentPath = m_folderIdToPath.value(parentId);
+            haveParentPath = true;
+        }
     }
 
-    locker.unlock();
+    if (!haveParentPath && m_syncDatabase) {
+        parentPath = m_syncDatabase->getLocalPath(parentId);
+        if (!parentPath.isEmpty()) {
+            haveParentPath = true;
+            QMutexLocker locker(&m_mutex);
+            m_folderIdToPath.insert(parentId, parentPath);
+            folderClaims.insert(parentPath);
+        }
+    }
+
+    if (haveParentPath) {
+        const QString resolvedPath = MirrorPathResolver::resolveRemoteLocalPath(
+            parentPath, file.name, file.id, m_syncDatabase, m_settings, m_settings.syncFolder,
+            &folderClaims);
+        if (file.isFolder && !resolvedPath.isEmpty()) {
+            QMutexLocker locker(&m_mutex);
+            m_folderIdToPath.insert(file.id, resolvedPath);
+        }
+        return resolvedPath;
+    }
 
     // Parent not in mapping - attempt to resolve via Drive API
     return resolvePathFromParents(file);
@@ -425,9 +452,8 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
         return QString();
     }
 
-    QStringList pathParts;
-    pathParts.append(file.name);
-    QList<QPair<QString, QString>> parentChain;
+    QList<DriveFile> pathChain;
+    pathChain.prepend(file);
     QSet<QString> visited;
 
     while (!parentId.isEmpty()) {
@@ -444,12 +470,52 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
         {
             QMutexLocker locker(&m_mutex);
             if (m_folderIdToPath.contains(parentId)) {
-                QString parentPath = m_folderIdToPath.value(parentId);
-                QString tail = pathParts.join("/");
-                if (parentPath.isEmpty()) {
-                    return tail;
+                const QString parentPath = m_folderIdToPath.value(parentId);
+                QSet<QString> folderClaims;
+                for (auto it = m_folderIdToPath.constBegin(); it != m_folderIdToPath.constEnd();
+                     ++it) {
+                    folderClaims.insert(it.value());
                 }
-                return parentPath + "/" + tail;
+
+                QString currentPath = parentPath;
+                for (const DriveFile& node : pathChain) {
+                    currentPath = MirrorPathResolver::resolveRemoteLocalPath(
+                        currentPath, node.name, node.id, m_syncDatabase, m_settings,
+                        m_settings.syncFolder, &folderClaims);
+                    if (node.isFolder) {
+                        m_folderIdToPath.insert(node.id, currentPath);
+                        folderClaims.insert(currentPath);
+                    }
+                }
+                return currentPath;
+            }
+        }
+
+        if (m_syncDatabase) {
+            const QString parentPath = m_syncDatabase->getLocalPath(parentId);
+            if (!parentPath.isEmpty()) {
+                QSet<QString> folderClaims;
+                {
+                    QMutexLocker locker(&m_mutex);
+                    m_folderIdToPath.insert(parentId, parentPath);
+                    for (auto it = m_folderIdToPath.constBegin(); it != m_folderIdToPath.constEnd();
+                         ++it) {
+                        folderClaims.insert(it.value());
+                    }
+                }
+
+                QString currentPath = parentPath;
+                for (const DriveFile& node : pathChain) {
+                    currentPath = MirrorPathResolver::resolveRemoteLocalPath(
+                        currentPath, node.name, node.id, m_syncDatabase, m_settings,
+                        m_settings.syncFolder, &folderClaims);
+                    if (node.isFolder) {
+                        QMutexLocker locker(&m_mutex);
+                        m_folderIdToPath.insert(node.id, currentPath);
+                        folderClaims.insert(currentPath);
+                    }
+                }
+                return currentPath;
             }
         }
 
@@ -459,8 +525,7 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
             return QString();
         }
 
-        parentChain.append(qMakePair(parentFile.id, parentFile.name));
-        pathParts.prepend(parentFile.name);
+        pathChain.prepend(parentFile);
         parentId = parentFile.parentId();
     }
 
@@ -469,23 +534,27 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
         return QString();
     }
 
-    QString resolvedPath = pathParts.join("/");
-
-    if (!parentChain.isEmpty()) {
-        QString currentPath;
+    QSet<QString> folderClaims;
+    {
         QMutexLocker locker(&m_mutex);
-        for (int i = parentChain.size() - 1; i >= 0; --i) {
-            const auto& entry = parentChain[i];
-            if (currentPath.isEmpty()) {
-                currentPath = entry.second;
-            } else {
-                currentPath += "/" + entry.second;
-            }
-            m_folderIdToPath.insert(entry.first, currentPath);
+        for (auto it = m_folderIdToPath.constBegin(); it != m_folderIdToPath.constEnd(); ++it) {
+            folderClaims.insert(it.value());
         }
     }
 
-    return resolvedPath;
+    QString currentPath;
+    for (const DriveFile& node : pathChain) {
+        currentPath = MirrorPathResolver::resolveRemoteLocalPath(
+            currentPath, node.name, node.id, m_syncDatabase, m_settings, m_settings.syncFolder,
+            &folderClaims);
+        if (node.isFolder) {
+            QMutexLocker locker(&m_mutex);
+            m_folderIdToPath.insert(node.id, currentPath);
+            folderClaims.insert(currentPath);
+        }
+    }
+
+    return currentPath;
 }
 
 bool RemoteChangeWatcher::shouldProcess(const DriveFile& file) const {

@@ -123,6 +123,7 @@ class SettingsWindow : public QDialog {
     QLineEdit* m_syncFolderEdit;
     QPushButton* m_browseFolderButton;
     QComboBox* m_syncModeCombo;
+    QComboBox* m_duplicateNameCombo;
     QComboBox* m_conflictResolutionCombo;
 
     // Advanced tab widgets
@@ -143,6 +144,7 @@ class SettingsWindow : public QDialog {
     // Snapshot of restart-required settings (captured on load)
     QString m_originalSyncFolder;
     QString m_originalSyncMode;
+    QString m_originalDuplicateNameStrategy;
     QString m_originalConflictStrategy;
     QString m_originalSyncSystem;
     QString m_originalFuseMountPoint;

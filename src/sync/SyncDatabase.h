@@ -68,6 +68,7 @@ struct FuseMetadata {
     QString fileId;          ///< Google Drive file ID (primary key)
     QString path;            ///< Logical path in FUSE filesystem
     QString name;            ///< File/folder name
+    QString remoteName;      ///< Original Google Drive name before aliasing
     QString parentId;        ///< Parent folder ID
     bool isFolder;           ///< Whether this is a folder
     qint64 size;             ///< File size in bytes

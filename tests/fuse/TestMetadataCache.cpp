@@ -6,6 +6,7 @@
  */
 
 #include <QDir>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -54,6 +55,11 @@ class TestMetadataCache : public QObject {
 
     // Persistence: survives reinitialisation from DB
     void testPersistence_SurvivesReinit();
+    void testReplaceRemoteChildren_DisambiguatesDuplicatesWithFileIdSuffix();
+    void testReplaceRemoteChildren_DisambiguatesDuplicatesWithNumericSuffix();
+    void testUpsertRemoteMetadata_DisambiguatesAgainstExistingSibling();
+    void testDuplicateFolderAliasesKeepDistinctChildren();
+    void testDuplicateAliasesPersistAcrossReinit();
 
     // Edge cases
     void testGetByPath_UnknownReturnsInvalid();
@@ -69,6 +75,9 @@ class TestMetadataCache : public QObject {
                                      const QString& parentId = "root", qint64 size = 100);
     static FuseFileMetadata makeFolder(const QString& id, const QString& path,
                                        const QString& parentId = "root");
+    static DriveFile makeRemoteEntry(const QString& id, const QString& name,
+                                     const QString& parentId = "root", bool isFolder = false,
+                                     qint64 size = 100);
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +89,7 @@ FuseFileMetadata TestMetadataCache::makeFile(const QString& id, const QString& p
     m.fileId = id;
     m.path = path;
     m.name = path.mid(path.lastIndexOf('/') + 1);
+    m.remoteName = m.name;
     m.parentId = parentId;
     m.isFolder = false;
     m.size = size;
@@ -96,6 +106,7 @@ FuseFileMetadata TestMetadataCache::makeFolder(const QString& id, const QString&
     m.fileId = id;
     m.path = path;
     m.name = path.mid(path.lastIndexOf('/') + 1);
+    m.remoteName = m.name;
     m.parentId = parentId;
     m.isFolder = true;
     m.size = 0;
@@ -104,6 +115,21 @@ FuseFileMetadata TestMetadataCache::makeFolder(const QString& id, const QString&
     m.modifiedTime = QDateTime::currentDateTimeUtc();
     m.cachedAt = QDateTime::currentDateTimeUtc();
     return m;
+}
+
+DriveFile TestMetadataCache::makeRemoteEntry(const QString& id, const QString& name,
+                                             const QString& parentId, bool isFolder, qint64 size) {
+    DriveFile file;
+    file.id = id;
+    file.name = name;
+    file.parents = {parentId};
+    file.isFolder = isFolder;
+    file.size = isFolder ? 0 : size;
+    file.mimeType = isFolder ? QStringLiteral("application/vnd.google-apps.folder")
+                             : QStringLiteral("text/plain");
+    file.createdTime = QDateTime::currentDateTimeUtc();
+    file.modifiedTime = QDateTime::currentDateTimeUtc();
+    return file;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,12 +142,16 @@ void TestMetadataCache::init() {
     QStandardPaths::setTestModeEnabled(true);
     qputenv("HOME", m_tempDir->path().toUtf8());
 
+    QSettings settings;
+    settings.setValue("sync/duplicateNameStrategy", "file-id-suffix");
+
     m_db = new SyncDatabase();
     QVERIFY(m_db->initialize());
 
     m_driveClient = new FakeDriveClientMC(this);
     m_cache = new MetadataCache(m_db, m_driveClient, this);
     QVERIFY(m_cache->initialize());
+    m_cache->setRootFolderId("root");
 }
 
 void TestMetadataCache::cleanup() {
@@ -227,6 +257,94 @@ void TestMetadataCache::testPersistence_SurvivesReinit() {
     auto got = m_cache->getMetadataByPath("saved.txt");
     QVERIFY(got.isValid());
     QCOMPARE(got.fileId, QString("persist1"));
+}
+
+void TestMetadataCache::testReplaceRemoteChildren_DisambiguatesDuplicatesWithFileIdSuffix() {
+    QList<DriveFile> files;
+    files << makeRemoteEntry("idA", "report.txt") << makeRemoteEntry("idB", "report.txt");
+
+    const QList<FuseFileMetadata> stored = m_cache->replaceRemoteChildren("root", files);
+
+    QCOMPARE(stored.size(), 2);
+    QCOMPARE(m_cache->getPathByFileId("idA"), QString("report.txt"));
+    QCOMPARE(m_cache->getPathByFileId("idB"), QString("report_idB.txt"));
+
+    const QList<FuseFileMetadata> children = m_cache->getChildren("/");
+    QCOMPARE(children.size(), 2);
+}
+
+void TestMetadataCache::testReplaceRemoteChildren_DisambiguatesDuplicatesWithNumericSuffix() {
+    QSettings settings;
+    settings.setValue("sync/duplicateNameStrategy", "numeric-suffix");
+
+    delete m_cache;
+    m_cache = new MetadataCache(m_db, m_driveClient, this);
+    QVERIFY(m_cache->initialize());
+    m_cache->setRootFolderId("root");
+
+    QList<DriveFile> files;
+    files << makeRemoteEntry("idA", "report.txt") << makeRemoteEntry("idB", "report.txt");
+
+    const QList<FuseFileMetadata> stored = m_cache->replaceRemoteChildren("root", files);
+
+    QCOMPARE(stored.size(), 2);
+    QCOMPARE(m_cache->getPathByFileId("idA"), QString("report.txt"));
+    QCOMPARE(m_cache->getPathByFileId("idB"), QString("report (1).txt"));
+}
+
+void TestMetadataCache::testUpsertRemoteMetadata_DisambiguatesAgainstExistingSibling() {
+    QList<DriveFile> initial;
+    initial << makeRemoteEntry("idA", "report.txt");
+    m_cache->replaceRemoteChildren("root", initial);
+
+    const FuseFileMetadata stored =
+        m_cache->upsertRemoteMetadata(makeRemoteEntry("idB", "report.txt"));
+
+    QVERIFY(stored.isValid());
+    QCOMPARE(stored.path, QString("report_idB.txt"));
+    QCOMPARE(m_cache->getPathByFileId("idB"), QString("report_idB.txt"));
+}
+
+void TestMetadataCache::testDuplicateFolderAliasesKeepDistinctChildren() {
+    QList<DriveFile> folders;
+    folders << makeRemoteEntry("folderA", "dup", "root", true)
+            << makeRemoteEntry("folderB", "dup", "root", true);
+
+    m_cache->replaceRemoteChildren("root", folders);
+
+    QList<DriveFile> leftChildren;
+    leftChildren << makeRemoteEntry("childA", "inside.txt", "folderA");
+    QList<DriveFile> rightChildren;
+    rightChildren << makeRemoteEntry("childB", "inside.txt", "folderB");
+
+    m_cache->replaceRemoteChildren("folderA", leftChildren);
+    m_cache->replaceRemoteChildren("folderB", rightChildren);
+
+    QCOMPARE(m_cache->getPathByFileId("folderA"), QString("dup"));
+    QCOMPARE(m_cache->getPathByFileId("folderB"), QString("dup_folderB"));
+    QCOMPARE(m_cache->getPathByFileId("childA"), QString("dup/inside.txt"));
+    QCOMPARE(m_cache->getPathByFileId("childB"), QString("dup_folderB/inside.txt"));
+}
+
+void TestMetadataCache::testDuplicateAliasesPersistAcrossReinit() {
+    QList<DriveFile> initial;
+    initial << makeRemoteEntry("idA", "report.txt") << makeRemoteEntry("idB", "report.txt");
+    m_cache->replaceRemoteChildren("root", initial);
+
+    QList<DriveFile> refreshed;
+    refreshed << makeRemoteEntry("idB", "report.txt");
+    m_cache->replaceRemoteChildren("root", refreshed);
+
+    delete m_cache;
+    m_cache = new MetadataCache(m_db, m_driveClient, this);
+    QVERIFY(m_cache->initialize());
+    m_cache->setRootFolderId("root");
+
+    QCOMPARE(m_cache->getPathByFileId("idB"), QString("report_idB.txt"));
+
+    const QList<FuseFileMetadata> children = m_cache->getChildren("/");
+    QCOMPARE(children.size(), 1);
+    QCOMPARE(children.first().path, QString("report_idB.txt"));
 }
 
 // ---------------------------------------------------------------------------

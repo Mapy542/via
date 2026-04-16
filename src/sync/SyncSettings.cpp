@@ -11,6 +11,7 @@ namespace {
 constexpr const char* kSyncFolderKey = "sync/folder";
 constexpr const char* kSyncModeKey = "sync/syncMode";
 constexpr const char* kConflictStrategyKey = "sync/conflictStrategy";
+constexpr const char* kDuplicateNameStrategyKey = "sync/duplicateNameStrategy";
 constexpr const char* kRemotePollIntervalKey = "sync/remotePollIntervalMs";
 
 QString syncModeFromLegacy(int value) {
@@ -74,6 +75,13 @@ SyncSettings SyncSettings::load() {
         conflictStrategy = "keep-both";
     }
     settings.conflictStrategy = conflictStrategy;
+
+    QString duplicateNameStrategy =
+        qsettings.value(kDuplicateNameStrategyKey, "file-id-suffix").toString();
+    if (duplicateNameStrategy != "file-id-suffix" && duplicateNameStrategy != "numeric-suffix") {
+        duplicateNameStrategy = "file-id-suffix";
+    }
+    settings.duplicateNameStrategy = duplicateNameStrategy;
 
     settings.ignorePatterns = defaultIgnorePatterns();
 

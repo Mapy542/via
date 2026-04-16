@@ -55,6 +55,7 @@ set(SOURCES
     src/sync/ChangeProcessor.cpp
     src/sync/SyncActionQueue.cpp
     src/sync/SyncActionThread.cpp
+    src/sync/MirrorPathResolver.cpp
     src/sync/FileFilter.cpp
     src/sync/FullSync.cpp
     src/sync/SyncSettings.cpp
@@ -88,6 +89,7 @@ set(HEADERS
     src/sync/ChangeProcessor.h
     src/sync/SyncActionQueue.h
     src/sync/SyncActionThread.h
+    src/sync/MirrorPathResolver.h
     src/sync/FileFilter.h
     src/sync/FullSync.h
     src/sync/SyncSettings.h

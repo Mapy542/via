@@ -9,6 +9,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -41,7 +42,8 @@ class FakeDriveClientForFS : public GoogleDriveClient {
     QList<FilePage> filePages;
     int listFilesCallCount = 0;
 
-    void listFiles(const QString& /*folderId*/ = "root", const QString& pageToken = QString()) override {
+    void listFiles(const QString& /*folderId*/ = "root",
+                   const QString& pageToken = QString()) override {
         ++listFilesCallCount;
         int pageIdx = 0;
         if (!pageToken.isEmpty()) {
@@ -81,8 +83,9 @@ class FakeDriveClientForFS : public GoogleDriveClient {
 // ---------------------------------------------------------------------------
 //  Helper to build DriveFile
 // ---------------------------------------------------------------------------
-static DriveFile makeFile(const QString& id, const QString& name, const QString& parentId, bool isFolder = false,
-                          bool trashed = false, bool ownedByMe = true, const QString& mimeType = "text/plain") {
+static DriveFile makeFile(const QString& id, const QString& name, const QString& parentId,
+                          bool isFolder = false, bool trashed = false, bool ownedByMe = true,
+                          const QString& mimeType = "text/plain") {
     DriveFile f;
     f.id = id;
     f.name = name;
@@ -120,6 +123,8 @@ class TestFullSync : public QObject {
     // Remote tree building
     void testRemoteTreeSingleFile();
     void testRemoteTreeNestedFolder();
+    void testRemoteDuplicateFilesUseFileIdSuffix();
+    void testRemoteDuplicateFoldersKeepDistinctDescendants();
     void testRemoteMultiPageFetch();
 
     // Orphan handling
@@ -174,6 +179,10 @@ void TestFullSync::init() {
     qputenv("HOME", m_tempDir->path().toUtf8());
     QStandardPaths::setTestModeEnabled(true);
 
+    QSettings settings;
+    settings.setValue("sync/duplicateNameStrategy", "file-id-suffix");
+    settings.sync();
+
     m_syncDatabase = new SyncDatabase();
     QVERIFY(m_syncDatabase->initialize());
 
@@ -181,7 +190,8 @@ void TestFullSync::init() {
     m_syncActionQueue = new SyncActionQueue();
     m_driveClient = new FakeDriveClientForFS();
 
-    m_changeProcessor = new ChangeProcessor(m_changeQueue, m_syncActionQueue, m_syncDatabase, m_driveClient);
+    m_changeProcessor =
+        new ChangeProcessor(m_changeQueue, m_syncActionQueue, m_syncDatabase, m_driveClient);
 
     m_fullSync = new FullSync(m_changeQueue, m_syncDatabase, m_driveClient, m_changeProcessor);
 }
@@ -413,6 +423,64 @@ void TestFullSync::testRemoteTreeNestedFolder() {
         }
     }
     QVERIFY(foundNested);
+}
+
+void TestFullSync::testRemoteDuplicateFilesUseFileIdSuffix() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+    m_fullSync->setSyncFolder(syncDir);
+
+    FakeDriveClientForFS::FilePage page;
+    page.files.append(makeFile("dup-1", "report.txt", "root-id-123"));
+    page.files.append(makeFile("dup-2", "report.txt", "root-id-123"));
+    m_driveClient->filePages.append(page);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSync();
+
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
+
+    QHash<QString, QString> resolvedPaths;
+    while (!m_changeQueue->isEmpty()) {
+        ChangeQueueItem item = m_changeQueue->dequeue();
+        if (item.origin == ChangeOrigin::Remote) {
+            resolvedPaths.insert(item.fileId, item.localPath);
+        }
+    }
+
+    QCOMPARE(resolvedPaths.value("dup-1"), QString("report.txt"));
+    QCOMPARE(resolvedPaths.value("dup-2"), QString("report_dup-2.txt"));
+}
+
+void TestFullSync::testRemoteDuplicateFoldersKeepDistinctDescendants() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+    m_fullSync->setSyncFolder(syncDir);
+
+    FakeDriveClientForFS::FilePage page;
+    page.files.append(makeFile("folder-1", "docs", "root-id-123", /*isFolder=*/true));
+    page.files.append(makeFile("folder-2", "docs", "root-id-123", /*isFolder=*/true));
+    page.files.append(makeFile("file-1", "readme.md", "folder-1"));
+    page.files.append(makeFile("file-2", "readme.md", "folder-2"));
+    m_driveClient->filePages.append(page);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSync();
+
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
+
+    QHash<QString, QString> resolvedPaths;
+    while (!m_changeQueue->isEmpty()) {
+        ChangeQueueItem item = m_changeQueue->dequeue();
+        if (item.origin == ChangeOrigin::Remote) {
+            resolvedPaths.insert(item.fileId, item.localPath);
+        }
+    }
+
+    QCOMPARE(resolvedPaths.value("folder-1"), QString("docs"));
+    QCOMPARE(resolvedPaths.value("folder-2"), QString("docs_folder-2"));
+    QCOMPARE(resolvedPaths.value("file-1"), QString("docs/readme.md"));
+    QCOMPARE(resolvedPaths.value("file-2"), QString("docs_folder-2/readme.md"));
 }
 
 void TestFullSync::testRemoteMultiPageFetch() {
@@ -816,7 +884,8 @@ void TestFullSync::testLocalScanSkipsNestedTrashFiles() {
 
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        QVERIFY2(!item.localPath.contains(".Trash-"), qPrintable("Deep trash file leaked: " + item.localPath));
+        QVERIFY2(!item.localPath.contains(".Trash-"),
+                 qPrintable("Deep trash file leaked: " + item.localPath));
     }
 }
 

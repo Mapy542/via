@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -64,7 +65,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         QString localPath;
     };
 
-    explicit FakeGoogleDriveClient(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
+    explicit FakeGoogleDriveClient(QObject* parent = nullptr)
+        : GoogleDriveClient(nullptr, parent) {}
 
     void setFolderIdForPath(const QString& path, const QString& id) {
         QString normalized = QDir::cleanPath(path);
@@ -79,7 +81,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         m_parentByFileId.insert(fileId, parentId);
     }
 
-    void injectOperationError(const QString& operation, const QString& errorMsg, int httpStatus, int remaining = 1) {
+    void injectOperationError(const QString& operation, const QString& errorMsg, int httpStatus,
+                              int remaining = 1) {
         InjectedError injected;
         injected.errorMsg = errorMsg;
         injected.httpStatus = httpStatus;
@@ -111,7 +114,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         emit fileDownloaded(fileId, localPath);
     }
 
-    void uploadFile(const QString& localPath, const QString& parentId, const QString& fileName) override {
+    void uploadFile(const QString& localPath, const QString& parentId,
+                    const QString& fileName) override {
         ++m_uploadCallCount;
         m_lastUploadCall = {localPath, parentId, fileName};
         if (emitInjectedError("uploadFile", QString(), localPath)) {
@@ -135,7 +139,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         emit fileUpdated(file);
     }
 
-    void moveFile(const QString& fileId, const QString& newParentId, const QString& oldParentId) override {
+    void moveFile(const QString& fileId, const QString& newParentId,
+                  const QString& oldParentId) override {
         m_lastMoveCall = {fileId, newParentId, oldParentId};
         emit fileMoved(fileId);
         DriveFile file;
@@ -164,7 +169,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         emit fileTrashed(fileId);
     }
 
-    void createFolder(const QString& name, const QString& parentId, const QString& localPath) override {
+    void createFolder(const QString& name, const QString& parentId,
+                      const QString& localPath) override {
         ++m_folderCallCount;
         m_lastFolderCall = {name, parentId, localPath};
         if (emitInjectedError("createFolder", QString(), localPath)) {
@@ -201,7 +207,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
    private:
     QString nextId() { return QString("fake-%1").arg(++m_nextId); }
 
-    bool emitInjectedError(const QString& operation, const QString& fileId, const QString& localPath) {
+    bool emitInjectedError(const QString& operation, const QString& fileId,
+                           const QString& localPath) {
         if (!m_injectedErrors.contains(operation)) {
             return false;
         }
@@ -254,13 +261,17 @@ class TestSyncActionThread : public QObject {
     void testUploadFile_RetriesTransientFailure();
     void testUploadFile_StopsAfterRetryBudget();
     void testDownloadFile();
+    void testDownloadFile_DisambiguatesDuplicateWithFileIdSuffix();
+    void testDownloadFile_DisambiguatesDuplicateWithNumericSuffix();
     void testDownloadFolder();
     void testDeleteLocal();
     void testDeleteLocalFolderMarksDescendants();
     void testMoveLocal();
+    void testMoveLocal_DisambiguatesWhenDestinationExists();
     void testMoveLocal_UpdatesMetadataOnDestination();
     void testMoveLocal_UsesActionFileIdWhenSourceMappingMissing();
     void testRenameLocal();
+    void testRenameLocal_DisambiguatesWhenDestinationExists();
     void testRenameLocal_UsesActionFileIdWhenSourceMappingMissing();
     void testDeleteRemoteById();
     void testDeleteRemoteFromDb();
@@ -284,7 +295,8 @@ class TestSyncActionThread : public QObject {
     QByteArray m_originalHome;
 
     QString createFile(const QString& relPath, const QByteArray& data = "data");
-    void enqueueAndWait(const SyncActionItem& action, int expectedCompleted = 1, int expectedFailed = 0);
+    void enqueueAndWait(const SyncActionItem& action, int expectedCompleted = 1,
+                        int expectedFailed = 0);
 };
 
 void TestSyncActionThread::init() {
@@ -294,6 +306,10 @@ void TestSyncActionThread::init() {
     m_originalHome = qgetenv("HOME");
     qputenv("HOME", m_tempDir->path().toUtf8());
     QStandardPaths::setTestModeEnabled(true);
+
+    QSettings settings;
+    settings.setValue("sync/duplicateNameStrategy", "file-id-suffix");
+    settings.sync();
 
     m_db = new SyncDatabase();
     QVERIFY(m_db->initialize());
@@ -343,7 +359,8 @@ QString TestSyncActionThread::createFile(const QString& relPath, const QByteArra
     return absPath;
 }
 
-void TestSyncActionThread::enqueueAndWait(const SyncActionItem& action, int expectedCompleted, int expectedFailed) {
+void TestSyncActionThread::enqueueAndWait(const SyncActionItem& action, int expectedCompleted,
+                                          int expectedFailed) {
     QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
     QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
 
@@ -581,6 +598,38 @@ void TestSyncActionThread::testDownloadFile() {
     QVERIFY(QFile::exists(m_tempDir->filePath(relPath)));
 }
 
+void TestSyncActionThread::testDownloadFile_DisambiguatesDuplicateWithFileIdSuffix() {
+    createFile("downloads/file.txt", "existing");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/file.txt";
+    action.fileId = "remote-file-dup";
+
+    enqueueAndWait(action);
+
+    QCOMPARE(m_db->getLocalPath("remote-file-dup"), QString("downloads/file_remote-file-dup.txt"));
+    QVERIFY(QFile::exists(m_tempDir->filePath("downloads/file_remote-file-dup.txt")));
+}
+
+void TestSyncActionThread::testDownloadFile_DisambiguatesDuplicateWithNumericSuffix() {
+    QSettings settings;
+    settings.setValue("sync/duplicateNameStrategy", "numeric-suffix");
+    settings.sync();
+
+    createFile("downloads/file.txt", "existing");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/file.txt";
+    action.fileId = "remote-file-num";
+
+    enqueueAndWait(action);
+
+    QCOMPARE(m_db->getLocalPath("remote-file-num"), QString("downloads/file (1).txt"));
+    QVERIFY(QFile::exists(m_tempDir->filePath("downloads/file (1).txt")));
+}
+
 void TestSyncActionThread::testDownloadFolder() {
     QString relPath = "downloads/folder";
     SyncActionItem action;
@@ -638,6 +687,22 @@ void TestSyncActionThread::testMoveLocal() {
     QCOMPARE(m_db->getLocalPath("local-id-2"), QString("move/dest.txt"));
 }
 
+void TestSyncActionThread::testMoveLocal_DisambiguatesWhenDestinationExists() {
+    QString relPath = "move/conflict-source.txt";
+    createFile(relPath, "move");
+    createFile("move/dest.txt", "existing");
+    m_db->setFileId(relPath, "local-id-conflict");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::MoveLocal;
+    action.localPath = relPath;
+    action.moveDestination = "move/dest.txt";
+
+    enqueueAndWait(action);
+    QVERIFY(QFile::exists(m_tempDir->filePath("move/dest_local-id-conflict.txt")));
+    QCOMPARE(m_db->getLocalPath("local-id-conflict"), QString("move/dest_local-id-conflict.txt"));
+}
+
 void TestSyncActionThread::testMoveLocal_UpdatesMetadataOnDestination() {
     QString relPath = "move/meta-source.txt";
     createFile(relPath, "move");
@@ -690,6 +755,23 @@ void TestSyncActionThread::testRenameLocal() {
     enqueueAndWait(action);
     QVERIFY(QFile::exists(m_tempDir->filePath("rename/renamed.txt")));
     QCOMPARE(m_db->getLocalPath("local-id-3"), QString("rename/renamed.txt"));
+}
+
+void TestSyncActionThread::testRenameLocal_DisambiguatesWhenDestinationExists() {
+    QString relPath = "rename/conflict-source.txt";
+    createFile(relPath, "rename");
+    createFile("rename/target.txt", "existing");
+    m_db->setFileId(relPath, "local-id-rename-conflict");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::RenameLocal;
+    action.localPath = relPath;
+    action.renameTo = "target.txt";
+
+    enqueueAndWait(action);
+    QVERIFY(QFile::exists(m_tempDir->filePath("rename/target_local-id-rename-conflict.txt")));
+    QCOMPARE(m_db->getLocalPath("local-id-rename-conflict"),
+             QString("rename/target_local-id-rename-conflict.txt"));
 }
 
 void TestSyncActionThread::testRenameLocal_UsesActionFileIdWhenSourceMappingMissing() {

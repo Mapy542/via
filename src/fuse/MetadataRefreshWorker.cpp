@@ -311,40 +311,8 @@ void MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
         return;
     }
 
-    // Build FuseFileMetadata from DriveFile
-    FuseFileMetadata metadata;
-    metadata.fileId = file.id;
-    metadata.name = file.name;
-    metadata.parentId = file.parentId();
-    metadata.isFolder = file.isFolder;
-    metadata.size = file.size;
-    metadata.mimeType = file.mimeType;
-    metadata.createdTime = file.createdTime;
-    metadata.modifiedTime = file.modifiedTime;
-    metadata.cachedAt = QDateTime::currentDateTime();
-    metadata.lastAccessed = QDateTime::currentDateTime();
-
-    // Try to resolve the path from parent
-    if (!metadata.parentId.isEmpty()) {
-        QString rootId = m_metadataCache->rootFolderId();
-        if (metadata.parentId == rootId) {
-            // Parent is root folder — use bare name (no leading slash)
-            // to match FuseDriver's path convention
-            metadata.path = metadata.name;
-        } else {
-            QString parentPath = m_metadataCache->getPathByFileId(metadata.parentId);
-            if (!parentPath.isEmpty()) {
-                metadata.path = parentPath + QStringLiteral("/") + metadata.name;
-            }
-            // If parent path not found, we cannot resolve the full path yet.
-            // The file may be in a folder that hasn't been browsed yet.
-            // It will be properly resolved when the user navigates to that folder.
-        }
-    }
-
-    // Only set if we have a valid path
-    if (!metadata.path.isEmpty()) {
-        m_metadataCache->setMetadata(metadata);
+    const FuseFileMetadata metadata = m_metadataCache->upsertRemoteMetadata(file);
+    if (metadata.isValid()) {
         qDebug() << "MetadataRefreshWorker: Updated metadata for" << metadata.path;
     } else {
         // Cannot resolve path - parent folder not in cache

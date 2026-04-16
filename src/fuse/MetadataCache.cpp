@@ -6,91 +6,249 @@
 #include "MetadataCache.h"
 
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QReadLocker>
 #include <QSet>
 #include <QWriteLocker>
+#include <algorithm>
 
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
+#include "sync/SyncSettings.h"
 
 const int MetadataCache::DEFAULT_MAX_CACHE_AGE_SECONDS;
+
+namespace {
+
+QString normalizeMetadataPath(const QString& path) {
+    if (path.isEmpty()) {
+        return QString();
+    }
+
+    QString normalized = QDir::cleanPath(path);
+    if (normalized == ".") {
+        normalized.clear();
+    }
+    if (normalized.startsWith(QStringLiteral("/")) && normalized != QStringLiteral("/")) {
+        normalized.remove(0, 1);
+    }
+    return normalized;
+}
+
+QString parentPathFor(const QString& path) {
+    const QString normalized = normalizeMetadataPath(path);
+    if (normalized.isEmpty() || normalized == QStringLiteral("/")) {
+        return QStringLiteral("/");
+    }
+
+    const int lastSlash = normalized.lastIndexOf('/');
+    if (lastSlash <= 0) {
+        return QStringLiteral("/");
+    }
+
+    return normalized.left(lastSlash);
+}
+
+QString joinMetadataPath(const QString& parentPath, const QString& fileName) {
+    const QString normalizedParent = normalizeMetadataPath(parentPath);
+    if (normalizedParent.isEmpty() || normalizedParent == QStringLiteral("/")) {
+        return fileName;
+    }
+    return QDir(normalizedParent).filePath(fileName);
+}
+
+QString fileNameForPath(const QString& path) {
+    const QString normalized = normalizeMetadataPath(path);
+    if (normalized.isEmpty() || normalized == QStringLiteral("/")) {
+        return QString();
+    }
+
+    const int lastSlash = normalized.lastIndexOf('/');
+    if (lastSlash < 0) {
+        return normalized;
+    }
+    return normalized.mid(lastSlash + 1);
+}
+
+QString remoteNameForMetadata(const FuseFileMetadata& metadata) {
+    if (!metadata.remoteName.isEmpty()) {
+        return metadata.remoteName;
+    }
+    if (!metadata.name.isEmpty()) {
+        return metadata.name;
+    }
+    return fileNameForPath(metadata.path);
+}
+
+bool shouldExposeRemoteFile(const DriveFile& file) {
+    if (!file.isValid()) {
+        return false;
+    }
+    if (file.isShortcut) {
+        return false;
+    }
+    if (file.isGoogleDoc() && !file.isFolder) {
+        return false;
+    }
+    return true;
+}
+
+FuseFileMetadata fromDbMetadata(const FuseMetadata& dbMeta) {
+    FuseFileMetadata metadata;
+    metadata.fileId = dbMeta.fileId;
+    metadata.path = normalizeMetadataPath(dbMeta.path);
+    metadata.name = dbMeta.name;
+    metadata.remoteName = dbMeta.remoteName.isEmpty() ? dbMeta.name : dbMeta.remoteName;
+    metadata.parentId = dbMeta.parentId;
+    metadata.isFolder = dbMeta.isFolder;
+    metadata.size = dbMeta.size;
+    metadata.mimeType = dbMeta.mimeType;
+    metadata.createdTime = dbMeta.createdTime;
+    metadata.modifiedTime = dbMeta.modifiedTime;
+    metadata.cachedAt = dbMeta.cachedAt;
+    metadata.lastAccessed = dbMeta.lastAccessed;
+    return metadata;
+}
+
+FuseMetadata toDbMetadata(const FuseFileMetadata& metadata) {
+    FuseMetadata dbMeta;
+    dbMeta.fileId = metadata.fileId;
+    dbMeta.path = normalizeMetadataPath(metadata.path);
+    dbMeta.name = metadata.name;
+    dbMeta.remoteName = remoteNameForMetadata(metadata);
+    dbMeta.parentId = metadata.parentId;
+    dbMeta.isFolder = metadata.isFolder;
+    dbMeta.size = metadata.size;
+    dbMeta.mimeType = metadata.mimeType;
+    dbMeta.createdTime = metadata.createdTime;
+    dbMeta.modifiedTime = metadata.modifiedTime;
+    dbMeta.cachedAt = metadata.cachedAt;
+    dbMeta.lastAccessed = metadata.lastAccessed;
+    return dbMeta;
+}
+
+FuseFileMetadata fromDriveFile(const DriveFile& file) {
+    FuseFileMetadata metadata;
+    metadata.fileId = file.id;
+    metadata.name = file.name;
+    metadata.remoteName = file.name;
+    metadata.parentId = file.parentId();
+    metadata.isFolder = file.isFolder;
+    metadata.size = file.size;
+    metadata.mimeType = file.mimeType;
+    metadata.createdTime = file.createdTime;
+    metadata.modifiedTime = file.modifiedTime;
+    metadata.cachedAt = QDateTime::currentDateTime();
+    metadata.lastAccessed = QDateTime::currentDateTime();
+    return metadata;
+}
+
+QString buildDisambiguatedFileName(const QString& remoteName, const QString& duplicateNameStrategy,
+                                   const QString& fileId, int collisionIndex) {
+    const QFileInfo info(remoteName);
+    const QString baseName = info.completeBaseName();
+    const QString extension = info.suffix();
+
+    QString decoratedBaseName;
+    if (duplicateNameStrategy == QStringLiteral("numeric-suffix") || fileId.isEmpty()) {
+        decoratedBaseName = QString("%1 (%2)").arg(baseName).arg(collisionIndex);
+    } else {
+        decoratedBaseName = QString("%1_%2").arg(baseName, fileId);
+        if (collisionIndex > 1) {
+            decoratedBaseName += QString("_%1").arg(collisionIndex - 1);
+        }
+    }
+
+    if (extension.isEmpty()) {
+        return decoratedBaseName;
+    }
+    return QString("%1.%2").arg(decoratedBaseName, extension);
+}
+
+FuseFileMetadata resolveRemoteMetadata(const FuseFileMetadata& metadata, const QString& parentPath,
+                                       const QHash<QString, FuseFileMetadata>& existingByFileId,
+                                       QSet<QString>* claimedPaths,
+                                       const QString& duplicateNameStrategy) {
+    FuseFileMetadata resolved = metadata;
+    resolved.path.clear();
+
+    const QString remoteName = remoteNameForMetadata(metadata);
+    if (metadata.fileId.isEmpty() || remoteName.isEmpty() || parentPath.isEmpty()) {
+        return FuseFileMetadata();
+    }
+
+    resolved.remoteName = remoteName;
+
+    const auto existingIt = existingByFileId.constFind(metadata.fileId);
+    if (existingIt != existingByFileId.constEnd()) {
+        const FuseFileMetadata& existing = existingIt.value();
+        const QString existingPath = normalizeMetadataPath(existing.path);
+        if (!existingPath.isEmpty() && parentPathFor(existingPath) == parentPath &&
+            remoteNameForMetadata(existing) == remoteName &&
+            (!claimedPaths || !claimedPaths->contains(existingPath))) {
+            resolved.path = existingPath;
+            resolved.name = fileNameForPath(existingPath);
+            if (claimedPaths) {
+                claimedPaths->insert(existingPath);
+            }
+            return resolved;
+        }
+    }
+
+    QString candidatePath = joinMetadataPath(parentPath, remoteName);
+    if (!claimedPaths || !claimedPaths->contains(candidatePath)) {
+        resolved.path = candidatePath;
+        resolved.name = fileNameForPath(candidatePath);
+        if (claimedPaths) {
+            claimedPaths->insert(candidatePath);
+        }
+        return resolved;
+    }
+
+    for (int collisionIndex = 1;; ++collisionIndex) {
+        const QString candidateName = buildDisambiguatedFileName(remoteName, duplicateNameStrategy,
+                                                                 metadata.fileId, collisionIndex);
+        candidatePath = joinMetadataPath(parentPath, candidateName);
+        if (!claimedPaths || !claimedPaths->contains(candidatePath)) {
+            resolved.path = candidatePath;
+            resolved.name = candidateName;
+            if (claimedPaths) {
+                claimedPaths->insert(candidatePath);
+            }
+            return resolved;
+        }
+    }
+}
+
+bool pathIsWithinSubtree(const QString& candidatePath, const QString& rootPath) {
+    const QString normalizedCandidate = normalizeMetadataPath(candidatePath);
+    const QString normalizedRoot = normalizeMetadataPath(rootPath);
+    if (normalizedCandidate.isEmpty() || normalizedRoot.isEmpty()) {
+        return false;
+    }
+    if (normalizedCandidate == normalizedRoot) {
+        return true;
+    }
+    return normalizedCandidate.startsWith(normalizedRoot + QStringLiteral("/"));
+}
+
+}  // namespace
 
 MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveClient,
                              QObject* parent)
     : QObject(parent),
       m_database(database),
       m_driveClient(driveClient),
+      m_duplicateNameStrategy(SyncSettings::load().duplicateNameStrategy),
       m_maxCacheAgeSeconds(DEFAULT_MAX_CACHE_AGE_SECONDS),
       m_cacheHits(0),
       m_cacheMisses(0) {
     // Connect to Google Drive client signals for async metadata fetch
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::fileReceived, this,
-                [this](const DriveFile& file) {
-                    // Convert DriveFile to FuseFileMetadata
-                    FuseFileMetadata metadata;
-                    metadata.fileId = file.id;
-                    metadata.name = file.name;
-                    metadata.parentId = file.parentId();
-                    metadata.isFolder = file.isFolder;
-                    metadata.size = file.size;
-                    metadata.mimeType = file.mimeType;
-                    metadata.createdTime = file.createdTime;
-                    metadata.modifiedTime = file.modifiedTime;
-                    metadata.cachedAt = QDateTime::currentDateTime();
-                    metadata.lastAccessed = QDateTime::currentDateTime();
-
-                    // Try to resolve path from parent chain
-                    metadata.path = buildPathFromParents(file.id);
-
-                    onApiMetadataReceived(file.id, metadata);
-                });
-
-        connect(m_driveClient, &GoogleDriveClient::filesListed, this,
-                [this](const QList<DriveFile>& files, const QString& nextPageToken) {
-                    Q_UNUSED(nextPageToken);
-
-                    // Group files by their parent ID
-                    QHash<QString, QList<FuseFileMetadata>> childrenByParent;
-
-                    for (const DriveFile& file : files) {
-                        // Skip non-downloadable entries — same filter applied
-                        // in FuseDriver::fuseReaddir's API path.  Without this,
-                        // the cache serves unfiltered entries on subsequent
-                        // readdirs, causing entry count drift.
-                        // Shortcuts have no content; Google Docs can't be
-                        // downloaded as binary files.
-                        if (file.isShortcut) {
-                            continue;
-                        }
-                        if (file.isGoogleDoc() && !file.isFolder) {
-                            continue;
-                        }
-
-                        FuseFileMetadata metadata;
-                        metadata.fileId = file.id;
-                        metadata.name = file.name;
-                        metadata.parentId = file.parentId();
-                        metadata.isFolder = file.isFolder;
-                        metadata.size = file.size;
-                        metadata.mimeType = file.mimeType;
-                        metadata.createdTime = file.createdTime;
-                        metadata.modifiedTime = file.modifiedTime;
-                        metadata.cachedAt = QDateTime::currentDateTime();
-                        metadata.lastAccessed = QDateTime::currentDateTime();
-
-                        QString parentId = file.parentId();
-                        if (!parentId.isEmpty()) {
-                            childrenByParent[parentId].append(metadata);
-                        }
-                    }
-
-                    // Process each parent's children
-                    for (auto it = childrenByParent.constBegin(); it != childrenByParent.constEnd();
-                         ++it) {
-                        onApiChildrenReceived(it.key(), it.value());
-                    }
-                });
+        connect(
+            m_driveClient, &GoogleDriveClient::fileReceived, this,
+            [this](const DriveFile& file) { onApiMetadataReceived(file.id, fromDriveFile(file)); });
     }
 }
 
@@ -149,24 +307,13 @@ FuseFileMetadata MetadataCache::getOrFetchMetadataByPath(const QString& path, bo
     if (m_database) {
         FuseMetadata dbMeta = m_database->getFuseMetadataByPath(path);
         if (!dbMeta.fileId.isEmpty()) {
-            FuseFileMetadata metadata;
-            metadata.fileId = dbMeta.fileId;
-            metadata.path = dbMeta.path;
-            metadata.name = dbMeta.name;
-            metadata.parentId = dbMeta.parentId;
-            metadata.isFolder = dbMeta.isFolder;
-            metadata.size = dbMeta.size;
-            metadata.mimeType = dbMeta.mimeType;
-            metadata.createdTime = dbMeta.createdTime;
-            metadata.modifiedTime = dbMeta.modifiedTime;
-            metadata.cachedAt = dbMeta.cachedAt;
-            metadata.lastAccessed = dbMeta.lastAccessed;
+            FuseFileMetadata metadata = fromDbMetadata(dbMeta);
 
             // Update in-memory cache
             {
                 QWriteLocker locker(&m_lock);
-                m_pathToMetadata[path] = metadata;
-                m_fileIdToPath[metadata.fileId] = path;
+                m_pathToMetadata[metadata.path] = metadata;
+                m_fileIdToPath[metadata.fileId] = metadata.path;
             }
 
             m_cacheHits++;
@@ -284,19 +431,7 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
         if (!dbChildren.isEmpty()) {
             QList<FuseFileMetadata> children;
             for (const FuseMetadata& dbMeta : dbChildren) {
-                FuseFileMetadata metadata;
-                metadata.fileId = dbMeta.fileId;
-                metadata.path = dbMeta.path;
-                metadata.name = dbMeta.name;
-                metadata.parentId = dbMeta.parentId;
-                metadata.isFolder = dbMeta.isFolder;
-                metadata.size = dbMeta.size;
-                metadata.mimeType = dbMeta.mimeType;
-                metadata.createdTime = dbMeta.createdTime;
-                metadata.modifiedTime = dbMeta.modifiedTime;
-                metadata.cachedAt = dbMeta.cachedAt;
-                metadata.lastAccessed = dbMeta.lastAccessed;
-                children.append(metadata);
+                children.append(fromDbMetadata(dbMeta));
             }
 
             // Update in-memory cache
@@ -329,12 +464,44 @@ bool MetadataCache::hasChildrenCached(const QString& parentPath) const {
     return false;
 }
 
+FuseFileMetadata MetadataCache::upsertRemoteMetadata(const DriveFile& file) {
+    if (!shouldExposeRemoteFile(file)) {
+        return FuseFileMetadata();
+    }
+
+    return upsertRemoteMetadataInternal(fromDriveFile(file));
+}
+
+QList<FuseFileMetadata> MetadataCache::replaceRemoteChildren(const QString& parentId,
+                                                             const QList<DriveFile>& files) {
+    QList<FuseFileMetadata> children;
+    children.reserve(files.size());
+
+    for (const DriveFile& file : files) {
+        if (!shouldExposeRemoteFile(file)) {
+            continue;
+        }
+        children.append(fromDriveFile(file));
+    }
+
+    return replaceRemoteChildrenInternal(parentId, children);
+}
+
 // ========================================
 // Cache modification
 // ========================================
 
 void MetadataCache::setMetadata(const FuseFileMetadata& metadata) {
-    if (!metadata.isValid()) {
+    FuseFileMetadata normalized = metadata;
+    normalized.path = normalizeMetadataPath(metadata.path);
+    if (normalized.remoteName.isEmpty()) {
+        normalized.remoteName = normalized.name;
+    }
+    if (normalized.name.isEmpty()) {
+        normalized.name = fileNameForPath(normalized.path);
+    }
+
+    if (!normalized.isValid()) {
         qWarning() << "MetadataCache: Cannot store invalid metadata";
         return;
     }
@@ -344,8 +511,8 @@ void MetadataCache::setMetadata(const FuseFileMetadata& metadata) {
         QWriteLocker locker(&m_lock);
 
         // Remove old path mapping if file ID exists with different path
-        auto oldPathIt = m_fileIdToPath.constFind(metadata.fileId);
-        if (oldPathIt != m_fileIdToPath.constEnd() && oldPathIt.value() != metadata.path) {
+        auto oldPathIt = m_fileIdToPath.constFind(normalized.fileId);
+        if (oldPathIt != m_fileIdToPath.constEnd() && oldPathIt.value() != normalized.path) {
             m_pathToMetadata.remove(oldPathIt.value());
 
             // Update parent's children list
@@ -356,26 +523,26 @@ void MetadataCache::setMetadata(const FuseFileMetadata& metadata) {
 
         // Clean up orphaned fileId mapping when a different fileId already
         // occupies this path (Google Drive allows duplicate names).
-        auto existingIt = m_pathToMetadata.constFind(metadata.path);
-        if (existingIt != m_pathToMetadata.constEnd() && existingIt->fileId != metadata.fileId) {
+        auto existingIt = m_pathToMetadata.constFind(normalized.path);
+        if (existingIt != m_pathToMetadata.constEnd() && existingIt->fileId != normalized.fileId) {
             m_fileIdToPath.remove(existingIt->fileId);
         }
 
-        m_pathToMetadata[metadata.path] = metadata;
-        m_fileIdToPath[metadata.fileId] = metadata.path;
+        m_pathToMetadata[normalized.path] = normalized;
+        m_fileIdToPath[normalized.fileId] = normalized.path;
 
         // Update parent's children list
-        QString parentPath = getParentPath(metadata.path);
+        const QString parentPath = getParentPath(normalized.path);
 
-        if (!m_parentToChildren[parentPath].contains(metadata.path)) {
-            m_parentToChildren[parentPath].append(metadata.path);
+        if (!m_parentToChildren[parentPath].contains(normalized.path)) {
+            m_parentToChildren[parentPath].append(normalized.path);
         }
     }
 
     // Persist to database
-    saveToDatabase(metadata);
+    saveToDatabase(normalized);
 
-    emit metadataUpdated(metadata.path);
+    emit metadataUpdated(normalized.path);
 }
 
 void MetadataCache::setMetadataBatch(const QList<FuseFileMetadata>& metadataList) {
@@ -386,13 +553,22 @@ void MetadataCache::setMetadataBatch(const QList<FuseFileMetadata>& metadataList
     QWriteLocker locker(&m_lock);
 
     for (const FuseFileMetadata& metadata : metadataList) {
-        if (!metadata.isValid()) {
+        FuseFileMetadata normalized = metadata;
+        normalized.path = normalizeMetadataPath(metadata.path);
+        if (normalized.remoteName.isEmpty()) {
+            normalized.remoteName = normalized.name;
+        }
+        if (normalized.name.isEmpty()) {
+            normalized.name = fileNameForPath(normalized.path);
+        }
+
+        if (!normalized.isValid()) {
             continue;
         }
 
         // Update in-memory cache
-        auto oldPathIt = m_fileIdToPath.constFind(metadata.fileId);
-        if (oldPathIt != m_fileIdToPath.constEnd() && oldPathIt.value() != metadata.path) {
+        auto oldPathIt = m_fileIdToPath.constFind(normalized.fileId);
+        if (oldPathIt != m_fileIdToPath.constEnd() && oldPathIt.value() != normalized.path) {
             m_pathToMetadata.remove(oldPathIt.value());
 
             // Also remove stale path from parent's children list
@@ -403,36 +579,24 @@ void MetadataCache::setMetadataBatch(const QList<FuseFileMetadata>& metadataList
 
         // Clean up orphaned fileId mapping when a different fileId already
         // occupies this path (Google Drive allows duplicate names).
-        auto existingIt = m_pathToMetadata.constFind(metadata.path);
-        if (existingIt != m_pathToMetadata.constEnd() && existingIt->fileId != metadata.fileId) {
+        auto existingIt = m_pathToMetadata.constFind(normalized.path);
+        if (existingIt != m_pathToMetadata.constEnd() && existingIt->fileId != normalized.fileId) {
             m_fileIdToPath.remove(existingIt->fileId);
         }
 
-        m_pathToMetadata[metadata.path] = metadata;
-        m_fileIdToPath[metadata.fileId] = metadata.path;
+        m_pathToMetadata[normalized.path] = normalized;
+        m_fileIdToPath[normalized.fileId] = normalized.path;
 
         // Update parent's children list
-        QString parentPath = getParentPath(metadata.path);
+        const QString parentPath = getParentPath(normalized.path);
 
-        if (!m_parentToChildren[parentPath].contains(metadata.path)) {
-            m_parentToChildren[parentPath].append(metadata.path);
+        if (!m_parentToChildren[parentPath].contains(normalized.path)) {
+            m_parentToChildren[parentPath].append(normalized.path);
         }
 
         // Save to database via SyncDatabase (thread-safe)
         if (m_database) {
-            FuseMetadata dbMeta;
-            dbMeta.fileId = metadata.fileId;
-            dbMeta.path = metadata.path;
-            dbMeta.name = metadata.name;
-            dbMeta.parentId = metadata.parentId;
-            dbMeta.isFolder = metadata.isFolder;
-            dbMeta.size = metadata.size;
-            dbMeta.mimeType = metadata.mimeType;
-            dbMeta.createdTime = metadata.createdTime;
-            dbMeta.modifiedTime = metadata.modifiedTime;
-            dbMeta.cachedAt = metadata.cachedAt;
-            dbMeta.lastAccessed = metadata.lastAccessed;
-            m_database->saveFuseMetadata(dbMeta);
+            m_database->saveFuseMetadata(toDbMetadata(normalized));
         }
     }
 
@@ -519,6 +683,7 @@ bool MetadataCache::updatePath(const QString& oldPath, const QString& newPath) {
     FuseFileMetadata metadata = it.value();
     metadata.path = newPath;
     metadata.name = newPath.contains('/') ? newPath.mid(newPath.lastIndexOf('/') + 1) : newPath;
+    metadata.remoteName = metadata.name;
     metadata.cachedAt = QDateTime::currentDateTime();
 
     // Remove old entries
@@ -721,9 +886,11 @@ void MetadataCache::resetStatistics() {
 // ========================================
 
 void MetadataCache::onApiMetadataReceived(const QString& fileId, const FuseFileMetadata& metadata) {
-    if (metadata.isValid()) {
-        setMetadata(metadata);
-        emit metadataFetched(metadata.path, true);
+    Q_UNUSED(fileId);
+
+    FuseFileMetadata resolved = upsertRemoteMetadataInternal(metadata);
+    if (resolved.isValid()) {
+        emit metadataFetched(resolved.path, true);
     } else {
         qWarning() << "MetadataCache: Received invalid metadata for fileId:" << fileId;
         emit metadataFetched(QString(), false);
@@ -732,55 +899,7 @@ void MetadataCache::onApiMetadataReceived(const QString& fileId, const FuseFileM
 
 void MetadataCache::onApiChildrenReceived(const QString& parentId,
                                           const QList<FuseFileMetadata>& children) {
-    // Find parent path from parentId
-    QString parentPath;
-    {
-        QReadLocker locker(&m_lock);
-        if (parentId == m_rootFolderId) {
-            parentPath = "/";
-        } else {
-            auto it = m_fileIdToPath.constFind(parentId);
-            if (it != m_fileIdToPath.constEnd()) {
-                parentPath = it.value();
-            }
-        }
-    }
-
-    if (parentPath.isEmpty()) {
-        qWarning() << "MetadataCache: Cannot find parent path for parentId:" << parentId;
-        return;
-    }
-
-    // Build full paths for children and store
-    QList<FuseFileMetadata> childrenWithPaths;
-    for (FuseFileMetadata child : children) {
-        if (parentPath == "/") {
-            // Use bare name (no leading slash) to match FuseDriver's
-            // path convention and avoid duplicate cache entries
-            child.path = child.name;
-        } else {
-            child.path = parentPath + "/" + child.name;
-        }
-        childrenWithPaths.append(child);
-    }
-
-    setMetadataBatch(childrenWithPaths);
-
-    // Update children cache time (deduplicate paths — Google Drive allows
-    // multiple files with the same name, but POSIX does not).
-    {
-        QWriteLocker locker(&m_lock);
-        QList<QString> childPaths;
-        QSet<QString> seenPaths;
-        for (const FuseFileMetadata& child : childrenWithPaths) {
-            if (!seenPaths.contains(child.path)) {
-                childPaths.append(child.path);
-                seenPaths.insert(child.path);
-            }
-        }
-        m_parentToChildren[parentPath] = childPaths;
-        m_childrenCacheTime[parentPath] = QDateTime::currentDateTime();
-    }
+    replaceRemoteChildrenInternal(parentId, children);
 }
 
 // ========================================
@@ -798,23 +917,7 @@ void MetadataCache::loadFromDatabase() {
     QWriteLocker locker(&m_lock);
 
     for (const FuseMetadata& dbMeta : dbEntries) {
-        FuseFileMetadata metadata;
-        metadata.fileId = dbMeta.fileId;
-        metadata.path = dbMeta.path;
-        metadata.name = dbMeta.name;
-        metadata.parentId = dbMeta.parentId;
-        metadata.isFolder = dbMeta.isFolder;
-        metadata.size = dbMeta.size;
-        metadata.mimeType = dbMeta.mimeType;
-        metadata.createdTime = dbMeta.createdTime;
-        metadata.modifiedTime = dbMeta.modifiedTime;
-        metadata.cachedAt = dbMeta.cachedAt;
-        metadata.lastAccessed = dbMeta.lastAccessed;
-
-        // Normalize legacy paths that may have a leading slash
-        if (metadata.path.startsWith(QStringLiteral("/"))) {
-            metadata.path = metadata.path.mid(1);
-        }
+        const FuseFileMetadata metadata = fromDbMetadata(dbMeta);
 
         m_pathToMetadata[metadata.path] = metadata;
         m_fileIdToPath[metadata.fileId] = metadata.path;
@@ -834,23 +937,169 @@ void MetadataCache::saveToDatabase(const FuseFileMetadata& metadata) {
         return;
     }
 
-    FuseMetadata dbMeta;
-    dbMeta.fileId = metadata.fileId;
-    dbMeta.path = metadata.path;
-    dbMeta.name = metadata.name;
-    dbMeta.parentId = metadata.parentId;
-    dbMeta.isFolder = metadata.isFolder;
-    dbMeta.size = metadata.size;
-    dbMeta.mimeType = metadata.mimeType;
-    dbMeta.createdTime = metadata.createdTime;
-    dbMeta.modifiedTime = metadata.modifiedTime;
-    dbMeta.cachedAt = metadata.cachedAt;
-    dbMeta.lastAccessed = metadata.lastAccessed;
-
-    if (!m_database->saveFuseMetadata(dbMeta)) {
+    if (!m_database->saveFuseMetadata(toDbMetadata(metadata))) {
         qWarning() << "MetadataCache: Failed to save metadata to database";
         emit cacheError("Failed to save metadata");
     }
+}
+
+QString MetadataCache::resolveParentPath(const QString& parentId) const {
+    if (parentId.isEmpty()) {
+        return QString();
+    }
+
+    {
+        QReadLocker locker(&m_lock);
+        if (parentId == QStringLiteral("root") ||
+            (!m_rootFolderId.isEmpty() && parentId == m_rootFolderId)) {
+            return QStringLiteral("/");
+        }
+
+        auto it = m_fileIdToPath.constFind(parentId);
+        if (it != m_fileIdToPath.constEnd()) {
+            return normalizeMetadataPath(it.value());
+        }
+    }
+
+    if (!m_database) {
+        return QString();
+    }
+
+    const FuseMetadata parentMeta = m_database->getFuseMetadata(parentId);
+    if (!parentMeta.fileId.isEmpty()) {
+        return normalizeMetadataPath(parentMeta.path);
+    }
+
+    return QString();
+}
+
+FuseFileMetadata MetadataCache::upsertRemoteMetadataInternal(const FuseFileMetadata& metadata) {
+    const QString parentPath = resolveParentPath(metadata.parentId);
+    if (parentPath.isEmpty()) {
+        return FuseFileMetadata();
+    }
+
+    QHash<QString, FuseFileMetadata> existingByFileId;
+    QSet<QString> claimedPaths;
+
+    if (m_database && !metadata.parentId.isEmpty()) {
+        const QList<FuseMetadata> siblings = m_database->getFuseChildren(metadata.parentId);
+        for (const FuseMetadata& sibling : siblings) {
+            const FuseFileMetadata existing = fromDbMetadata(sibling);
+            existingByFileId.insert(existing.fileId, existing);
+            if (existing.fileId != metadata.fileId) {
+                claimedPaths.insert(existing.path);
+            }
+        }
+
+        const FuseMetadata selfMeta = m_database->getFuseMetadata(metadata.fileId);
+        if (!selfMeta.fileId.isEmpty()) {
+            existingByFileId.insert(selfMeta.fileId, fromDbMetadata(selfMeta));
+        }
+    }
+
+    FuseFileMetadata resolved = resolveRemoteMetadata(metadata, parentPath, existingByFileId,
+                                                      &claimedPaths, m_duplicateNameStrategy);
+    if (!resolved.isValid()) {
+        return FuseFileMetadata();
+    }
+
+    setMetadata(resolved);
+    return resolved;
+}
+
+QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
+    const QString& parentId, const QList<FuseFileMetadata>& children) {
+    const QString parentPath = resolveParentPath(parentId);
+    if (parentPath.isEmpty()) {
+        qWarning() << "MetadataCache: Cannot find parent path for parentId:" << parentId;
+        return {};
+    }
+
+    QList<FuseMetadata> existingChildren;
+    if (m_database && !parentId.isEmpty()) {
+        existingChildren = m_database->getFuseChildren(parentId);
+    }
+
+    QHash<QString, FuseFileMetadata> existingByFileId;
+    QSet<QString> incomingIds;
+    for (const FuseMetadata& existingChild : existingChildren) {
+        const FuseFileMetadata existing = fromDbMetadata(existingChild);
+        existingByFileId.insert(existing.fileId, existing);
+    }
+
+    QList<FuseFileMetadata> resolvedChildren;
+    resolvedChildren.reserve(children.size());
+    QSet<QString> claimedPaths;
+    for (const FuseFileMetadata& child : children) {
+        if (child.fileId.isEmpty()) {
+            continue;
+        }
+
+        incomingIds.insert(child.fileId);
+        FuseFileMetadata resolved = resolveRemoteMetadata(child, parentPath, existingByFileId,
+                                                          &claimedPaths, m_duplicateNameStrategy);
+        if (!resolved.isValid()) {
+            continue;
+        }
+
+        resolvedChildren.append(resolved);
+    }
+
+    if (m_database) {
+        QList<FuseMetadata> allEntries;
+        QSet<QString> staleRoots;
+        for (const FuseMetadata& existingChild : existingChildren) {
+            if (!incomingIds.contains(existingChild.fileId)) {
+                staleRoots.insert(normalizeMetadataPath(existingChild.path));
+            }
+        }
+
+        if (!staleRoots.isEmpty()) {
+            allEntries = m_database->getAllFuseMetadata();
+        }
+
+        QSet<QString> staleFileIds;
+        for (const FuseMetadata& entry : allEntries) {
+            const QString entryPath = normalizeMetadataPath(entry.path);
+            for (const QString& staleRoot : staleRoots) {
+                if (pathIsWithinSubtree(entryPath, staleRoot)) {
+                    staleFileIds.insert(entry.fileId);
+                    break;
+                }
+            }
+        }
+
+        for (const QString& staleRoot : staleRoots) {
+            const auto staleSelf =
+                std::find_if(existingChildren.cbegin(), existingChildren.cend(),
+                             [&staleRoot](const FuseMetadata& existingChild) {
+                                 return normalizeMetadataPath(existingChild.path) == staleRoot;
+                             });
+            if (staleSelf != existingChildren.cend()) {
+                staleFileIds.insert(staleSelf->fileId);
+            }
+        }
+
+        for (const QString& staleFileId : staleFileIds) {
+            removeByFileId(staleFileId);
+        }
+    }
+
+    setMetadataBatch(resolvedChildren);
+
+    {
+        QWriteLocker locker(&m_lock);
+        QList<QString> childPaths;
+        childPaths.reserve(resolvedChildren.size());
+        for (const FuseFileMetadata& child : resolvedChildren) {
+            childPaths.append(child.path);
+        }
+        m_parentToChildren[parentPath] = childPaths;
+        m_childrenCacheTime[parentPath] = QDateTime::currentDateTime();
+    }
+
+    return resolvedChildren;
 }
 
 void MetadataCache::removeFromDatabase(const QString& fileId) {
@@ -880,17 +1129,18 @@ QString MetadataCache::buildPathFromParents(const QString& fileId) const {
 }
 
 QString MetadataCache::getParentPath(const QString& path) {
-    if (path.isEmpty() || path == "/") {
+    const QString normalized = normalizeMetadataPath(path);
+    if (normalized.isEmpty() || normalized == "/") {
         return "/";
     }
 
-    int lastSlash = path.lastIndexOf('/');
+    const int lastSlash = normalized.lastIndexOf('/');
     if (lastSlash <= 0) {
         // Path is at root level (e.g., "/file.txt" or "file.txt")
         return "/";
     }
 
-    return path.left(lastSlash);
+    return normalized.left(lastSlash);
 }
 
 void MetadataCache::requestMetadataFromApi(const QString& fileId) {

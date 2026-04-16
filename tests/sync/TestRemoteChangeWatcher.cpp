@@ -6,6 +6,9 @@
  * skip logic, and error handling.
  */
 
+#include <QDir>
+#include <QFile>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -102,6 +105,9 @@ class TestRemoteChangeWatcher : public QObject {
     void testInterpretDeleteChange_Trashed();
     void testInterpretDeleteChange_Removed();
     void testInterpretModifyChange();
+    void testInterpretModifyChange_ReusesExistingDuplicateAlias();
+    void testInterpretModifyChange_UsesDuplicateFolderAliasForChild();
+    void testInterpretModifyChange_DisambiguatesAgainstLocalFile();
 
     // Skip logic
     void testSkipGoogleDoc();
@@ -137,6 +143,14 @@ void TestRemoteChangeWatcher::init() {
     m_originalHome = qgetenv("HOME");
     qputenv("HOME", m_tempDir->path().toUtf8());
     QStandardPaths::setTestModeEnabled(true);
+
+    const QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+
+    QSettings settings;
+    settings.setValue("sync/folder", syncDir);
+    settings.setValue("sync/duplicateNameStrategy", "file-id-suffix");
+    settings.sync();
 
     m_syncDatabase = new SyncDatabase();
     QVERIFY(m_syncDatabase->initialize());
@@ -346,6 +360,110 @@ void TestRemoteChangeWatcher::testInterpretModifyChange() {
     QCOMPARE(item.changeType, ChangeType::Modify);
     QCOMPARE(item.localPath, QString("hello.txt"));
     QCOMPARE(item.origin, ChangeOrigin::Remote);
+}
+
+void TestRemoteChangeWatcher::testInterpretModifyChange_ReusesExistingDuplicateAlias() {
+    m_syncDatabase->setFileId("hello_file-3.txt", "file-3");
+
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setNextToken("token-2");
+
+    DriveFile modifiedFile;
+    modifiedFile.id = "file-3";
+    modifiedFile.name = "hello.txt";
+    modifiedFile.mimeType = "text/plain";
+    modifiedFile.ownedByMe = true;
+    modifiedFile.parents = {"root-id"};
+    modifiedFile.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-3b";
+    change.fileId = "file-3";
+    change.removed = false;
+    change.file = modifiedFile;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+    m_watcher->start();
+
+    QSignalSpy changeSpy(m_watcher, &RemoteChangeWatcher::changeDetected);
+    m_watcher->checkNow();
+    QTRY_VERIFY(changeSpy.count() >= 1);
+
+    ChangeQueueItem item = m_changeQueue->dequeue();
+    QCOMPARE(item.localPath, QString("hello_file-3.txt"));
+}
+
+void TestRemoteChangeWatcher::testInterpretModifyChange_UsesDuplicateFolderAliasForChild() {
+    m_syncDatabase->setFileId("docs", "folder-1");
+    m_syncDatabase->setFileId("docs_folder-2", "folder-2");
+
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setNextToken("token-2");
+
+    DriveFile modifiedFile;
+    modifiedFile.id = "child-file";
+    modifiedFile.name = "note.txt";
+    modifiedFile.mimeType = "text/plain";
+    modifiedFile.ownedByMe = true;
+    modifiedFile.parents = {"folder-2"};
+    modifiedFile.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-folder-child";
+    change.fileId = "child-file";
+    change.removed = false;
+    change.file = modifiedFile;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+    m_watcher->start();
+
+    QSignalSpy changeSpy(m_watcher, &RemoteChangeWatcher::changeDetected);
+    m_watcher->checkNow();
+    QTRY_VERIFY(changeSpy.count() >= 1);
+
+    ChangeQueueItem item = m_changeQueue->dequeue();
+    QCOMPARE(item.localPath, QString("docs_folder-2/note.txt"));
+}
+
+void TestRemoteChangeWatcher::testInterpretModifyChange_DisambiguatesAgainstLocalFile() {
+    QSettings settings;
+    settings.setValue("sync/duplicateNameStrategy", "numeric-suffix");
+    settings.sync();
+
+    QFile existingFile(m_tempDir->filePath("sync/hello.txt"));
+    QVERIFY(existingFile.open(QIODevice::WriteOnly));
+    existingFile.write("local");
+    existingFile.close();
+
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setNextToken("token-2");
+
+    DriveFile modifiedFile;
+    modifiedFile.id = "file-4";
+    modifiedFile.name = "hello.txt";
+    modifiedFile.mimeType = "text/plain";
+    modifiedFile.ownedByMe = true;
+    modifiedFile.parents = {"root-id"};
+    modifiedFile.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-3c";
+    change.fileId = "file-4";
+    change.removed = false;
+    change.file = modifiedFile;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+    m_watcher->start();
+
+    QSignalSpy changeSpy(m_watcher, &RemoteChangeWatcher::changeDetected);
+    m_watcher->checkNow();
+    QTRY_VERIFY(changeSpy.count() >= 1);
+
+    ChangeQueueItem item = m_changeQueue->dequeue();
+    QCOMPARE(item.localPath, QString("hello (1).txt"));
 }
 
 // ---------------------------------------------------------------------------

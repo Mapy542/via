@@ -287,6 +287,33 @@ void SettingsWindow::setupSyncTab() {
 
     layout->addWidget(syncModeGroup);
 
+    QGroupBox* duplicateNamesGroup = new QGroupBox("Duplicate Remote Names", m_syncTab);
+    QVBoxLayout* duplicateNamesLayout = new QVBoxLayout(duplicateNamesGroup);
+
+    QLabel* duplicateNamesLabel =
+        new QLabel("Choose how Via names duplicate Drive files within one folder:", m_syncTab);
+    duplicateNamesLayout->addWidget(duplicateNamesLabel);
+
+    QHBoxLayout* duplicateComboLayout = new QHBoxLayout();
+    m_duplicateNameCombo = new QComboBox(m_syncTab);
+    m_duplicateNameCombo->addItem("Append Drive file ID (example: report_abcd1234.txt)",
+                                  "file-id-suffix");
+    m_duplicateNameCombo->addItem("Append numbered suffix (example: report (1).txt)",
+                                  "numeric-suffix");
+    duplicateComboLayout->addWidget(m_duplicateNameCombo);
+    duplicateComboLayout->addStretch();
+    duplicateNamesLayout->addLayout(duplicateComboLayout);
+
+    QLabel* duplicateInfoLabel = new QLabel(
+        "<i>The first file to claim a name keeps the original path. Additional duplicates are "
+        "given a unique local name when they are written locally.</i>",
+        m_syncTab);
+    duplicateInfoLabel->setWordWrap(true);
+    duplicateInfoLabel->setTextFormat(Qt::RichText);
+    duplicateNamesLayout->addWidget(duplicateInfoLabel);
+
+    layout->addWidget(duplicateNamesGroup);
+
     // Conflict resolution group
     QGroupBox* conflictGroup = new QGroupBox("Conflict Resolution", m_syncTab);
     QVBoxLayout* conflictLayout = new QVBoxLayout(conflictGroup);
@@ -506,6 +533,12 @@ void SettingsWindow::loadSettings() {
         setComboById(m_syncModeCombo, "keep-newest");
     }
 
+    QString duplicateStrategyId =
+        m_settings.value("sync/duplicateNameStrategy", "file-id-suffix").toString();
+    if (!setComboById(m_duplicateNameCombo, duplicateStrategyId)) {
+        setComboById(m_duplicateNameCombo, "file-id-suffix");
+    }
+
     // Conflict resolution setting (string IDs with numeric fallback)
     QString conflictId = m_settings.value("sync/conflictStrategy", "").toString();
     if (conflictId.isEmpty()) {
@@ -571,6 +604,7 @@ void SettingsWindow::loadSettings() {
     // Capture snapshots of restart-required settings
     m_originalSyncFolder = m_syncFolderEdit->text();
     m_originalSyncMode = m_syncModeCombo->currentData().toString();
+    m_originalDuplicateNameStrategy = m_duplicateNameCombo->currentData().toString();
     m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
     m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
     m_originalFuseMountPoint = m_fuseMountPointEdit->text();
@@ -581,6 +615,8 @@ void SettingsWindow::saveSettings() {
     // Sync settings
     m_settings.setValue("sync/folder", m_syncFolderEdit->text());
     m_settings.setValue("sync/syncMode", m_syncModeCombo->currentData().toString());
+    m_settings.setValue("sync/duplicateNameStrategy",
+                        m_duplicateNameCombo->currentData().toString());
     m_settings.setValue("sync/conflictStrategy",
                         m_conflictResolutionCombo->currentData().toString());
 
@@ -709,6 +745,8 @@ void SettingsWindow::onStorageInfoReceived(qint64 storageUsed, qint64 storageLim
 bool SettingsWindow::checkRestartRequired() const {
     if (m_syncFolderEdit->text() != m_originalSyncFolder) return true;
     if (m_syncModeCombo->currentData().toString() != m_originalSyncMode) return true;
+    if (m_duplicateNameCombo->currentData().toString() != m_originalDuplicateNameStrategy)
+        return true;
     if (m_conflictResolutionCombo->currentData().toString() != m_originalConflictStrategy)
         return true;
     if (m_syncSystemCombo->currentData().toString() != m_originalSyncSystem) return true;
@@ -744,6 +782,7 @@ void SettingsWindow::promptRestart() {
         // Update snapshots so the prompt doesn't re-trigger for the same change
         m_originalSyncFolder = m_syncFolderEdit->text();
         m_originalSyncMode = m_syncModeCombo->currentData().toString();
+        m_originalDuplicateNameStrategy = m_duplicateNameCombo->currentData().toString();
         m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
         m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
         m_originalFuseMountPoint = m_fuseMountPointEdit->text();

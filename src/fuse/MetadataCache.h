@@ -19,6 +19,8 @@
 #include <QReadWriteLock>
 #include <QString>
 
+#include "api/DriveFile.h"
+
 class SyncDatabase;
 class GoogleDriveClient;
 
@@ -33,6 +35,7 @@ struct FuseFileMetadata {
     QString fileId;          ///< Google Drive file ID
     QString path;            ///< Full path relative to mount point
     QString name;            ///< File/folder name
+    QString remoteName;      ///< Original Google Drive name before aliasing
     QString parentId;        ///< Parent folder's Google Drive file ID
     bool isFolder = false;   ///< Whether this is a folder
     qint64 size = 0;         ///< File size in bytes (0 for folders)
@@ -188,6 +191,22 @@ class MetadataCache : public QObject {
      * @return true if children are cached and not stale
      */
     bool hasChildrenCached(const QString& parentPath) const;
+
+    /**
+     * @brief Add or update a single remote metadata entry using duplicate-safe aliasing
+     * @param file Remote file metadata from Google Drive
+     * @return Stored metadata with resolved visible path, or invalid metadata if unresolved
+     */
+    FuseFileMetadata upsertRemoteMetadata(const DriveFile& file);
+
+    /**
+     * @brief Replace a directory's children from a remote listing using duplicate-safe aliasing
+     * @param parentId Parent folder ID
+     * @param files Full remote child listing for that parent
+     * @return Stored child metadata with resolved visible paths
+     */
+    QList<FuseFileMetadata> replaceRemoteChildren(const QString& parentId,
+                                                  const QList<DriveFile>& files);
 
     // ========================================
     // Cache modification
@@ -396,6 +415,29 @@ class MetadataCache : public QObject {
     void removeFromDatabase(const QString& fileId);
 
     /**
+     * @brief Resolve a parent file ID to a visible path
+     * @param parentId Parent folder ID
+     * @return Visible parent path, "/" for root, or empty if unresolved
+     */
+    QString resolveParentPath(const QString& parentId) const;
+
+    /**
+     * @brief Store a single remote metadata entry after path resolution
+     * @param metadata Remote metadata with original Drive name
+     * @return Stored metadata with resolved visible path, or invalid metadata if unresolved
+     */
+    FuseFileMetadata upsertRemoteMetadataInternal(const FuseFileMetadata& metadata);
+
+    /**
+     * @brief Replace a directory's children after path resolution input has been prepared
+     * @param parentId Parent folder ID
+     * @param children Remote child metadata with original Drive names
+     * @return Stored child metadata with resolved visible paths
+     */
+    QList<FuseFileMetadata> replaceRemoteChildrenInternal(const QString& parentId,
+                                                          const QList<FuseFileMetadata>& children);
+
+    /**
      * @brief Build path from file ID by traversing parent chain
      * @param fileId File ID to resolve
      * @return Full path or empty string if cannot resolve
@@ -432,6 +474,7 @@ class MetadataCache : public QObject {
 
     // Root folder ID for path resolution
     QString m_rootFolderId;
+    QString m_duplicateNameStrategy;
 
     // Configuration
     int m_maxCacheAgeSeconds;  ///< Default: 300 (5 minutes)
