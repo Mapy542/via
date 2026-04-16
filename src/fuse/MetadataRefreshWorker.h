@@ -78,9 +78,8 @@ class MetadataRefreshWorker : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit MetadataRefreshWorker(MetadataCache* metadataCache, FileCache* fileCache,
-                                   SyncDatabase* database, GoogleDriveClient* driveClient,
-                                   QObject* parent = nullptr);
+    explicit MetadataRefreshWorker(MetadataCache* metadataCache, FileCache* fileCache, SyncDatabase* database,
+                                   GoogleDriveClient* driveClient, QObject* parent = nullptr);
 
     ~MetadataRefreshWorker() override;
 
@@ -184,6 +183,13 @@ class MetadataRefreshWorker : public QObject {
      * @param changeType Type of change: "created", "modified", "deleted"
      */
     void changeProcessed(const QString& fileId, const QString& changeType);
+
+    /**
+     * @brief Emitted when a remote change is processed with display-ready info
+     * @param name Human-readable file/folder name
+     * @param changeType Type of change: "created", "modified", "deleted"
+     */
+    void changeProcessedDetailed(const QString& name, const QString& changeType);
 
     /**
      * @brief Emitted when refresh cycle completes

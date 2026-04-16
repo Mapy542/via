@@ -260,8 +260,7 @@ class FuseDriver : public QObject {
      * @param database Pointer to sync database (for FUSE-specific tables)
      * @param parent Parent QObject
      */
-    explicit FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database,
-                        QObject* parent = nullptr);
+    explicit FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, QObject* parent = nullptr);
 
     ~FuseDriver() override;
 
@@ -440,6 +439,56 @@ class FuseDriver : public QObject {
      */
     void uploadFinished(const QString& fileId, const QString& path);
 
+    // ====================================================================
+    // User-visible FUSE activity signals (for Recent Activity logging)
+    // ====================================================================
+
+    /**
+     * @brief Emitted when a dirty file upload fails
+     * @param path FUSE path
+     * @param error Error description
+     */
+    void fuseUploadFailed(const QString& path, const QString& error);
+
+    /**
+     * @brief Emitted when a new file is created via FUSE
+     * @param path FUSE path of the created file
+     */
+    void fuseFileCreated(const QString& path);
+
+    /**
+     * @brief Emitted when a new folder is created via FUSE
+     * @param path FUSE path of the created folder
+     */
+    void fuseFolderCreated(const QString& path);
+
+    /**
+     * @brief Emitted when a file or folder is trashed via FUSE
+     * @param path FUSE path of the trashed item
+     */
+    void fuseItemTrashed(const QString& path);
+
+    /**
+     * @brief Emitted when a file or folder is renamed via FUSE
+     * @param fromPath Original FUSE path
+     * @param toPath New FUSE path
+     */
+    void fuseItemRenamed(const QString& fromPath, const QString& toPath);
+
+    /**
+     * @brief Emitted when a file or folder is moved via FUSE
+     * @param fromPath Original FUSE path
+     * @param toPath New FUSE path
+     */
+    void fuseItemMoved(const QString& fromPath, const QString& toPath);
+
+    /**
+     * @brief Emitted when a remote change is detected with display-ready info
+     * @param name File or folder name
+     * @param changeType "created", "modified", or "deleted"
+     */
+    void fuseRemoteChange(const QString& name, const QString& changeType);
+
    private:
     // ========================================================================
     // FUSE Operation Callbacks (static, required by FUSE API)
@@ -466,8 +515,8 @@ class FuseDriver : public QObject {
      * 2. If not cached, query API for children
      * 3. Fill buffer with child names
      */
-    static int fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset,
-                           struct fuse_file_info* fi, enum fuse_readdir_flags flags);
+    static int fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi,
+                           enum fuse_readdir_flags flags);
 
     /**
      * @brief Open a file
@@ -488,8 +537,7 @@ class FuseDriver : public QObject {
      * 1. Read from cached file
      * 2. Update fuse_cache_entries.last_accessed
      */
-    static int fuseRead(const char* path, char* buf, size_t size, off_t offset,
-                        struct fuse_file_info* fi);
+    static int fuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
 
     /**
      * @brief Write file data
@@ -500,8 +548,7 @@ class FuseDriver : public QObject {
      * 3. Record in fuse_dirty_files
      * 4. Upload is deferred to DirtySyncWorker
      */
-    static int fuseWrite(const char* path, const char* buf, size_t size, off_t offset,
-                         struct fuse_file_info* fi);
+    static int fuseWrite(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
 
     /**
      * @brief Release (close) a file
@@ -609,8 +656,7 @@ class FuseDriver : public QObject {
     /**
      * @brief Set file timestamps (M5 no-op stub)
      */
-    static int fuseUtimens(const char* path, const struct timespec tv[2],
-                           struct fuse_file_info* fi);
+    static int fuseUtimens(const char* path, const struct timespec tv[2], struct fuse_file_info* fi);
 
     // ========================================================================
     // Internal Helper Methods
