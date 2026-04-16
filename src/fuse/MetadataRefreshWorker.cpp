@@ -9,9 +9,11 @@
 
 #include <QDebug>
 #include <QMutexLocker>
+#include <QSettings>
 
 #include "FileCache.h"
 #include "MetadataCache.h"
+#include "NativeDocPolicy.h"
 #include "api/DriveChange.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
@@ -357,12 +359,18 @@ bool MetadataRefreshWorker::shouldProcess(const DriveFile& file) const {
         return false;
     }
 
-    // Skip Google Workspace files (Docs, Sheets, etc.) - they can't be downloaded as binary files.
-    // Note: isGoogleDoc() checks mimeType.startsWith("application/vnd.google-apps.")
-    // However, folders (application/vnd.google-apps.folder) and shortcuts should still be processed
-    // since they don't require downloading actual file content.
+    // Google Workspace files (Docs, Sheets, etc.) are handled based on the
+    // native-doc serving mode.  In "hide" mode they are skipped entirely;
+    // in other modes the policy helper decides per-type visibility.
     if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
-        return false;
+        QSettings settings;
+        NativeDocMode mode =
+            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        if (mode == NativeDocMode::Hide) {
+            return false;
+        }
+        NativeDocRepresentation rep = nativeDocRepresentation(file.mimeType, mode);
+        return rep.visible;
     }
 
     // Skip trashed files (handled separately via change.removed)

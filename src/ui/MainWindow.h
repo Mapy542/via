@@ -103,6 +103,14 @@ class MainWindow : public QMainWindow {
      */
     void logoutRequested();
 
+    /**
+     * @brief Emitted when the user accepts a settings-driven restart
+     *
+     * Connected in main.cpp to orchestrate safe FUSE unmount,
+     * pending purge flags, relaunch, and quit.
+     */
+    void restartRequested();
+
    protected:
     /**
      * @brief Handle window close event

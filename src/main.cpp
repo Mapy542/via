@@ -9,11 +9,14 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDebug>
+#include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QMessageBox>
 #include <QNetworkInformation>
+#include <QProcess>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
@@ -39,6 +42,7 @@
 #include "ui/SystemTrayManager.h"
 #include "utils/AutostartManager.h"
 #include "utils/LogManager.h"
+#include "utils/NativeDocShortcutHandler.h"
 #include "utils/NotificationManager.h"
 #include "utils/SuspendMonitor.h"
 #include "utils/ThemeHelper.h"
@@ -99,6 +103,57 @@ bool pathsOverlap(const QString& pathA, const QString& pathB) {
     }
 
     return a.startsWith(b + "/") || b.startsWith(a + "/");
+}
+
+int handleNativeDocShortcutLaunch(const QStringList& arguments) {
+    int shortcutArgs = 0;
+    int openedCount = 0;
+    QStringList failures;
+
+    for (int index = 1; index < arguments.size(); ++index) {
+        const QString arg = arguments.at(index);
+        if (arg.startsWith(QLatin1Char('-'))) {
+            continue;
+        }
+
+        const QFileInfo fileInfo(arg);
+        if (!fileInfo.exists() || !fileInfo.isFile()) {
+            continue;
+        }
+
+        const QString absolutePath = fileInfo.absoluteFilePath();
+        if (!isNativeDocShortcutPath(absolutePath)) {
+            continue;
+        }
+
+        ++shortcutArgs;
+
+        QString parseError;
+        const auto shortcut = parseNativeDocShortcutFile(absolutePath, &parseError);
+        if (!shortcut.has_value()) {
+            failures << QStringLiteral("%1: %2").arg(fileInfo.fileName(), parseError);
+            continue;
+        }
+
+        if (!QDesktopServices::openUrl(shortcut->url)) {
+            failures << QStringLiteral("%1: failed to open %2")
+                            .arg(fileInfo.fileName(), shortcut->url.toString());
+            continue;
+        }
+
+        ++openedCount;
+    }
+
+    if (shortcutArgs == 0) {
+        return -1;
+    }
+
+    if (!failures.isEmpty()) {
+        QMessageBox::warning(nullptr, QStringLiteral("Unable to open native document"),
+                             failures.join(QLatin1Char('\n')));
+    }
+
+    return openedCount > 0 ? 0 : 1;
 }
 
 void startFuseComponent(FuseDriver* fuseDriver, const QString& syncFolder) {
@@ -202,6 +257,11 @@ int main(int argc, char* argv[]) {
     // Install desktop integration (desktop file, icon, autostart sync)
     AutostartManager::installDesktopIntegration();
 
+    const int nativeDocOpenExit = handleNativeDocShortcutLaunch(QCoreApplication::arguments());
+    if (nativeDocOpenExit >= 0) {
+        return nativeDocOpenExit;
+    }
+
     // Initialize token storage
     TokenStorage tokenStorage;
 
@@ -245,11 +305,47 @@ int main(int argc, char* argv[]) {
         settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse").toString();
     const qint64 cacheSizeMb = settings.value("advanced/cacheSize", 5000).toLongLong();
 
+    // Ensure previousNativeDocMode is seeded on first run so the restart
+    // handler can detect mode changes by comparing current vs previous.
+    if (!settings.contains("advanced/previousNativeDocMode")) {
+        settings.setValue("advanced/previousNativeDocMode",
+                          settings.value("advanced/nativeDocMode", "hide").toString());
+    }
+
     FuseDriver fuseDriver(&driveClient, &syncDatabase);
     if (!fuseMountPoint.isEmpty()) {
         fuseDriver.setMountPoint(fuseMountPoint);
     }
     fuseDriver.setMaxCacheSizeBytes(cacheSizeMb * 1024LL * 1024LL);
+
+    // Consume pending FUSE representation reset flag (set on previous
+    // restart when native-doc serving mode changed).  This clears
+    // fuse_metadata, fuse_cache_entries, and fuse_sync_state plus the
+    // on-disk cache directory so the mount rebuilds from scratch.
+    if (fuseEnabled && settings.value("advanced/pendingFuseRepresentationReset", false).toBool()) {
+        qInfo() << "Pending FUSE representation reset detected — purging caches";
+        syncDatabase.clearFuseRepresentationState();
+
+        // Purge on-disk FUSE cache directory
+        QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        QDir cacheDir(cachePath);
+        if (cacheDir.exists()) {
+            for (const QString& entry :
+                 cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
+                QString fullPath = cacheDir.filePath(entry);
+                QFileInfo fi(fullPath);
+                if (fi.isDir()) {
+                    QDir(fullPath).removeRecursively();
+                } else {
+                    QFile::remove(fullPath);
+                }
+            }
+            qInfo() << "On-disk FUSE cache purged:" << cachePath;
+        }
+
+        settings.remove("advanced/pendingFuseRepresentationReset");
+        settings.sync();
+    }
 
     // Initialize sync components (Change Queue, Sync Action Queue, Watchers, Processor)
     ChangeQueue changeQueue;
@@ -326,6 +422,22 @@ int main(int argc, char* argv[]) {
     // Initialize system tray manager
     SystemTrayManager trayManager(&authManager, &syncActionQueue, &changeProcessor);
     trayManager.show();
+
+    // Surface export failures (e.g. Drive 10 MB export limit) as tray notifications
+    QObject::connect(
+        &driveClient, &GoogleDriveClient::errorDetailed, &trayManager,
+        [&trayManager](const QString& operation, const QString& errorMsg, int httpStatus,
+                       const QString& /*fileId*/, const QString& /*localPath*/) {
+            if (!operation.startsWith(QLatin1String("exportFile"))) return;
+            QString detail = errorMsg;
+            if (httpStatus == 403) {
+                detail = QStringLiteral(
+                    "Google limits native doc exports to 10 MB. "
+                    "Open the document in your browser instead.");
+            }
+            trayManager.showNotification(QStringLiteral("Export Failed"), detail,
+                                         QSystemTrayIcon::Warning);
+        });
 
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
@@ -542,6 +654,34 @@ int main(int argc, char* argv[]) {
                 mainWindow.addRecentActivity("Signed out");
                 authManager.logout();
             }
+        });
+
+    // Handle restart requests from the settings dialog.  Check whether the
+    // native-doc serving mode changed and, if so, set a pending flag that
+    // will be consumed on the next startup to purge FUSE representation state.
+    QObject::connect(
+        &mainWindow, &MainWindow::restartRequested, &app, [&fuseDriver, fuseEnabled, &settings]() {
+            // Detect whether the native-doc mode changed since the settings
+            // have already been saved to QSettings by the time this fires.
+            const QString currentMode = settings.value("advanced/nativeDocMode", "hide").toString();
+            const QString previousMode =
+                settings.value("advanced/previousNativeDocMode", "hide").toString();
+            if (currentMode != previousMode) {
+                settings.setValue("advanced/pendingFuseRepresentationReset", true);
+            }
+            // Record the new mode as "previous" for next comparison.
+            settings.setValue("advanced/previousNativeDocMode", currentMode);
+            settings.sync();
+
+            // Safe FUSE unmount (flushes dirty files, stops workers, clears caches)
+            if (fuseEnabled && fuseDriver.isMounted()) {
+                fuseDriver.unmount();
+            }
+
+            // Relaunch and quit
+            QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                    QCoreApplication::arguments());
+            QCoreApplication::quit();
         });
 
     // Connect tray "Sync Now" to full sync (only when mirror sync is enabled)

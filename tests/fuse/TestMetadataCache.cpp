@@ -14,6 +14,7 @@
 
 #include "api/GoogleDriveClient.h"
 #include "fuse/MetadataCache.h"
+#include "fuse/NativeDocPolicy.h"
 #include "sync/SyncDatabase.h"
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,13 @@ class TestMetadataCache : public QObject {
     // Edge cases
     void testGetByPath_UnknownReturnsInvalid();
     void testGetByFileId_UnknownReturnsInvalid();
+
+    // NativeDocPolicy
+    void testNativeDocPolicy_HideMode_AllInvisible();
+    void testNativeDocPolicy_BrowserShortcut_DocsSheetsSlides();
+    void testNativeDocPolicy_OpenDocument_MapsCorrectly();
+    void testNativeDocPolicy_Text_MapsCorrectly();
+    void testNativeDocPolicy_UnsupportedTypes_HiddenInExportModes();
 
    private:
     QTemporaryDir* m_tempDir = nullptr;
@@ -356,6 +364,89 @@ void TestMetadataCache::testGetByPath_UnknownReturnsInvalid() {
 
 void TestMetadataCache::testGetByFileId_UnknownReturnsInvalid() {
     QVERIFY(!m_cache->getMetadataByFileId("no_such_id").isValid());
+}
+
+// ---------------------------------------------------------------------------
+// NativeDocPolicy
+// ---------------------------------------------------------------------------
+void TestMetadataCache::testNativeDocPolicy_HideMode_AllInvisible() {
+    auto r = nativeDocRepresentation("application/vnd.google-apps.document", NativeDocMode::Hide);
+    QVERIFY(!r.visible);
+    r = nativeDocRepresentation("application/vnd.google-apps.spreadsheet", NativeDocMode::Hide);
+    QVERIFY(!r.visible);
+}
+
+void TestMetadataCache::testNativeDocPolicy_BrowserShortcut_DocsSheetsSlides() {
+    auto doc = nativeDocRepresentation("application/vnd.google-apps.document",
+                                       NativeDocMode::BrowserShortcut);
+    QVERIFY(doc.visible);
+    QCOMPARE(doc.extension, QString(".gdoc"));
+    QVERIFY(doc.synthetic);
+
+    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet",
+                                         NativeDocMode::BrowserShortcut);
+    QVERIFY(sheet.visible);
+    QCOMPARE(sheet.extension, QString(".gsheet"));
+
+    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation",
+                                          NativeDocMode::BrowserShortcut);
+    QVERIFY(slides.visible);
+    QCOMPARE(slides.extension, QString(".gslides"));
+}
+
+void TestMetadataCache::testNativeDocPolicy_OpenDocument_MapsCorrectly() {
+    auto doc = nativeDocRepresentation("application/vnd.google-apps.document",
+                                       NativeDocMode::OpenDocument);
+    QVERIFY(doc.visible);
+    QCOMPARE(doc.extension, QString(".odt"));
+    QCOMPARE(doc.outputMimeType, QString("application/vnd.oasis.opendocument.text"));
+    QVERIFY(!doc.synthetic);
+
+    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet",
+                                         NativeDocMode::OpenDocument);
+    QVERIFY(sheet.visible);
+    QCOMPARE(sheet.extension, QString(".ods"));
+
+    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation",
+                                          NativeDocMode::OpenDocument);
+    QVERIFY(slides.visible);
+    QCOMPARE(slides.extension, QString(".odp"));
+}
+
+void TestMetadataCache::testNativeDocPolicy_Text_MapsCorrectly() {
+    auto doc = nativeDocRepresentation("application/vnd.google-apps.document", NativeDocMode::Text);
+    QVERIFY(doc.visible);
+    QCOMPARE(doc.extension, QString(".md"));
+    QCOMPARE(doc.outputMimeType, QString("text/markdown"));
+
+    auto sheet =
+        nativeDocRepresentation("application/vnd.google-apps.spreadsheet", NativeDocMode::Text);
+    QVERIFY(sheet.visible);
+    QCOMPARE(sheet.extension, QString(".csv"));
+
+    auto slides =
+        nativeDocRepresentation("application/vnd.google-apps.presentation", NativeDocMode::Text);
+    QVERIFY(slides.visible);
+    QCOMPARE(slides.extension, QString(".txt"));
+}
+
+void TestMetadataCache::testNativeDocPolicy_UnsupportedTypes_HiddenInExportModes() {
+    // Drawings, Forms, Scripts have no OpenDocument/Text export
+    auto drawing =
+        nativeDocRepresentation("application/vnd.google-apps.drawing", NativeDocMode::OpenDocument);
+    QVERIFY(!drawing.visible);
+
+    auto form = nativeDocRepresentation("application/vnd.google-apps.form", NativeDocMode::Text);
+    QVERIFY(!form.visible);
+
+    auto script =
+        nativeDocRepresentation("application/vnd.google-apps.script", NativeDocMode::OpenDocument);
+    QVERIFY(!script.visible);
+
+    // But they should be visible in browser-shortcut mode
+    auto drawingBrowser = nativeDocRepresentation("application/vnd.google-apps.drawing",
+                                                  NativeDocMode::BrowserShortcut);
+    QVERIFY(drawingBrowser.visible);
 }
 
 QTEST_MAIN(TestMetadataCache)

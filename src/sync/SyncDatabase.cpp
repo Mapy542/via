@@ -62,6 +62,17 @@ FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
     metadata.isFolder = query.value("is_folder").toInt() == 1;
     metadata.size = query.value("size").toLongLong();
     metadata.mimeType = query.value("mime_type").toString();
+
+    const int remoteMimeIndex = query.record().indexOf("remote_mime_type");
+    if (remoteMimeIndex >= 0) {
+        metadata.remoteMimeType = query.value(remoteMimeIndex).toString();
+    }
+
+    const int webViewIndex = query.record().indexOf("web_view_link");
+    if (webViewIndex >= 0) {
+        metadata.webViewLink = query.value(webViewIndex).toString();
+    }
+
     metadata.createdTime =
         QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
     metadata.modifiedTime =
@@ -1164,6 +1175,16 @@ bool SyncDatabase::createFuseTables() {
         return false;
     }
 
+    if (!addColumnIfMissing(m_db, "fuse_metadata", "remote_mime_type TEXT")) {
+        logError("createFuseTables (fuse_metadata.remote_mime_type)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "fuse_metadata", "web_view_link TEXT")) {
+        logError("createFuseTables (fuse_metadata.web_view_link)", query.lastError().text());
+        return false;
+    }
+
     // FUSE dirty files table
     QString createFuseDirtyFilesTable = R"(
         CREATE TABLE IF NOT EXISTS fuse_dirty_files (
@@ -1266,9 +1287,10 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
 
     query.prepare(R"(
         INSERT OR REPLACE INTO fuse_metadata 
-        (file_id, path, name, remote_name, parent_id, is_folder, size, mime_type, 
+        (file_id, path, name, remote_name, parent_id, is_folder, size, mime_type,
+         remote_mime_type, web_view_link,
          created_time, modified_time, cached_at, last_accessed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )");
 
     query.addBindValue(metadata.fileId);
@@ -1279,6 +1301,8 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
     query.addBindValue(metadata.isFolder ? 1 : 0);
     query.addBindValue(metadata.size);
     query.addBindValue(metadata.mimeType);
+    query.addBindValue(metadata.remoteMimeType);
+    query.addBindValue(metadata.webViewLink);
     query.addBindValue(metadata.createdTime.toString(Qt::ISODate));
     query.addBindValue(metadata.modifiedTime.toString(Qt::ISODate));
     query.addBindValue(metadata.cachedAt.toString(Qt::ISODate));
@@ -1614,5 +1638,24 @@ bool SyncDatabase::clearAllData() {
     }
 
     qInfo() << "SyncDatabase: all user data cleared (account sign-out)";
+    return true;
+}
+
+bool SyncDatabase::clearFuseRepresentationState() {
+    QMutexLocker locker(&m_mutex);
+
+    static const char* tables[] = {"fuse_metadata", "fuse_cache_entries", "fuse_sync_state"};
+    QSqlQuery query(m_db);
+    for (const char* table : tables) {
+        QString sql = QStringLiteral("DELETE FROM %1").arg(QLatin1String(table));
+        if (!query.exec(sql)) {
+            logError("clearFuseRepresentationState",
+                     QStringLiteral("Failed to clear %1: %2")
+                         .arg(QLatin1String(table), query.lastError().text()));
+            return false;
+        }
+    }
+
+    qInfo() << "SyncDatabase: FUSE representation state cleared (mode change)";
     return true;
 }

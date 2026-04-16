@@ -73,6 +73,9 @@ struct FuseMetadata {
     bool isFolder;           ///< Whether this is a folder
     qint64 size;             ///< File size in bytes
     QString mimeType;        ///< MIME type
+    QString remoteMimeType;  ///< Original Google-native MIME type (e.g.
+                             ///< application/vnd.google-apps.document)
+    QString webViewLink;     ///< Google Drive web view URL
     QDateTime createdTime;   ///< Creation timestamp
     QDateTime modifiedTime;  ///< Last modification timestamp
     QDateTime cachedAt;      ///< When metadata was cached
@@ -491,6 +494,18 @@ class SyncDatabase : public QObject {
      * @return true if all tables were cleared successfully
      */
     bool clearAllData();
+
+    /**
+     * @brief Clear FUSE representation state for mode-change restart
+     *
+     * Clears fuse_metadata, fuse_cache_entries, and fuse_sync_state so
+     * the FUSE mount rebuilds from scratch under the new serving mode.
+     * Does NOT touch fuse_dirty_files (those should be flushed before
+     * calling this) or any mirror-sync tables.
+     *
+     * @return true if all three tables were cleared successfully
+     */
+    bool clearFuseRepresentationState();
 
     /**
      * @brief Get FUSE sync state value

@@ -15,10 +15,14 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QProcess>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QString>
+#include <QStringList>
 #include <QTextStream>
+
+#include "NativeDocShortcutHandler.h"
 
 /**
  * @class AutostartManager
@@ -39,8 +43,12 @@ class AutostartManager {
     static void installDesktopIntegration() {
         QString execPath = resolveExecPath();
 
-        installDesktopFile(execPath);
+        const bool desktopUpdated = installDesktopFile(execPath);
+        const bool mimeUpdated = installMimePackage();
         installIcon();
+        if (desktopUpdated || mimeUpdated) {
+            refreshDesktopDatabases();
+        }
         syncAutostart();
     }
 
@@ -92,30 +100,70 @@ class AutostartManager {
      * @param autostart If true, include X-GNOME-Autostart-enabled=true
      * @return true on success
      */
-    static bool writeDesktopEntry(const QString& path, const QString& execPath, bool autostart) {
+    static bool writeDesktopEntry(const QString& path, const QString& execPath, bool autostart,
+                                  bool* changedOut = nullptr) {
+        const QString content = desktopEntryContent(execPath, autostart);
+
+        QFile existing(path);
+        if (existing.exists() && existing.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString currentContent = QString::fromUtf8(existing.readAll());
+            existing.close();
+            if (currentContent == content) {
+                if (changedOut) {
+                    *changedOut = false;
+                }
+                return true;
+            }
+        }
+
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
             return false;
         }
 
         QTextStream out(&file);
+        out << content;
+
+        file.close();
+        if (changedOut) {
+            *changedOut = true;
+        }
+        return true;
+    }
+
+    static QString desktopEntryContent(const QString& execPath, bool autostart) {
+        QString execField = escapeDesktopExec(execPath);
+        if (!autostart) {
+            execField += QStringLiteral(" %F");
+        }
+
+        QString content;
+        QTextStream out(&content);
         out << "[Desktop Entry]\n";
         out << "Name=Via\n";
         out << "GenericName=Cloud Storage Client\n";
         out << "Comment=Google Drive desktop client for Linux\n";
-        out << "Exec=" << execPath << "\n";
+        out << "Exec=" << execField << "\n";
         out << "Icon=via\n";
         out << "Terminal=false\n";
         out << "Type=Application\n";
         out << "Categories=Network;FileTransfer;\n";
         out << "Keywords=google;drive;cloud;sync;storage;\n";
         out << "StartupWMClass=via\n";
+        if (!autostart) {
+            out << "MimeType=" << nativeDocDesktopMimeTypesField() << "\n";
+        }
         if (autostart) {
             out << "X-GNOME-Autostart-enabled=true\n";
         }
+        return content;
+    }
 
-        file.close();
-        return true;
+    static QString escapeDesktopExec(const QString& execPath) {
+        QString escaped = execPath;
+        escaped.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
+        escaped.replace(QStringLiteral("\""), QStringLiteral("\\\""));
+        return QStringLiteral("\"") + escaped + QStringLiteral("\"");
     }
 
     /**
@@ -124,34 +172,89 @@ class AutostartManager {
      * Always writes the file so the Exec= path stays correct if the
      * user moves the AppImage.
      */
-    static void installDesktopFile(const QString& execPath) {
+    static bool installDesktopFile(const QString& execPath) {
         QString appsDir =
             QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/applications";
 
         QDir dir;
         if (!dir.mkpath(appsDir)) {
             qWarning("AutostartManager: cannot create %s", qPrintable(appsDir));
-            return;
+            return false;
         }
 
         QString desktopPath = appsDir + "/via.desktop";
 
-        // Check if file already exists with correct Exec= path
-        if (QFile::exists(desktopPath)) {
-            QFile existing(desktopPath);
-            if (existing.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                QString content = existing.readAll();
-                existing.close();
-                if (content.contains("Exec=" + execPath + "\n")) {
-                    return;  // Already up-to-date
-                }
+        bool changed = false;
+        if (writeDesktopEntry(desktopPath, execPath, false, &changed)) {
+            if (changed) {
+                qInfo("AutostartManager: installed desktop file to %s", qPrintable(desktopPath));
+            }
+            return changed;
+        } else {
+            qWarning("AutostartManager: failed to write %s", qPrintable(desktopPath));
+            return false;
+        }
+    }
+
+    static bool installMimePackage() {
+        const QString mimePackagesDir =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+            "/mime/packages";
+
+        QDir dir;
+        if (!dir.mkpath(mimePackagesDir)) {
+            qWarning("AutostartManager: cannot create %s", qPrintable(mimePackagesDir));
+            return false;
+        }
+
+        const QString mimePackagePath = mimePackagesDir + "/via-native-docs.xml";
+        const QString content = nativeDocMimePackageXml();
+
+        QFile existing(mimePackagePath);
+        if (existing.exists() && existing.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString currentContent = QString::fromUtf8(existing.readAll());
+            existing.close();
+            if (currentContent == content) {
+                return false;
             }
         }
 
-        if (writeDesktopEntry(desktopPath, execPath, false)) {
-            qInfo("AutostartManager: installed desktop file to %s", qPrintable(desktopPath));
-        } else {
-            qWarning("AutostartManager: failed to write %s", qPrintable(desktopPath));
+        QFile file(mimePackagePath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            qWarning("AutostartManager: failed to write %s", qPrintable(mimePackagePath));
+            return false;
+        }
+
+        QTextStream out(&file);
+        out << content;
+        file.close();
+
+        qInfo("AutostartManager: installed MIME package to %s", qPrintable(mimePackagePath));
+        return true;
+    }
+
+    static void refreshDesktopDatabases() {
+        const QString dataDir =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+        const QString appsDir = dataDir + "/applications";
+        const QString mimeDir = dataDir + "/mime";
+
+        const QString updateDesktopDatabase =
+            QStandardPaths::findExecutable(QStringLiteral("update-desktop-database"));
+        if (!updateDesktopDatabase.isEmpty()) {
+            const int rc = QProcess::execute(updateDesktopDatabase, {appsDir});
+            if (rc != 0) {
+                qWarning("AutostartManager: update-desktop-database failed (%d)", rc);
+            }
+        }
+
+        const QString updateMimeDatabase =
+            QStandardPaths::findExecutable(QStringLiteral("update-mime-database"));
+        if (!updateMimeDatabase.isEmpty()) {
+            const int rc = QProcess::execute(updateMimeDatabase, {mimeDir});
+            if (rc != 0) {
+                qWarning("AutostartManager: update-mime-database failed (%d)", rc);
+            }
         }
     }
 

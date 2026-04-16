@@ -28,8 +28,9 @@
 #include "utils/NotificationManager.h"
 #include "utils/ThemeHelper.h"
 
-MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient, SyncActionQueue* syncActionQueue,
-                       ChangeProcessor* changeProcessor, SyncActionThread* syncActionThread, FullSync* fullSync,
+MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
+                       SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
+                       SyncActionThread* syncActionThread, FullSync* fullSync,
                        NotificationManager* notificationManager, QWidget* parent)
     : QMainWindow(parent),
       m_authManager(authManager),
@@ -236,41 +237,42 @@ void MainWindow::setupMenuBar() {
 
     QAction* aboutAction = helpMenu->addAction("About");
     connect(aboutAction, &QAction::triggered, this, [this]() {
-        QMessageBox::about(this, "About Via",
-                           "<h2>Via</h2>"
-                           "<p>Version " +
-                               qApp->applicationVersion() +
-                               "</p>"
-                               "<p>A Google Drive desktop client for Linux. Not affiliated with Google or Google "
-                               "Drive.</p>"
-                               "<p>Features:</p>"
-                               "<ul>"
-                               "<li>Bidirectional file synchronization</li>"
-                               "<li>Virtual file system (FUSE)</li>"
-                               "<li>Conflict resolution</li>"
-                               "<li>Offline file access</li>"
-                               "</ul>"
-                               "<hr>"
-                               "<p><b>Open-Source Licenses</b></p>"
-                               "<p>This application is built with the "
-                               "<a href=\"https://www.qt.io/\">Qt Framework</a>, used under the "
-                               "<a href=\"https://www.gnu.org/licenses/lgpl-3.0.html\">GNU LGPL v3.0</a> license. "
-                               "Qt source code is available at "
-                               "<a href=\"https://code.qt.io/\">code.qt.io</a>. "
-                               "Qt libraries are dynamically linked; you may re-link against your own "
-                               "Qt build. No modifications have been made to the Qt source code.</p>"
-                               "<p>Icons derived from <a href=\"https://github.com/KDE/breeze-icons\">Breeze "
-                               "Icons</a> "
-                               "by the KDE Community, licensed under "
-                               "<a href=\"https://www.gnu.org/licenses/lgpl-3.0.html\">LGPL-3.0</a>.</p>"
-                               "<p>FUSE support via <a href=\"https://github.com/libfuse/libfuse\">libfuse</a>, "
-                               "licensed under "
-                               "<a href=\"https://www.gnu.org/licenses/lgpl-2.1.html\">LGPL-2.1</a>.</p>"
-                               "<p>This application is licensed under the "
-                               "<a href=\"https://opensource.org/licenses/MIT\">MIT License</a>.</p>"
-                               "<hr>"
-                               "<p><a href=\"https://github.com/Mapy542/Via\">Source Code on GitHub</a></p>"
-                               "<p>&copy; 2024 Via Contributors</p>");
+        QMessageBox::about(
+            this, "About Via",
+            "<h2>Via</h2>"
+            "<p>Version " +
+                qApp->applicationVersion() +
+                "</p>"
+                "<p>A Google Drive desktop client for Linux. Not affiliated with Google or Google "
+                "Drive.</p>"
+                "<p>Features:</p>"
+                "<ul>"
+                "<li>Bidirectional file synchronization</li>"
+                "<li>Virtual file system (FUSE)</li>"
+                "<li>Conflict resolution</li>"
+                "<li>Offline file access</li>"
+                "</ul>"
+                "<hr>"
+                "<p><b>Open-Source Licenses</b></p>"
+                "<p>This application is built with the "
+                "<a href=\"https://www.qt.io/\">Qt Framework</a>, used under the "
+                "<a href=\"https://www.gnu.org/licenses/lgpl-3.0.html\">GNU LGPL v3.0</a> license. "
+                "Qt source code is available at "
+                "<a href=\"https://code.qt.io/\">code.qt.io</a>. "
+                "Qt libraries are dynamically linked; you may re-link against your own "
+                "Qt build. No modifications have been made to the Qt source code.</p>"
+                "<p>Icons derived from <a href=\"https://github.com/KDE/breeze-icons\">Breeze "
+                "Icons</a> "
+                "by the KDE Community, licensed under "
+                "<a href=\"https://www.gnu.org/licenses/lgpl-3.0.html\">LGPL-3.0</a>.</p>"
+                "<p>FUSE support via <a href=\"https://github.com/libfuse/libfuse\">libfuse</a>, "
+                "licensed under "
+                "<a href=\"https://www.gnu.org/licenses/lgpl-2.1.html\">LGPL-2.1</a>.</p>"
+                "<p>This application is licensed under the "
+                "<a href=\"https://opensource.org/licenses/MIT\">MIT License</a>.</p>"
+                "<hr>"
+                "<p><a href=\"https://github.com/Mapy542/Via\">Source Code on GitHub</a></p>"
+                "<p>&copy; 2024 Via Contributors</p>");
     });
 }
 
@@ -285,67 +287,75 @@ void MainWindow::connectSignals() {
 
     // Auth manager connections
     if (m_authManager) {
-        connect(m_authManager, &GoogleAuthManager::authenticated, this, [this]() { updateAuthState(true); });
-        connect(m_authManager, &GoogleAuthManager::loggedOut, this, [this]() { updateAuthState(false); });
-        connect(m_authManager, &GoogleAuthManager::authenticationError, this, [this](const QString& error) {
-            QMessageBox::warning(this, "Authentication Error", error);
-            addRecentActivity("Authentication failed: " + error);
-        });
-        connect(m_authManager, &GoogleAuthManager::tokenRefreshError, this,
-                [this](const QString& error) { addRecentActivity("Token refresh error: " + error); });
+        connect(m_authManager, &GoogleAuthManager::authenticated, this,
+                [this]() { updateAuthState(true); });
+        connect(m_authManager, &GoogleAuthManager::loggedOut, this,
+                [this]() { updateAuthState(false); });
+        connect(m_authManager, &GoogleAuthManager::authenticationError, this,
+                [this](const QString& error) {
+                    QMessageBox::warning(this, "Authentication Error", error);
+                    addRecentActivity("Authentication failed: " + error);
+                });
+        connect(
+            m_authManager, &GoogleAuthManager::tokenRefreshError, this,
+            [this](const QString& error) { addRecentActivity("Token refresh error: " + error); });
     }
 
     // SyncActionQueue and ChangeProcessor connections
     if (m_syncActionQueue) {
-        connect(m_syncActionQueue, &SyncActionQueue::itemEnqueued, this, [this](const SyncActionItem& item) {
-            switch (item.actionType) {
-                case SyncActionType::Upload:
-                    addRecentActivity("Queued upload: " + item.localPath);
-                    break;
-                case SyncActionType::Download:
-                    addRecentActivity("Queued download: " + item.localPath);
-                    break;
-                case SyncActionType::DeleteLocal:
-                case SyncActionType::DeleteRemote:
-                    addRecentActivity("Queued delete: " + item.localPath);
-                    break;
-                case SyncActionType::TrashRemote:
-                    addRecentActivity("Queued trash: " + item.localPath);
-                    break;
-                case SyncActionType::MoveLocal:
-                case SyncActionType::MoveRemote:
-                    addRecentActivity("Queued move: " + item.localPath);
-                    break;
-                case SyncActionType::RenameLocal:
-                case SyncActionType::RenameRemote:
-                    addRecentActivity("Queued rename: " + item.localPath);
-                    break;
-            }
-            if (m_syncActionQueue) {
-                updatePendingActions(m_syncActionQueue->count());
-            }
-        });
-        connect(m_syncActionQueue, &SyncActionQueue::queueEmpty, this, [this]() { updatePendingActions(0); });
+        connect(m_syncActionQueue, &SyncActionQueue::itemEnqueued, this,
+                [this](const SyncActionItem& item) {
+                    switch (item.actionType) {
+                        case SyncActionType::Upload:
+                            addRecentActivity("Queued upload: " + item.localPath);
+                            break;
+                        case SyncActionType::Download:
+                            addRecentActivity("Queued download: " + item.localPath);
+                            break;
+                        case SyncActionType::DeleteLocal:
+                        case SyncActionType::DeleteRemote:
+                            addRecentActivity("Queued delete: " + item.localPath);
+                            break;
+                        case SyncActionType::TrashRemote:
+                            addRecentActivity("Queued trash: " + item.localPath);
+                            break;
+                        case SyncActionType::MoveLocal:
+                        case SyncActionType::MoveRemote:
+                            addRecentActivity("Queued move: " + item.localPath);
+                            break;
+                        case SyncActionType::RenameLocal:
+                        case SyncActionType::RenameRemote:
+                            addRecentActivity("Queued rename: " + item.localPath);
+                            break;
+                    }
+                    if (m_syncActionQueue) {
+                        updatePendingActions(m_syncActionQueue->count());
+                    }
+                });
+        connect(m_syncActionQueue, &SyncActionQueue::queueEmpty, this,
+                [this]() { updatePendingActions(0); });
     }
 
     if (m_changeProcessor) {
-        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this, [this](ChangeProcessor::State state) {
-            switch (state) {
-                case ChangeProcessor::State::Running:
-                    updateSyncStatus("Syncing...");
-                    break;
-                case ChangeProcessor::State::Paused:
-                    updateSyncStatus("Paused");
-                    break;
-                case ChangeProcessor::State::Stopped:
-                    updateSyncStatus("Stopped");
-                    break;
-            }
-        });
+        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this,
+                [this](ChangeProcessor::State state) {
+                    switch (state) {
+                        case ChangeProcessor::State::Running:
+                            updateSyncStatus("Syncing...");
+                            break;
+                        case ChangeProcessor::State::Paused:
+                            updateSyncStatus("Paused");
+                            break;
+                        case ChangeProcessor::State::Stopped:
+                            updateSyncStatus("Stopped");
+                            break;
+                    }
+                });
         connect(m_changeProcessor, &ChangeProcessor::error, this,
                 [this](const QString& error) { addRecentActivity("Error: " + error); });
-        connect(m_changeProcessor, &ChangeProcessor::conflictDetected, this,
-                [this](const ConflictInfo& info) { addRecentActivity("Conflict: " + info.localPath); });
+        connect(
+            m_changeProcessor, &ChangeProcessor::conflictDetected, this,
+            [this](const ConflictInfo& info) { addRecentActivity("Conflict: " + info.localPath); });
         connect(m_changeProcessor, &ChangeProcessor::conflictResolved, this,
                 [this](const QString& localPath, ConflictResolutionStrategy) {
                     addRecentActivity("Conflict resolved: " + localPath);
@@ -375,13 +385,15 @@ void MainWindow::connectSignals() {
                     break;
             }
         });
-        connect(m_fullSync, &FullSync::progressUpdated, this, [this](const QString& phase, int current, int total) {
-            Q_UNUSED(total);
-            addRecentActivity(QString("%1 (%2 files)").arg(phase).arg(current));
-        });
+        connect(m_fullSync, &FullSync::progressUpdated, this,
+                [this](const QString& phase, int current, int total) {
+                    Q_UNUSED(total);
+                    addRecentActivity(QString("%1 (%2 files)").arg(phase).arg(current));
+                });
         connect(m_fullSync, &FullSync::completed, this, [this](int localCount, int remoteCount) {
-            addRecentActivity(
-                QString("Full sync complete: %1 local, %2 remote files").arg(localCount).arg(remoteCount));
+            addRecentActivity(QString("Full sync complete: %1 local, %2 remote files")
+                                  .arg(localCount)
+                                  .arg(remoteCount));
         });
         connect(m_fullSync, &FullSync::error, this,
                 [this](const QString& error) { addRecentActivity("Full sync error: " + error); });
@@ -392,10 +404,12 @@ void MainWindow::updateSyncStatus(const QString& status) {
     m_statusLabel->setText(status);
 
     // Update status icon using palette-based theme detection for GUI
-    if (status.contains("Syncing") || status.contains("Uploading") || status.contains("Downloading") ||
-        status.contains("Scanning") || status.contains("Fetching")) {
+    if (status.contains("Syncing") || status.contains("Uploading") ||
+        status.contains("Downloading") || status.contains("Scanning") ||
+        status.contains("Fetching")) {
         m_statusIcon->setPixmap(ThemeHelper::guiIcon("sync-active.svg").pixmap(32, 32));
-    } else if (status.contains("Up to date") || status.contains("Complete") || status.contains("Ready")) {
+    } else if (status.contains("Up to date") || status.contains("Complete") ||
+               status.contains("Ready")) {
         m_statusIcon->setPixmap(ThemeHelper::guiIcon("drive-idle.svg").pixmap(32, 32));
     } else if (status.contains("Error") || status.contains("Failed")) {
         m_statusIcon->setPixmap(ThemeHelper::guiIcon("error.svg").pixmap(32, 32));
@@ -425,7 +439,8 @@ void MainWindow::updateSyncProgress(qint64 current, qint64 total) {
 void MainWindow::updatePendingActions(int count) {
     if (count > 0) {
         m_pendingActionsLabel->setText(QString("Pending actions: %1").arg(count));
-        m_pendingActionsLabel->setStyleSheet("QLabel { font-size: 12px; color: #0066cc; font-weight: bold; }");
+        m_pendingActionsLabel->setStyleSheet(
+            "QLabel { font-size: 12px; color: #0066cc; font-weight: bold; }");
     } else {
         m_pendingActionsLabel->setText("Pending actions: 0");
         m_pendingActionsLabel->setStyleSheet("QLabel { font-size: 12px; color: #666; }");
@@ -506,7 +521,10 @@ void MainWindow::onLogoutClicked() {
 
 void MainWindow::onSettingsClicked() {
     if (!m_settingsWindow) {
-        m_settingsWindow = new SettingsWindow(m_authManager, m_syncActionQueue, m_changeProcessor, m_driveClient, this);
+        m_settingsWindow = new SettingsWindow(m_authManager, m_syncActionQueue, m_changeProcessor,
+                                              m_driveClient, this);
+        connect(m_settingsWindow, &SettingsWindow::restartRequested, this,
+                &MainWindow::restartRequested);
     }
     m_settingsWindow->show();
     m_settingsWindow->raise();

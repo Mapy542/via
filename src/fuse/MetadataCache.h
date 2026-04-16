@@ -40,6 +40,8 @@ struct FuseFileMetadata {
     bool isFolder = false;   ///< Whether this is a folder
     qint64 size = 0;         ///< File size in bytes (0 for folders)
     QString mimeType;        ///< MIME type
+    QString remoteMimeType;  ///< Original Google-native MIME type (for native docs)
+    QString webViewLink;     ///< Google Drive web view URL (for native docs)
     QDateTime createdTime;   ///< Creation timestamp
     QDateTime modifiedTime;  ///< Last modification timestamp
     QDateTime cachedAt;      ///< When this metadata was cached

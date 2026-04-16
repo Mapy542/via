@@ -146,6 +146,13 @@ class TestSyncDatabase : public QObject {
     void testFuseOperations_DatabaseClosed_Graceful();
 
     // ==========================================================================
+    // FUSE Native Doc Support
+    // ==========================================================================
+    void testFuseMetadata_NativeDocFields_SaveAndRetrieve();
+    void testClearFuseRepresentationState_ClearsMetadataAndCache();
+    void testClearFuseRepresentationState_PreservesDirtyFiles();
+
+    // ==========================================================================
     // Concurrent Access and Integrity
     // ==========================================================================
     void testMultipleRapidWrites();
@@ -1519,6 +1526,103 @@ void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
         FuseMetadata meta = m_db->getFuseMetadata(QString("FUSE_ID_%1").arg(i));
         QCOMPARE(meta.path, QString("/fuse/file%1.txt").arg(i));
     }
+}
+
+// =============================================================================
+// FUSE Native Doc Support
+// =============================================================================
+
+void TestSyncDatabase::testFuseMetadata_NativeDocFields_SaveAndRetrieve() {
+    FuseMetadata meta;
+    meta.fileId = "NATIVE_DOC_ID";
+    meta.path = "/test/My Document.gdoc";
+    meta.name = "My Document.gdoc";
+    meta.parentId = "PARENT_ID";
+    meta.isFolder = false;
+    meta.size = 0;
+    meta.mimeType = "application/vnd.google-apps.document";
+    meta.remoteMimeType = "application/vnd.google-apps.document";
+    meta.webViewLink = "https://docs.google.com/document/d/abc123/edit";
+    meta.cachedAt = QDateTime::currentDateTime();
+    meta.createdTime = QDateTime::currentDateTime();
+    meta.modifiedTime = QDateTime::currentDateTime();
+    meta.lastAccessed = QDateTime::currentDateTime();
+
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    FuseMetadata retrieved = m_db->getFuseMetadata("NATIVE_DOC_ID");
+    QCOMPARE(retrieved.fileId, QString("NATIVE_DOC_ID"));
+    QCOMPARE(retrieved.remoteMimeType, QString("application/vnd.google-apps.document"));
+    QCOMPARE(retrieved.webViewLink, QString("https://docs.google.com/document/d/abc123/edit"));
+}
+
+void TestSyncDatabase::testClearFuseRepresentationState_ClearsMetadataAndCache() {
+    // Insert a FUSE metadata entry
+    FuseMetadata meta;
+    meta.fileId = "CLEAR_TEST_ID";
+    meta.path = "/test/clearing.txt";
+    meta.name = "clearing.txt";
+    meta.parentId = "PARENT_ID";
+    meta.isFolder = false;
+    meta.size = 100;
+    meta.mimeType = "text/plain";
+    meta.cachedAt = QDateTime::currentDateTime();
+    meta.createdTime = QDateTime::currentDateTime();
+    meta.modifiedTime = QDateTime::currentDateTime();
+    meta.lastAccessed = QDateTime::currentDateTime();
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    // Insert a cache entry
+    QVERIFY(m_db->recordFuseCacheEntry("CLEAR_TEST_ID", "/tmp/cache/file", 100));
+
+    // Verify data exists
+    FuseMetadata check = m_db->getFuseMetadata("CLEAR_TEST_ID");
+    QVERIFY(!check.fileId.isEmpty());
+
+    // Clear representation state
+    QVERIFY(m_db->clearFuseRepresentationState());
+
+    // Metadata should be gone
+    FuseMetadata afterClear = m_db->getFuseMetadata("CLEAR_TEST_ID");
+    QVERIFY(afterClear.fileId.isEmpty());
+}
+
+void TestSyncDatabase::testClearFuseRepresentationState_PreservesDirtyFiles() {
+    // Insert a dirty file entry
+    QVERIFY(m_db->markFuseDirty("DIRTY_FILE_ID", "/test/dirty.txt"));
+
+    // Also insert FUSE metadata that should be cleared
+    FuseMetadata meta;
+    meta.fileId = "DIRTY_FILE_ID";
+    meta.path = "/test/dirty.txt";
+    meta.name = "dirty.txt";
+    meta.parentId = "PARENT_ID";
+    meta.isFolder = false;
+    meta.size = 200;
+    meta.mimeType = "text/plain";
+    meta.cachedAt = QDateTime::currentDateTime();
+    meta.createdTime = QDateTime::currentDateTime();
+    meta.modifiedTime = QDateTime::currentDateTime();
+    meta.lastAccessed = QDateTime::currentDateTime();
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    // Clear representation state
+    QVERIFY(m_db->clearFuseRepresentationState());
+
+    // Dirty files should be preserved
+    QList<FuseDirtyFile> dirtyFiles = m_db->getFuseDirtyFiles();
+    bool found = false;
+    for (const auto& df : dirtyFiles) {
+        if (df.fileId == "DIRTY_FILE_ID") {
+            found = true;
+            break;
+        }
+    }
+    QVERIFY2(found, "Dirty files should be preserved after clearFuseRepresentationState");
+
+    // But metadata should be gone
+    FuseMetadata afterClear = m_db->getFuseMetadata("DIRTY_FILE_ID");
+    QVERIFY(afterClear.fileId.isEmpty());
 }
 
 void TestSyncDatabase::testDatabaseNotOpen_OperationsGraceful() {

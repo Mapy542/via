@@ -10,9 +10,11 @@
 #include <QFileInfo>
 #include <QReadLocker>
 #include <QSet>
+#include <QSettings>
 #include <QWriteLocker>
 #include <algorithm>
 
+#include "NativeDocPolicy.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 #include "sync/SyncSettings.h"
@@ -89,7 +91,16 @@ bool shouldExposeRemoteFile(const DriveFile& file) {
         return false;
     }
     if (file.isGoogleDoc() && !file.isFolder) {
-        return false;
+        // Check native-doc serving mode from settings
+        QSettings settings;
+        NativeDocMode mode =
+            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        if (mode == NativeDocMode::Hide) {
+            return false;
+        }
+        // Let the policy helper decide based on the specific MIME type
+        NativeDocRepresentation rep = nativeDocRepresentation(file.mimeType, mode);
+        return rep.visible;
     }
     return true;
 }
@@ -104,6 +115,8 @@ FuseFileMetadata fromDbMetadata(const FuseMetadata& dbMeta) {
     metadata.isFolder = dbMeta.isFolder;
     metadata.size = dbMeta.size;
     metadata.mimeType = dbMeta.mimeType;
+    metadata.remoteMimeType = dbMeta.remoteMimeType;
+    metadata.webViewLink = dbMeta.webViewLink;
     metadata.createdTime = dbMeta.createdTime;
     metadata.modifiedTime = dbMeta.modifiedTime;
     metadata.cachedAt = dbMeta.cachedAt;
@@ -121,6 +134,8 @@ FuseMetadata toDbMetadata(const FuseFileMetadata& metadata) {
     dbMeta.isFolder = metadata.isFolder;
     dbMeta.size = metadata.size;
     dbMeta.mimeType = metadata.mimeType;
+    dbMeta.remoteMimeType = metadata.remoteMimeType;
+    dbMeta.webViewLink = metadata.webViewLink;
     dbMeta.createdTime = metadata.createdTime;
     dbMeta.modifiedTime = metadata.modifiedTime;
     dbMeta.cachedAt = metadata.cachedAt;
@@ -137,6 +152,22 @@ FuseFileMetadata fromDriveFile(const DriveFile& file) {
     metadata.isFolder = file.isFolder;
     metadata.size = file.size;
     metadata.mimeType = file.mimeType;
+    metadata.webViewLink = file.webViewLink;
+    // Preserve the original Google-native MIME type for native docs so the
+    // representation policy can make decisions later.
+    if (file.isGoogleDoc() && !file.isFolder) {
+        metadata.remoteMimeType = file.mimeType;
+
+        // Append pseudo-extension based on current serving mode so the
+        // FUSE-visible name reflects the representation format.
+        QSettings settings;
+        NativeDocMode mode =
+            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        NativeDocRepresentation rep = nativeDocRepresentation(file.mimeType, mode);
+        if (rep.visible && !rep.extension.isEmpty()) {
+            metadata.name = file.name + rep.extension;
+        }
+    }
     metadata.createdTime = file.createdTime;
     metadata.modifiedTime = file.modifiedTime;
     metadata.cachedAt = QDateTime::currentDateTime();

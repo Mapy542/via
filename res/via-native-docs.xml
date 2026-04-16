@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-via-gdoc">
+    <comment>Via Google Docs shortcut</comment>
+    <glob pattern="*.gdoc"/>
+  </mime-type>
+  <mime-type type="application/x-via-gsheet">
+    <comment>Via Google Sheets shortcut</comment>
+    <glob pattern="*.gsheet"/>
+  </mime-type>
+  <mime-type type="application/x-via-gslides">
+    <comment>Via Google Slides shortcut</comment>
+    <glob pattern="*.gslides"/>
+  </mime-type>
+  <mime-type type="application/x-via-gdraw">
+    <comment>Via Google Drawings shortcut</comment>
+    <glob pattern="*.gdraw"/>
+  </mime-type>
+  <mime-type type="application/x-via-gdrive">
+    <comment>Via Google Drive shortcut</comment>
+    <glob pattern="*.gdrive"/>
+  </mime-type>
+</mime-info>

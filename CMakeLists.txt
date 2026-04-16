@@ -103,6 +103,7 @@ set(HEADERS
     src/utils/LogManager.h
     src/utils/FileInUseChecker.h
     src/utils/AutostartManager.h
+    src/utils/NativeDocShortcutHandler.h
     src/utils/UpdateChecker.h
     src/utils/SuspendMonitor.h
 )
@@ -152,6 +153,10 @@ install(TARGETS ${PROJECT_NAME}
 
 install(FILES res/via.desktop
     DESTINATION share/applications
+)
+
+install(FILES res/via-native-docs.xml
+    DESTINATION share/mime/packages
 )
 
 install(FILES res/icons/via.svg
@@ -220,6 +225,7 @@ if(BUILD_TESTS)
     add_qt_test(test_FileCache tests/fuse/TestFileCache.cpp)
     add_qt_test(test_DirtySyncWorker tests/fuse/TestDirtySyncWorker.cpp)
     add_qt_test(test_MetadataCache tests/fuse/TestMetadataCache.cpp)
+    add_qt_test(test_NativeDocShortcutHandler tests/fuse/TestNativeDocShortcutHandler.cpp)
 
     # Auth subsystem tests
     add_qt_test(test_TokenRefresh tests/auth/TestTokenRefresh.cpp)

@@ -87,8 +87,9 @@ The API client is a `QObject` that uses `QNetworkAccessManager` for HTTP request
 | File                           | Purpose                                                                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------- |
 | `FuseDriver.h/.cpp`            | FUSE3 callback implementation — `getattr`, `readdir`, `open`, `read`, `write`, `release`, etc. |
-| `FileCache.h/.cpp`             | LRU disk cache for downloaded files                                                            |
+| `FileCache.h/.cpp`             | LRU disk cache for downloaded files; `getExportedPath()` for native doc exports                |
 | `MetadataCache.h/.cpp`         | In-memory + DB-backed metadata cache with `QReadWriteLock` and atomic hit/miss counters        |
+| `NativeDocPolicy.h`            | Header-only policy: maps (MIME type, NativeDocMode) → visibility, extension, export MIME type  |
 | `DirtySyncWorker.h/.cpp`       | Background worker that uploads locally-modified FUSE files back to Drive                       |
 | `MetadataRefreshWorker.h/.cpp` | Background worker that periodically refreshes metadata from Drive                              |
 

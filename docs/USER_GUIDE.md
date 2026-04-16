@@ -112,6 +112,30 @@ Navigate to the mount point in your file manager. You'll see all your Google Dri
 - **Editing files** uploads changes automatically
 - **Cached files** load faster on repeat access
 
+#### Google-Native Documents
+
+Google Docs, Sheets, Slides, and other native Google documents don't have downloadable file content. Via offers several options for how they appear in the FUSE mount:
+
+1. Go to **Settings > Advanced**
+2. Under the FUSE group, find **"Native Google docs"**
+3. Select a mode:
+
+| Mode                       | Description                                            |
+| -------------------------- | ------------------------------------------------------ |
+| **Hide** (default)         | Native docs are invisible in the FUSE mount            |
+| **Browser shortcuts**      | Appear as `.gdoc`, `.gsheet`, `.gslides` stub files    |
+| **OpenDocument snapshots** | Exported as `.odt`, `.ods`, `.odp` read-only snapshots |
+| **Text snapshots**         | Exported as `.md`, `.csv`, `.txt` read-only snapshots  |
+
+**Important notes:**
+
+- Via registers custom MIME types for browser shortcuts on startup so file managers can open them through Via
+- Changing this setting requires a restart of Via
+- Mode changes clear the FUSE metadata cache (mirror sync is not affected)
+- Native doc files are always **read-only** in all modes
+- Export snapshots are limited to 10 MB by Google (a tray notification appears if export fails)
+- Some native types (Forms, Scripts, Sites) are only available in browser-shortcut mode
+
 ### Offline Access
 
 Make files available without internet:

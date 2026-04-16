@@ -422,6 +422,18 @@ void SettingsWindow::setupAdvancedTab() {
     cacheSizeLayout->addStretch();
     fuseLayout->addLayout(cacheSizeLayout);
 
+    QHBoxLayout* nativeDocLayout = new QHBoxLayout();
+    nativeDocLayout->addWidget(new QLabel("Google-native docs:", m_advancedTab));
+    m_nativeDocModeCombo = new QComboBox(m_advancedTab);
+    m_nativeDocModeCombo->addItem("Hide (don't show in mount)", "hide");
+    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, …)", "browser-shortcut");
+    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, …)", "open-document");
+    m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, …)", "text");
+    m_nativeDocModeCombo->setEnabled(false);
+    nativeDocLayout->addWidget(m_nativeDocModeCombo);
+    nativeDocLayout->addStretch();
+    fuseLayout->addLayout(nativeDocLayout);
+
     QPushButton* clearCacheButton = new QPushButton("Clear Cache", m_advancedTab);
     clearCacheButton->setEnabled(false);
     QHBoxLayout* clearLayout = new QHBoxLayout();
@@ -446,6 +458,7 @@ void SettingsWindow::setupAdvancedTab() {
         bool fuseEnabled = (m_syncSystemCombo->currentData().toString() != "mirror-only");
         m_fuseMountPointEdit->setEnabled(fuseEnabled);
         m_cacheSize->setEnabled(fuseEnabled);
+        m_nativeDocModeCombo->setEnabled(fuseEnabled);
         clearCacheButton->setEnabled(fuseEnabled);
     };
     connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -601,6 +614,17 @@ void SettingsWindow::loadSettings() {
     m_cacheSize->setValue(m_settings.value("advanced/cacheSize", 5000).toInt());
     m_debugModeCheck->setChecked(m_settings.value("advanced/debugMode", false).toBool());
 
+    // Native doc mode (FUSE)
+    {
+        QString nativeDocId = m_settings.value("advanced/nativeDocMode", "hide").toString();
+        for (int i = 0; i < m_nativeDocModeCombo->count(); ++i) {
+            if (m_nativeDocModeCombo->itemData(i).toString() == nativeDocId) {
+                m_nativeDocModeCombo->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+
     // Capture snapshots of restart-required settings
     m_originalSyncFolder = m_syncFolderEdit->text();
     m_originalSyncMode = m_syncModeCombo->currentData().toString();
@@ -609,6 +633,7 @@ void SettingsWindow::loadSettings() {
     m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
     m_originalFuseMountPoint = m_fuseMountPointEdit->text();
     m_originalCacheSize = m_cacheSize->value();
+    m_originalNativeDocMode = m_nativeDocModeCombo->currentData().toString();
 }
 
 void SettingsWindow::saveSettings() {
@@ -628,6 +653,7 @@ void SettingsWindow::saveSettings() {
     m_settings.setValue("advanced/syncSystem", m_syncSystemCombo->currentData().toString());
     m_settings.setValue("advanced/fuseMountPoint", m_fuseMountPointEdit->text());
     m_settings.setValue("advanced/cacheSize", m_cacheSize->value());
+    m_settings.setValue("advanced/nativeDocMode", m_nativeDocModeCombo->currentData().toString());
     m_settings.setValue("advanced/debugMode", m_debugModeCheck->isChecked());
 
     m_settings.sync();
@@ -752,6 +778,7 @@ bool SettingsWindow::checkRestartRequired() const {
     if (m_syncSystemCombo->currentData().toString() != m_originalSyncSystem) return true;
     if (m_fuseMountPointEdit->text() != m_originalFuseMountPoint) return true;
     if (m_cacheSize->value() != m_originalCacheSize) return true;
+    if (m_nativeDocModeCombo->currentData().toString() != m_originalNativeDocMode) return true;
     return false;
 }
 
@@ -774,10 +801,7 @@ void SettingsWindow::promptRestart() {
     msgBox.exec();
 
     if (msgBox.clickedButton() == restartButton) {
-        // Spawn a new instance and quit the current one
-        QProcess::startDetached(QCoreApplication::applicationFilePath(),
-                                QCoreApplication::arguments());
-        QCoreApplication::quit();
+        emit restartRequested();
     } else {
         // Update snapshots so the prompt doesn't re-trigger for the same change
         m_originalSyncFolder = m_syncFolderEdit->text();
@@ -787,5 +811,6 @@ void SettingsWindow::promptRestart() {
         m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
         m_originalFuseMountPoint = m_fuseMountPointEdit->text();
         m_originalCacheSize = m_cacheSize->value();
+        m_originalNativeDocMode = m_nativeDocModeCombo->currentData().toString();
     }
 }

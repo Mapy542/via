@@ -73,6 +73,15 @@ class SettingsWindow : public QDialog {
      */
     void clearCacheRequested();
 
+    /**
+     * @brief Emitted when the user accepts a restart after changing
+     * restart-required settings.
+     *
+     * The owner (MainWindow/main.cpp) should perform a safe FUSE
+     * unmount, set any pending purge flags, relaunch, and quit.
+     */
+    void restartRequested();
+
    public slots:
     /**
      * @brief Load settings from storage
@@ -134,6 +143,7 @@ class SettingsWindow : public QDialog {
     QComboBox* m_syncSystemCombo;
     QLineEdit* m_fuseMountPointEdit;
     QSpinBox* m_cacheSize;
+    QComboBox* m_nativeDocModeCombo;
     QCheckBox* m_debugModeCheck;
 
     // Dialog buttons
@@ -149,6 +159,7 @@ class SettingsWindow : public QDialog {
     QString m_originalSyncSystem;
     QString m_originalFuseMountPoint;
     int m_originalCacheSize = 0;
+    QString m_originalNativeDocMode;
 
     bool checkRestartRequired() const;
     void promptRestart();

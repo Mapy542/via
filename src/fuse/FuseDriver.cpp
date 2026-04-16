@@ -23,6 +23,7 @@
 #include <QMutexLocker>
 #include <QProcess>
 #include <QSet>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
 #include <functional>
@@ -31,6 +32,7 @@
 #include "FileCache.h"
 #include "MetadataCache.h"
 #include "MetadataRefreshWorker.h"
+#include "NativeDocPolicy.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 
@@ -1168,6 +1170,35 @@ void FuseDriver::flushDirtyFiles() {
 }
 
 // ============================================================================
+// Native-doc stub helpers
+// ============================================================================
+
+/**
+ * @brief Check if a FUSE metadata entry represents a Google-native document
+ */
+static bool isNativeDoc(const FuseMetadata& meta) {
+    return !meta.remoteMimeType.isEmpty() &&
+           meta.remoteMimeType.startsWith(QLatin1String("application/vnd.google-apps.")) &&
+           !meta.isFolder;
+}
+
+/**
+ * @brief Generate stub content for a browser-shortcut native doc
+ *
+ * Produces a simple .desktop-like text file containing the web URL.
+ * This format is deterministic (content depends only on the URL) so
+ * getattr can report a stable size without materializing the string
+ * on every stat call.
+ */
+static QByteArray nativeDocStubContent(const FuseMetadata& meta) {
+    // Format: simple URL file similar to .desktop / .url files.
+    // Via's file handler will parse this to open the browser.
+    return QStringLiteral("[Via Native Document]\nURL=%1\nMimeType=%2\n")
+        .arg(meta.webViewLink, meta.remoteMimeType)
+        .toUtf8();
+}
+
+// ============================================================================
 // FUSE Callback Implementations
 // ============================================================================
 
@@ -1260,6 +1291,27 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
             if (meta.isFolder) {
                 stbuf->st_mode = S_IFDIR | 0755;
                 stbuf->st_nlink = 2;
+            } else if (isNativeDoc(meta)) {
+                // Native docs are always read-only in FUSE
+                stbuf->st_mode = S_IFREG | 0444;
+                stbuf->st_nlink = 1;
+                // Report the stub/export content size
+                QSettings settings;
+                NativeDocMode mode = nativeDocModeFromString(
+                    settings.value("advanced/nativeDocMode", "hide").toString());
+                if (mode == NativeDocMode::BrowserShortcut) {
+                    stbuf->st_size = nativeDocStubContent(meta).size();
+                } else {
+                    // For export modes, report size 0 until content is cached
+                    // (actual size is unknown until export completes)
+                    if (drv->m_fileCache && drv->m_fileCache->isCached(meta.fileId)) {
+                        QString localPath = drv->m_fileCache->getContentPath(meta.fileId);
+                        QFileInfo localInfo(localPath);
+                        if (localInfo.exists()) {
+                            stbuf->st_size = localInfo.size();
+                        }
+                    }
+                }
             } else {
                 stbuf->st_mode = S_IFREG | 0644;
                 stbuf->st_nlink = 1;
@@ -1415,6 +1467,63 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         return -EISDIR;
     }
 
+    // Native Google docs are always read-only; reject write attempts early.
+    if (isNativeDoc(meta)) {
+        if ((fi->flags & O_WRONLY) || (fi->flags & O_RDWR)) {
+            return -EACCES;
+        }
+
+        QSettings settings;
+        NativeDocMode mode =
+            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+
+        if (mode == NativeDocMode::BrowserShortcut) {
+            // Synthetic stub — bypass FileCache entirely; content is
+            // generated on-the-fly in fuseRead from nativeDocStubContent().
+            FuseOpenFile openFile;
+            openFile.fileId = meta.fileId;
+            openFile.path = qpath;
+            openFile.cachePath = QString();  // no on-disk cache
+            openFile.size = nativeDocStubContent(meta).size();
+            openFile.writable = false;
+            openFile.dirty = false;
+
+            fi->fh = drv->registerOpenFile(openFile);
+            if (drv) {
+                emit drv->fileAccessed(qpath);
+            }
+            return 0;
+        }
+
+        // Export modes (OpenDocument / Text) — use Drive export API
+        NativeDocRepresentation repr = nativeDocRepresentation(meta.remoteMimeType, mode);
+        if (repr.visible && !repr.synthetic && !repr.outputMimeType.isEmpty()) {
+            QString cachePath = drv->m_fileCache->getExportedPath(meta.fileId, repr.outputMimeType);
+            if (cachePath.isEmpty()) {
+                return -EIO;
+            }
+
+            QFileInfo fi_info(cachePath);
+            FuseOpenFile openFile;
+            openFile.fileId = meta.fileId;
+            openFile.path = qpath;
+            openFile.cachePath = cachePath;
+            openFile.size = fi_info.size();
+            openFile.writable = false;
+            openFile.dirty = false;
+
+            fi->fh = drv->registerOpenFile(openFile);
+            if (drv) {
+                emit drv->fileAccessed(qpath);
+            }
+            return 0;
+        }
+
+        // Unsupported native doc type in this mode — should not reach here
+        // since MetadataCache filters them, but guard anyway.
+        return -ENOENT;
+    }
+
     // Get cached file path (may trigger download)
     QString cachePath = drv->m_fileCache->getCachedPath(meta.fileId, meta.size);
     if (cachePath.isEmpty()) {
@@ -1453,6 +1562,27 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
         return -EBADF;
     }
     FuseOpenFile openFile = *openFileOpt;
+
+    // Browser-shortcut native docs have synthetic content (no cache path).
+    if (openFile.cachePath.isEmpty()) {
+        // Look up metadata to regenerate stub content
+        QString lookupPath = openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
+        FuseMetadata meta;
+        if (drv->m_database) {
+            meta = drv->m_database->getFuseMetadataByPath(lookupPath);
+        }
+        if (meta.fileId.isEmpty() || !isNativeDoc(meta)) {
+            return -EIO;
+        }
+        QByteArray stub = nativeDocStubContent(meta);
+        if (offset >= stub.size()) {
+            return 0;
+        }
+        qint64 available = stub.size() - offset;
+        qint64 toRead = qMin(static_cast<qint64>(size), available);
+        memcpy(buf, stub.constData() + offset, toRead);
+        return static_cast<int>(toRead);
+    }
 
     // Update access time
     if (drv->m_fileCache) {
@@ -1949,6 +2079,11 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
+    }
+
+    // Native docs are read-only — reject truncate
+    if (isNativeDoc(meta)) {
+        return -EACCES;
     }
 
     QString cachePath;

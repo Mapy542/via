@@ -104,7 +104,8 @@ class FileCache : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent = nullptr);
+    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient,
+                       QObject* parent = nullptr);
 
     ~FileCache() override;
 
@@ -204,6 +205,19 @@ class FileCache : public QObject {
      * @return Local cache path, or empty string on failure
      */
     QString getCachedPath(const QString& fileId, qint64 expectedSize = 0);
+
+    /**
+     * @brief Export a Google-native doc and return cached path
+     *
+     * Like getCachedPath but uses the Drive export endpoint instead of
+     * direct download. The exported file is stored in the normal LRU cache.
+     * This method may BLOCK waiting for export to complete.
+     *
+     * @param fileId Google Drive file ID
+     * @param exportMimeType Target MIME type for the export
+     * @return Local cache path, or empty string on failure
+     */
+    QString getExportedPath(const QString& fileId, const QString& exportMimeType);
 
     /**
      * @brief Get cache path without downloading
@@ -485,8 +499,8 @@ class FileCache : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
-                         const QString& localPath);
+    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
+                         const QString& fileId, const QString& localPath);
 
    private:
     // Internal helpers
