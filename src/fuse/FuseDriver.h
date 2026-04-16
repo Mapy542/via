@@ -208,6 +208,9 @@ class IFileCacheProvider {
  * The file handle (fi->fh) in FUSE callbacks maps to an entry in m_openFiles.
  */
 struct FuseOpenFile {
+    // TODO: Open FuseOpenFile handles currently store a cachePath string, not a stable local fd.
+    // clearDirty() can invalidate these paths by moving the cache file, breaking writes.
+    // Should be refactored to hold an open OS-level file descriptor instead.
     QString fileId;     ///< Google Drive file ID
     QString path;       ///< Path in FUSE filesystem
     QString cachePath;  ///< Local cache path

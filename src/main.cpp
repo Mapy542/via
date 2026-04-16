@@ -301,11 +301,12 @@ int main(int argc, char* argv[]) {
         settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse").toString();
     const qint64 cacheSizeMb = settings.value("advanced/cacheSize", 5000).toLongLong();
 
-    // Ensure previousNativeDocMode is seeded on first run so the restart
-    // handler can detect mode changes by comparing current vs previous.
+    // Ensure previousNativeDocMode is seeded on first run so mode-change
+    // detection works on the very first settings change.
     if (!settings.contains("advanced/previousNativeDocMode")) {
         settings.setValue("advanced/previousNativeDocMode",
                           settings.value("advanced/nativeDocMode", "hide").toString());
+        settings.sync();
     }
 
     FuseDriver fuseDriver(&driveClient, &syncDatabase);
@@ -314,32 +315,56 @@ int main(int argc, char* argv[]) {
     }
     fuseDriver.setMaxCacheSizeBytes(cacheSizeMb * 1024LL * 1024LL);
 
-    // Consume pending FUSE representation reset flag (set on previous
-    // restart when native-doc serving mode changed).  This clears
-    // fuse_metadata, fuse_cache_entries, and fuse_sync_state plus the
-    // on-disk cache directory so the mount rebuilds from scratch.
-    if (fuseEnabled && settings.value("advanced/pendingFuseRepresentationReset", false).toBool()) {
-        qInfo() << "Pending FUSE representation reset detected — purging caches";
-        syncDatabase.clearFuseRepresentationState();
+    // ── Startup-authoritative native-doc representation reset ────────
+    // Detect mode changes regardless of how the app was restarted (in-app
+    // Restart Now, manual quit/relaunch, crash, etc.).  The in-app
+    // restartRequested handler may also set pendingFuseRepresentationReset
+    // as a convenience hint, but this startup comparison is the primary
+    // trigger.
+    if (fuseEnabled) {
+        const QString currentMode = settings.value("advanced/nativeDocMode", "hide").toString();
+        const QString previousMode = settings.value("advanced/previousNativeDocMode", "hide").toString();
+        const bool pendingFlag = settings.value("advanced/pendingFuseRepresentationReset", false).toBool();
+        const bool modeChanged = (currentMode != previousMode);
 
-        // Purge on-disk FUSE cache directory
-        QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-        QDir cacheDir(cachePath);
-        if (cacheDir.exists()) {
-            for (const QString& entry : cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
-                QString fullPath = cacheDir.filePath(entry);
-                QFileInfo fi(fullPath);
-                if (fi.isDir()) {
-                    QDir(fullPath).removeRecursively();
-                } else {
-                    QFile::remove(fullPath);
-                }
+        if (modeChanged || pendingFlag) {
+            if (modeChanged) {
+                qInfo() << "Native-doc mode changed from" << previousMode << "to" << currentMode
+                        << "— purging FUSE representation caches";
+            } else {
+                qInfo() << "Pending FUSE representation reset flag detected — purging caches";
             }
-            qInfo() << "On-disk FUSE cache purged:" << cachePath;
-        }
 
-        settings.remove("advanced/pendingFuseRepresentationReset");
-        settings.sync();
+            const bool purgeOk = syncDatabase.clearFuseRepresentationState();
+
+            // Purge on-disk FUSE cache directory
+            QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            QDir cacheDir(cachePath);
+            if (cacheDir.exists()) {
+                for (const QString& entry : cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
+                    QString fullPath = cacheDir.filePath(entry);
+                    QFileInfo fi(fullPath);
+                    if (fi.isDir()) {
+                        QDir(fullPath).removeRecursively();
+                    } else {
+                        QFile::remove(fullPath);
+                    }
+                }
+                qInfo() << "On-disk FUSE cache purged:" << cachePath;
+            }
+
+            // Only advance the previous-mode marker and clear the pending
+            // flag when the database purge succeeded.  If it failed, the
+            // mismatch (or pending flag) will persist and trigger a retry
+            // on the next launch.
+            if (purgeOk) {
+                settings.setValue("advanced/previousNativeDocMode", currentMode);
+                settings.remove("advanced/pendingFuseRepresentationReset");
+                settings.sync();
+            } else {
+                qWarning() << "FUSE representation purge failed — will retry on next launch";
+            }
+        }
     }
 
     // Initialize sync components (Change Queue, Sync Action Queue, Watchers, Processor)
@@ -411,6 +436,9 @@ int main(int argc, char* argv[]) {
                      &SyncDatabase::setChangeToken);
 
     // Initialize system tray manager
+    // TODO: FUSE UI wiring is incomplete. SystemTrayManager and MainWindow need to track
+    // FUSE worker queues/states, not just the traditional sync queue. FUSE UI status text
+    // depends on connecting to FuseDriver state signals.
     SystemTrayManager trayManager(&authManager, &syncActionQueue, &changeProcessor);
     trayManager.show();
 
@@ -633,20 +661,18 @@ int main(int argc, char* argv[]) {
             }
         });
 
-    // Handle restart requests from the settings dialog.  Check whether the
-    // native-doc serving mode changed and, if so, set a pending flag that
-    // will be consumed on the next startup to purge FUSE representation state.
+    // Handle restart requests from the settings dialog.  Set a pending
+    // flag as a convenience hint so the next startup can fast-path the
+    // representation reset.  Startup is authoritative — it also compares
+    // current vs previous mode independently, so this flag is a belt-and-
+    // suspenders safety net, not the sole trigger.
     QObject::connect(&mainWindow, &MainWindow::restartRequested, &app, [&fuseDriver, fuseEnabled, &settings]() {
-        // Detect whether the native-doc mode changed since the settings
-        // have already been saved to QSettings by the time this fires.
         const QString currentMode = settings.value("advanced/nativeDocMode", "hide").toString();
         const QString previousMode = settings.value("advanced/previousNativeDocMode", "hide").toString();
         if (currentMode != previousMode) {
             settings.setValue("advanced/pendingFuseRepresentationReset", true);
+            settings.sync();
         }
-        // Record the new mode as "previous" for next comparison.
-        settings.setValue("advanced/previousNativeDocMode", currentMode);
-        settings.sync();
 
         // Safe FUSE unmount (flushes dirty files, stops workers, clears caches)
         if (fuseEnabled && fuseDriver.isMounted()) {

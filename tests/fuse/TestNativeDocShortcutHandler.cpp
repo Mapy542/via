@@ -3,6 +3,7 @@
  * @brief Unit tests for Via native-doc shortcut integration helpers
  */
 
+#include <QMimeDatabase>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
@@ -15,6 +16,9 @@ class TestNativeDocShortcutHandler : public QObject {
     void testMimeTypeField_ContainsAllRegisteredTypes();
     void testParseShortcutText_ValidShortcut();
     void testParseShortcutFile_InvalidHeader();
+    void testExtensionsAndMimeTypes_SameCount();
+    void testMimePackageXml_ContainsAllExtensions();
+    void testMimePackageXml_ContainsAllMimeTypes();
 };
 
 void TestNativeDocShortcutHandler::testMimeTypeField_ContainsAllRegisteredTypes() {
@@ -35,8 +39,7 @@ void TestNativeDocShortcutHandler::testParseShortcutText_ValidShortcut() {
 
     const auto parsed = parseNativeDocShortcutText(text);
     QVERIFY(parsed.has_value());
-    QCOMPARE(parsed->url.toString(),
-             QStringLiteral("https://docs.google.com/document/d/example/edit"));
+    QCOMPARE(parsed->url.toString(), QStringLiteral("https://docs.google.com/document/d/example/edit"));
     QCOMPARE(parsed->remoteMimeType, QStringLiteral("application/vnd.google-apps.document"));
 }
 
@@ -54,6 +57,28 @@ void TestNativeDocShortcutHandler::testParseShortcutFile_InvalidHeader() {
     const auto parsed = parseNativeDocShortcutFile(path, &error);
     QVERIFY(!parsed.has_value());
     QVERIFY(error.contains(QStringLiteral("header")));
+}
+
+void TestNativeDocShortcutHandler::testExtensionsAndMimeTypes_SameCount() {
+    // The extension list and MIME type list must stay in lock-step.
+    const QStringList exts = nativeDocShortcutExtensions();
+    const QStringList mimes = nativeDocDesktopMimeTypes();
+    QCOMPARE(exts.size(), mimes.size());
+}
+
+void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllExtensions() {
+    const QString xml = nativeDocMimePackageXml();
+    for (const QString& ext : nativeDocShortcutExtensions()) {
+        const QString glob = QStringLiteral("*.") + ext;
+        QVERIFY2(xml.contains(glob), qPrintable(QStringLiteral("MIME package XML missing glob for .") + ext));
+    }
+}
+
+void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllMimeTypes() {
+    const QString xml = nativeDocMimePackageXml();
+    for (const QString& mime : nativeDocDesktopMimeTypes()) {
+        QVERIFY2(xml.contains(mime), qPrintable(QStringLiteral("MIME package XML missing type ") + mime));
+    }
 }
 
 QTEST_MAIN(TestNativeDocShortcutHandler)

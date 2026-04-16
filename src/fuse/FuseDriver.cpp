@@ -2093,6 +2093,10 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
     }
 
     // Mark as dirty for upload
+    // TODO: If not openedViaHandle, fuseTruncate() marks FileCache dirty but does NOT mark
+    // a FuseOpenFile dirty (none exists). This means release-path metadata/pending-store
+    // handling (like moving cache->pending) is bypassed for truncate-driven saves.
+    // This logic bug needs to be fixed.
     if (openedViaHandle) {
         drv->markOpenFileDirty(fi->fh);
     }
@@ -2370,6 +2374,9 @@ void FuseDriver::startBackgroundWorkers() {
         connect(m_metadataRefreshThread, &QThread::finished, m_metadataRefreshWorker, &QObject::deleteLater);
 
         // Relay detailed remote change events for UI activity logging
+        // TODO: MetadataRefreshWorker only exposes fileId plus changeType (and file name).
+        // Readable UI logging needs extra path context to resolve the full path of the
+        // changed file, possibly by querying the SyncDatabase for parents.
         connect(m_metadataRefreshWorker, &MetadataRefreshWorker::changeProcessedDetailed, this,
                 &FuseDriver::fuseRemoteChange);
 

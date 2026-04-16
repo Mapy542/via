@@ -151,6 +151,7 @@ class TestSyncDatabase : public QObject {
     void testFuseMetadata_NativeDocFields_SaveAndRetrieve();
     void testClearFuseRepresentationState_ClearsMetadataAndCache();
     void testClearFuseRepresentationState_PreservesDirtyFiles();
+    void testClearFuseRepresentationState_ReturnsFalseOnClosedDb();
 
     // ==========================================================================
     // Concurrent Access and Integrity
@@ -276,8 +277,7 @@ void TestSyncDatabase::testInitialize_RejectsNewerVersion() {
         setupDb.setDatabaseName(dbPath);
         QVERIFY(setupDb.open());
         QSqlQuery query(setupDb);
-        QVERIFY(
-            query.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"));
+        QVERIFY(query.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"));
         QVERIFY(query.exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', 999)"));
         setupDb.close();
     }
@@ -787,8 +787,7 @@ void TestSyncDatabase::testGetFileState_Miss_AllFieldsEmpty() {
     // CRITICAL: On miss, ALL fields must be empty/default
     QVERIFY2(result.localPath.isEmpty(), "SAFETY VIOLATION: localPath should be empty on miss");
     QVERIFY2(result.fileId.isEmpty(), "SAFETY VIOLATION: fileId should be empty on miss");
-    QVERIFY2(!result.modifiedTimeAtSync.isValid(),
-             "SAFETY VIOLATION: modifiedTimeAtSync should be invalid on miss");
+    QVERIFY2(!result.modifiedTimeAtSync.isValid(), "SAFETY VIOLATION: modifiedTimeAtSync should be invalid on miss");
 
     // CRITICAL SAFETY BUG DOCUMENTED:
     // isFolder returns uninitialized garbage on miss!
@@ -1499,8 +1498,7 @@ void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
                 } else if (i % 4 == 2) {
                     // Read by path
                     int idx = i % 10;
-                    FuseMetadata meta =
-                        m_db->getFuseMetadataByPath(QString("/fuse/file%1.txt").arg(idx));
+                    FuseMetadata meta = m_db->getFuseMetadataByPath(QString("/fuse/file%1.txt").arg(idx));
                     if (meta.fileId.isEmpty()) {
                         errors.fetchAndAddRelaxed(1);
                     }
@@ -1623,6 +1621,13 @@ void TestSyncDatabase::testClearFuseRepresentationState_PreservesDirtyFiles() {
     // But metadata should be gone
     FuseMetadata afterClear = m_db->getFuseMetadata("DIRTY_FILE_ID");
     QVERIFY(afterClear.fileId.isEmpty());
+}
+
+void TestSyncDatabase::testClearFuseRepresentationState_ReturnsFalseOnClosedDb() {
+    // A closed database should return false so the caller can preserve the
+    // retry signal and try again on the next launch.
+    SyncDatabase closedDb;
+    QVERIFY(!closedDb.clearFuseRepresentationState());
 }
 
 void TestSyncDatabase::testDatabaseNotOpen_OperationsGraceful() {
