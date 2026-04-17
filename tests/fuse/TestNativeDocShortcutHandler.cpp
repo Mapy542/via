@@ -19,6 +19,8 @@ class TestNativeDocShortcutHandler : public QObject {
     void testExtensionsAndMimeTypes_SameCount();
     void testMimePackageXml_ContainsAllExtensions();
     void testMimePackageXml_ContainsAllMimeTypes();
+    void testDesktopMimeTypes_AreDistinct();
+    void testDesktopMimeTypes_MatchExpectedPrefix();
 };
 
 void TestNativeDocShortcutHandler::testMimeTypeField_ContainsAllRegisteredTypes() {
@@ -78,6 +80,20 @@ void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllMimeTypes() {
     const QString xml = nativeDocMimePackageXml();
     for (const QString& mime : nativeDocDesktopMimeTypes()) {
         QVERIFY2(xml.contains(mime), qPrintable(QStringLiteral("MIME package XML missing type ") + mime));
+    }
+}
+
+void TestNativeDocShortcutHandler::testDesktopMimeTypes_AreDistinct() {
+    const QStringList mimes = nativeDocDesktopMimeTypes();
+    QSet<QString> unique(mimes.begin(), mimes.end());
+    QCOMPARE(unique.size(), mimes.size());
+}
+
+void TestNativeDocShortcutHandler::testDesktopMimeTypes_MatchExpectedPrefix() {
+    // All custom MIME types must use the application/x-via- prefix
+    for (const QString& mime : nativeDocDesktopMimeTypes()) {
+        QVERIFY2(mime.startsWith(QStringLiteral("application/x-via-")),
+                 qPrintable(QStringLiteral("Unexpected MIME prefix: ") + mime));
     }
 }
 

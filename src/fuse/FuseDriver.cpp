@@ -1470,6 +1470,8 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         if (repr.visible && !repr.synthetic && !repr.outputMimeType.isEmpty()) {
             QString cachePath = drv->m_fileCache->getExportedPath(meta.fileId, repr.outputMimeType);
             if (cachePath.isEmpty()) {
+                qWarning() << "FuseDriver::open: export failed for" << meta.fileId
+                           << "(" << meta.name << ") as" << repr.outputMimeType;
                 return -EIO;
             }
 

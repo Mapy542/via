@@ -64,6 +64,8 @@ class AutostartManager {
             }
         }
 
+        installDefaultMimeAssociations();
+
         syncAutostart();
     }
 
@@ -248,16 +250,51 @@ class AutostartManager {
         QMimeDatabase mimeDb;
         const QStringList extensions = nativeDocShortcutExtensions();
         const QStringList expectedTypes = nativeDocDesktopMimeTypes();
+        bool allValid = true;
         for (int i = 0; i < extensions.size(); ++i) {
             const QString fileName = QStringLiteral("test.") + extensions[i];
             const QMimeType resolved = mimeDb.mimeTypeForFile(fileName, QMimeDatabase::MatchExtension);
             if (resolved.name() != expectedTypes[i]) {
                 qInfo("AutostartManager: .%s resolved to %s, expected %s", qPrintable(extensions[i]),
                       qPrintable(resolved.name()), qPrintable(expectedTypes[i]));
-                return false;
+                allValid = false;
             }
         }
-        return true;
+
+        // Also verify that via.desktop is the default handler for our types.
+        // Read the user's mimeapps.list and check the [Default Applications] section.
+        const QString configDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+        const QString mimeappsPath = configDir + "/mimeapps.list";
+        QFile mimeappsFile(mimeappsPath);
+        QMap<QString, QString> defaults;
+        if (mimeappsFile.exists() && mimeappsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            bool inDefaultSection = false;
+            while (!mimeappsFile.atEnd()) {
+                const QString line = QString::fromUtf8(mimeappsFile.readLine()).trimmed();
+                if (line.startsWith(QLatin1Char('[')) && line.endsWith(QLatin1Char(']'))) {
+                    inDefaultSection = (line == QLatin1String("[Default Applications]"));
+                    continue;
+                }
+                if (inDefaultSection) {
+                    const int eq = line.indexOf(QLatin1Char('='));
+                    if (eq > 0) {
+                        defaults.insert(line.left(eq), line.mid(eq + 1));
+                    }
+                }
+            }
+            mimeappsFile.close();
+        }
+
+        for (const QString& mime : expectedTypes) {
+            const QString handler = defaults.value(mime);
+            if (!handler.contains(QLatin1String("via.desktop"))) {
+                qInfo("AutostartManager: default handler for %s is '%s', expected via.desktop",
+                      qPrintable(mime), qPrintable(handler));
+                allValid = false;
+            }
+        }
+
+        return allValid;
     }
 
     static void refreshDesktopDatabases() {
@@ -280,6 +317,121 @@ class AutostartManager {
                 qWarning("AutostartManager: update-mime-database failed (%d)", rc);
             }
         }
+
+        // KDE/Plasma maintains its own service cache (sycoca). Without
+        // rebuilding it, Dolphin may not pick up new MIME type associations
+        // until the cache expires (~5 minutes) or the session restarts.
+        refreshKdeSycoca();
+    }
+
+    /**
+     * @brief Rebuild the KDE service cache if running under Plasma
+     *
+     * Tries kbuildsycoca6 first (Plasma 6), then kbuildsycoca5 (Plasma 5).
+     * No-op on non-KDE desktops.
+     */
+    static void refreshKdeSycoca() {
+        const QString currentDesktop = QString::fromUtf8(qgetenv("XDG_CURRENT_DESKTOP")).toLower();
+        if (!currentDesktop.contains(QLatin1String("kde")) &&
+            !currentDesktop.contains(QLatin1String("plasma"))) {
+            return;  // Not KDE — nothing to do
+        }
+
+        // Prefer kbuildsycoca6 (Plasma 6), fall back to kbuildsycoca5
+        QString kbuildsycoca = QStandardPaths::findExecutable(QStringLiteral("kbuildsycoca6"));
+        if (kbuildsycoca.isEmpty()) {
+            kbuildsycoca = QStandardPaths::findExecutable(QStringLiteral("kbuildsycoca5"));
+        }
+        if (kbuildsycoca.isEmpty()) {
+            qInfo("AutostartManager: KDE detected but kbuildsycoca not found — skipping sycoca refresh");
+            return;
+        }
+
+        const int rc = QProcess::execute(kbuildsycoca, {QStringLiteral("--noincremental")});
+        if (rc != 0) {
+            qWarning("AutostartManager: %s failed (%d)", qPrintable(kbuildsycoca), rc);
+        } else {
+            qInfo("AutostartManager: KDE service cache rebuilt via %s", qPrintable(kbuildsycoca));
+        }
+    }
+
+    /**
+     * @brief Set Via as the default opener for its private MIME types
+     *
+     * Writes a [Default Applications] section to the user's mimeapps.list
+     * so that file managers (Dolphin, Nautilus, etc.) open .gdoc/.gsheet/etc.
+     * files with Via without prompting.
+     *
+     * Only adds defaults for types that do not already have one, so it
+     * never overrides an explicit user choice.
+     */
+    static void installDefaultMimeAssociations() {
+        const QString configDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+        const QString mimeappsPath = configDir + "/mimeapps.list";
+
+        // Read the current file (may not exist yet)
+        QMap<QString, QString> defaults;
+        QStringList otherLines;
+        bool inDefaultSection = false;
+
+        QFile existing(mimeappsPath);
+        if (existing.exists() && existing.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            while (!existing.atEnd()) {
+                const QString line = QString::fromUtf8(existing.readLine()).trimmed();
+                if (line.startsWith(QLatin1Char('[')) && line.endsWith(QLatin1Char(']'))) {
+                    inDefaultSection = (line == QLatin1String("[Default Applications]"));
+                    if (!inDefaultSection) {
+                        otherLines.append(line);
+                    }
+                    continue;
+                }
+                if (inDefaultSection) {
+                    const int eq = line.indexOf(QLatin1Char('='));
+                    if (eq > 0) {
+                        defaults.insert(line.left(eq), line.mid(eq + 1));
+                    }
+                } else {
+                    otherLines.append(line);
+                }
+            }
+            existing.close();
+        }
+
+        // Add our types only if not already set
+        const QStringList mimeTypes = nativeDocDesktopMimeTypes();
+        bool changed = false;
+        for (const QString& mime : mimeTypes) {
+            if (!defaults.contains(mime)) {
+                defaults.insert(mime, QStringLiteral("via.desktop"));
+                changed = true;
+            }
+        }
+
+        if (!changed) {
+            return;  // All associations already present
+        }
+
+        // Rewrite the file
+        QDir().mkpath(configDir);
+        QFile file(mimeappsPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            qWarning("AutostartManager: failed to write %s", qPrintable(mimeappsPath));
+            return;
+        }
+
+        QTextStream out(&file);
+        // Write non-default sections first
+        for (const QString& line : otherLines) {
+            out << line << "\n";
+        }
+        // Write our [Default Applications] section
+        out << "[Default Applications]\n";
+        for (auto it = defaults.constBegin(); it != defaults.constEnd(); ++it) {
+            out << it.key() << "=" << it.value() << "\n";
+        }
+        file.close();
+
+        qInfo("AutostartManager: installed default MIME associations to %s", qPrintable(mimeappsPath));
     }
 
     /**

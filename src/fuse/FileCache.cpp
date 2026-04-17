@@ -343,7 +343,7 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
     qDebug() << "FileCache: Cache miss (export) for" << fileId << ", exporting as"
              << exportMimeType;
 
-    QString cachePath = generateCachePath(fileId);
+    QString cachePath = generateCachePath(fileId, exportMimeType);
 
     QFileInfo fileInfo(cachePath);
     QDir parentDir = fileInfo.dir();
@@ -400,6 +400,14 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
     }
 
     QFileInfo downloadedFile(cachePath);
+
+    // Reject zero-byte exports as a defense-in-depth check.
+    if (downloadedFile.size() <= 0) {
+        qWarning() << "FileCache: Export for" << fileId << "produced a zero-byte file, discarding";
+        QFile::remove(cachePath);
+        emit downloadFailed(fileId, "Export produced an empty file");
+        return QString();
+    }
     CacheEntry entry;
     entry.fileId = fileId;
     entry.cachePath = cachePath;
@@ -869,6 +877,16 @@ QString FileCache::generateCachePath(const QString& fileId) const {
     // Use first 2 characters as subdirectory for better filesystem distribution
     QString subDir = QString::fromLatin1(hash.left(2));
 
+    return m_cacheDirectory + "/" + subDir + "/" + QString::fromLatin1(hash);
+}
+
+QString FileCache::generateCachePath(const QString& fileId, const QString& exportMimeType) const {
+    // For exports, hash fileId + exportMimeType so different representations
+    // get distinct on-disk paths even if the in-memory map is keyed by fileId.
+    QByteArray combined = (fileId + "|" + exportMimeType).toUtf8();
+    QByteArray hash = QCryptographicHash::hash(combined, QCryptographicHash::Sha256).toHex();
+
+    QString subDir = QString::fromLatin1(hash.left(2));
     return m_cacheDirectory + "/" + subDir + "/" + QString::fromLatin1(hash);
 }
 

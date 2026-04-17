@@ -505,6 +505,7 @@ class FileCache : public QObject {
    private:
     // Internal helpers
     QString generateCachePath(const QString& fileId) const;
+    QString generateCachePath(const QString& fileId, const QString& exportMimeType) const;
     QString generateDirtyPath(const QString& fileId) const;
     void loadCacheFromDatabase();
     void evictLRU();
