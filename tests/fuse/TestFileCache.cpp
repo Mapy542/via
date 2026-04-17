@@ -141,7 +141,8 @@ void TestFileCache::destroyTestDatabase() {
 // ---------------------------------------------------------------------------
 // Helpers — put a file into cache so invalidate / remove have something to act on
 // ---------------------------------------------------------------------------
-static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId, qint64 size = 100) {
+static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId,
+                          qint64 size = 100) {
     // Create a real file on disk inside the cache directory
     QString filePath = cacheDir + "/" + fileId;
     QFile f(filePath);
@@ -179,7 +180,9 @@ void TestFileCache::testClearDirty_RemovesDirtyFlag() {
     QVERIFY(!m_cache->isDirty("f1"));
 }
 
-void TestFileCache::testIsDirty_ReturnsFalseForUnknown() { QVERIFY(!m_cache->isDirty("nonexistent")); }
+void TestFileCache::testIsDirty_ReturnsFalseForUnknown() {
+    QVERIFY(!m_cache->isDirty("nonexistent"));
+}
 
 void TestFileCache::testGetDirtyFiles_ReturnsAll() {
     m_cache->markDirty("a", "/a.txt");

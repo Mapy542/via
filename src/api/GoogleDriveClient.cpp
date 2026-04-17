@@ -368,11 +368,13 @@ void GoogleDriveClient::exportFile(const QString& fileId, const QString& exportM
         // Reject zero-byte exports — the server returned success but no content.
         const qint64 exportedSize = QFileInfo(localPath).size();
         if (exportedSize <= 0) {
-            qWarning("GoogleDriveClient: export for %s produced a zero-byte file, treating as error",
-                     qPrintable(fileId));
+            qWarning(
+                "GoogleDriveClient: export for %s produced a zero-byte file, treating as error",
+                qPrintable(fileId));
             QFile::remove(localPath);
             emit error("exportFile:" + fileId,
-                        "Export produced an empty file (0 bytes). The document may be empty or the export format unsupported.");
+                       "Export produced an empty file (0 bytes). The document may be empty or the "
+                       "export format unsupported.");
             return;
         }
 

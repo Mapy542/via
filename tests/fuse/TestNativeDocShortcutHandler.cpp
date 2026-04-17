@@ -41,7 +41,8 @@ void TestNativeDocShortcutHandler::testParseShortcutText_ValidShortcut() {
 
     const auto parsed = parseNativeDocShortcutText(text);
     QVERIFY(parsed.has_value());
-    QCOMPARE(parsed->url.toString(), QStringLiteral("https://docs.google.com/document/d/example/edit"));
+    QCOMPARE(parsed->url.toString(),
+             QStringLiteral("https://docs.google.com/document/d/example/edit"));
     QCOMPARE(parsed->remoteMimeType, QStringLiteral("application/vnd.google-apps.document"));
 }
 
@@ -72,14 +73,16 @@ void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllExtensions() {
     const QString xml = nativeDocMimePackageXml();
     for (const QString& ext : nativeDocShortcutExtensions()) {
         const QString glob = QStringLiteral("*.") + ext;
-        QVERIFY2(xml.contains(glob), qPrintable(QStringLiteral("MIME package XML missing glob for .") + ext));
+        QVERIFY2(xml.contains(glob),
+                 qPrintable(QStringLiteral("MIME package XML missing glob for .") + ext));
     }
 }
 
 void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllMimeTypes() {
     const QString xml = nativeDocMimePackageXml();
     for (const QString& mime : nativeDocDesktopMimeTypes()) {
-        QVERIFY2(xml.contains(mime), qPrintable(QStringLiteral("MIME package XML missing type ") + mime));
+        QVERIFY2(xml.contains(mime),
+                 qPrintable(QStringLiteral("MIME package XML missing type ") + mime));
     }
 }
 

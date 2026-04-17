@@ -75,7 +75,8 @@ class AutostartManager {
      * @return true on success
      */
     static bool setAutostart(bool enabled) {
-        QString autostartDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/autostart";
+        QString autostartDir =
+            QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/autostart";
 
         QString desktopFilePath = autostartDir + "/via.desktop";
 
@@ -103,7 +104,8 @@ class AutostartManager {
      * @return true if ~/.config/autostart/via.desktop exists
      */
     static bool isAutostartEnabled() {
-        QString path = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/autostart/via.desktop";
+        QString path = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) +
+                       "/autostart/via.desktop";
         return QFile::exists(path);
     }
 
@@ -188,7 +190,8 @@ class AutostartManager {
      * user moves the AppImage.
      */
     static bool installDesktopFile(const QString& execPath) {
-        QString appsDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/applications";
+        QString appsDir =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/applications";
 
         QDir dir;
         if (!dir.mkpath(appsDir)) {
@@ -212,7 +215,8 @@ class AutostartManager {
 
     static bool installMimePackage() {
         const QString mimePackagesDir =
-            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/mime/packages";
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+            "/mime/packages";
 
         QDir dir;
         if (!dir.mkpath(mimePackagesDir)) {
@@ -253,10 +257,12 @@ class AutostartManager {
         bool allValid = true;
         for (int i = 0; i < extensions.size(); ++i) {
             const QString fileName = QStringLiteral("test.") + extensions[i];
-            const QMimeType resolved = mimeDb.mimeTypeForFile(fileName, QMimeDatabase::MatchExtension);
+            const QMimeType resolved =
+                mimeDb.mimeTypeForFile(fileName, QMimeDatabase::MatchExtension);
             if (resolved.name() != expectedTypes[i]) {
-                qInfo("AutostartManager: .%s resolved to %s, expected %s", qPrintable(extensions[i]),
-                      qPrintable(resolved.name()), qPrintable(expectedTypes[i]));
+                qInfo("AutostartManager: .%s resolved to %s, expected %s",
+                      qPrintable(extensions[i]), qPrintable(resolved.name()),
+                      qPrintable(expectedTypes[i]));
                 allValid = false;
             }
         }
@@ -298,11 +304,13 @@ class AutostartManager {
     }
 
     static void refreshDesktopDatabases() {
-        const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+        const QString dataDir =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
         const QString appsDir = dataDir + "/applications";
         const QString mimeDir = dataDir + "/mime";
 
-        const QString updateDesktopDatabase = QStandardPaths::findExecutable(QStringLiteral("update-desktop-database"));
+        const QString updateDesktopDatabase =
+            QStandardPaths::findExecutable(QStringLiteral("update-desktop-database"));
         if (!updateDesktopDatabase.isEmpty()) {
             const int rc = QProcess::execute(updateDesktopDatabase, {appsDir});
             if (rc != 0) {
@@ -310,7 +318,8 @@ class AutostartManager {
             }
         }
 
-        const QString updateMimeDatabase = QStandardPaths::findExecutable(QStringLiteral("update-mime-database"));
+        const QString updateMimeDatabase =
+            QStandardPaths::findExecutable(QStringLiteral("update-mime-database"));
         if (!updateMimeDatabase.isEmpty()) {
             const int rc = QProcess::execute(updateMimeDatabase, {mimeDir});
             if (rc != 0) {
@@ -343,7 +352,9 @@ class AutostartManager {
             kbuildsycoca = QStandardPaths::findExecutable(QStringLiteral("kbuildsycoca5"));
         }
         if (kbuildsycoca.isEmpty()) {
-            qInfo("AutostartManager: KDE detected but kbuildsycoca not found — skipping sycoca refresh");
+            qInfo(
+                "AutostartManager: KDE detected but kbuildsycoca not found — skipping sycoca "
+                "refresh");
             return;
         }
 
@@ -431,7 +442,8 @@ class AutostartManager {
         }
         file.close();
 
-        qInfo("AutostartManager: installed default MIME associations to %s", qPrintable(mimeappsPath));
+        qInfo("AutostartManager: installed default MIME associations to %s",
+              qPrintable(mimeappsPath));
     }
 
     /**
@@ -442,8 +454,8 @@ class AutostartManager {
      * ~/.local/share/icons/hicolor/scalable/apps/via.svg
      */
     static void installIcon() {
-        QString iconsDir =
-            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/icons/hicolor/scalable/apps";
+        QString iconsDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+                           "/icons/hicolor/scalable/apps";
 
         QString destPath = iconsDir + "/via.svg";
         if (QFile::exists(destPath)) {
