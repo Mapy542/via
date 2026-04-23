@@ -208,15 +208,13 @@ class IFileCacheProvider {
  * The file handle (fi->fh) in FUSE callbacks maps to an entry in m_openFiles.
  */
 struct FuseOpenFile {
-    // TODO: Open FuseOpenFile handles currently store a cachePath string, not a stable local fd.
-    // clearDirty() can invalidate these paths by moving the cache file, breaking writes.
-    // Should be refactored to hold an open OS-level file descriptor instead.
-    QString fileId;     ///< Google Drive file ID
-    QString path;       ///< Path in FUSE filesystem
-    QString cachePath;  ///< Local cache path
-    qint64 size;        ///< File size
-    bool writable;      ///< Whether opened for writing
-    bool dirty;         ///< Whether file has been modified
+    QString fileId;          ///< Google Drive file ID
+    QString path;            ///< Path in FUSE filesystem
+    int localFd = -1;        ///< Stable local fd for regular files; -1 for synthetic stubs
+    qint64 size = 0;         ///< File size
+    bool writable = false;   ///< Whether opened for writing
+    bool dirty = false;      ///< Whether file has been modified
+    bool synthetic = false;  ///< true for browser-shortcut native docs with generated content
 };
 
 /**
@@ -255,6 +253,8 @@ struct FuseOpenFile {
  */
 class FuseDriver : public QObject {
     Q_OBJECT
+
+    friend class TestFuseDriverLifecycle;
 
    public:
     /**
@@ -676,6 +676,25 @@ class FuseDriver : public QObject {
      * @return true if successful
      */
     bool initializeFileCache();
+
+    /**
+     * @brief Move dirty bytes into the pending store, refresh metadata, and wake uploads
+     * @param fileId Google Drive file ID
+     * @param path FUSE path for logging and metadata context
+     * @param localFd Stable fd for the dirty content, or -1 if unavailable
+     * @return true if the file is staged for background upload
+     */
+    bool stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd = -1);
+
+    /**
+     * @brief Truncate a file when no registered FUSE handle exists for it
+     * @param fileId Google Drive file ID
+     * @param expectedSize Cached/remote size hint for getCachedPath()
+     * @param path FUSE path of the file
+     * @param size New file size in bytes
+     * @return 0 on success, or a negative errno-style value on failure
+     */
+    int truncateWithoutHandle(const QString& fileId, qint64 expectedSize, const QString& path, off_t size);
 
     /**
      * @brief Start background worker threads

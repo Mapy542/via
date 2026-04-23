@@ -224,6 +224,7 @@ if(BUILD_TESTS)
     # FUSE subsystem tests
     add_qt_test(test_FileCache tests/fuse/TestFileCache.cpp)
     add_qt_test(test_DirtySyncWorker tests/fuse/TestDirtySyncWorker.cpp)
+    add_qt_test(test_FuseDriverLifecycle tests/fuse/TestFuseDriverLifecycle.cpp)
     add_qt_test(test_MetadataCache tests/fuse/TestMetadataCache.cpp)
     add_qt_test(test_NativeDocShortcutHandler tests/fuse/TestNativeDocShortcutHandler.cpp)
 

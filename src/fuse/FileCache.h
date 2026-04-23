@@ -104,8 +104,7 @@ class FileCache : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient,
-                       QObject* parent = nullptr);
+    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent = nullptr);
 
     ~FileCache() override;
 
@@ -268,8 +267,9 @@ class FileCache : public QObject {
      * record is preserved.
      *
      * Called from FuseDriver::fuseRelease() when a dirty file handle is
-     * closed.  Must be followed by updating all open FuseOpenFile handles
-     * for this fileId to the returned path (FuseDriver responsibility).
+     * closed.  Stable fd-based FuseOpenFile handles remain valid across the
+     * rename, so callers only need the returned path for path-based metadata
+     * or logging decisions.
      *
      * @param fileId Google Drive file ID
      * @return New on-disk path on success, or empty string on failure
@@ -499,8 +499,8 @@ class FileCache : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
-                         const QString& fileId, const QString& localPath);
+    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
+                         const QString& localPath);
 
    private:
     // Internal helpers
