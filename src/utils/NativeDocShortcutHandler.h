@@ -18,6 +18,18 @@ struct NativeDocShortcutInfo {
     QString remoteMimeType;
 };
 
+inline QString nativeDocShortcutPathFromArgument(const QString& argument) {
+    const QUrl url(argument);
+    if (url.isValid() && url.isLocalFile()) {
+        const QString localPath = url.toLocalFile();
+        if (!localPath.isEmpty()) {
+            return QFileInfo(localPath).absoluteFilePath();
+        }
+    }
+
+    return QFileInfo(argument).absoluteFilePath();
+}
+
 inline QStringList nativeDocShortcutExtensions() {
     return {
         QStringLiteral("gdoc"),  QStringLiteral("gsheet"), QStringLiteral("gslides"),
@@ -70,11 +82,53 @@ inline bool isNativeDocShortcutPath(const QString& path) {
     return nativeDocShortcutExtensions().contains(suffix);
 }
 
-inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(
-    const QString& text, QString* errorOut = nullptr) {
+inline bool isNativeDocShortcutArgument(const QString& argument, QString* resolvedPathOut = nullptr) {
+    const QString resolvedPath = nativeDocShortcutPathFromArgument(argument);
+    if (!isNativeDocShortcutPath(resolvedPath)) {
+        return false;
+    }
+
+    if (resolvedPathOut) {
+        *resolvedPathOut = resolvedPath;
+    }
+    return true;
+}
+
+inline bool isNativeDocExportLimitError(const QString& errorMsg, int httpStatus) {
+    if (httpStatus != 403) {
+        return false;
+    }
+
+    const QString lowered = errorMsg.toLower();
+    return lowered.contains(QStringLiteral("10 mb")) || lowered.contains(QStringLiteral("10mb")) ||
+           lowered.contains(QStringLiteral("too large to be exported")) ||
+           lowered.contains(QStringLiteral("too large to export")) ||
+           (lowered.contains(QStringLiteral("export")) &&
+            (lowered.contains(QStringLiteral("limit")) || lowered.contains(QStringLiteral("maximum")) ||
+             lowered.contains(QStringLiteral("size")) || lowered.contains(QStringLiteral("too large"))));
+}
+
+inline QString nativeDocExportFailureMessage(const QString& errorMsg, int httpStatus) {
+    if (isNativeDocExportLimitError(errorMsg, httpStatus)) {
+        return QStringLiteral("Google limits native doc exports to 10 MB. Open the document in your browser instead.");
+    }
+
+    const QString trimmed = errorMsg.trimmed();
+    if (!trimmed.isEmpty()) {
+        return trimmed;
+    }
+
+    if (httpStatus == 403) {
+        return QStringLiteral("Google rejected the export for this document or account.");
+    }
+
+    return QStringLiteral("Native document export failed.");
+}
+
+inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(const QString& text,
+                                                                       QString* errorOut = nullptr) {
     const QStringList rawLines = text.split(QLatin1Char('\n'));
-    if (rawLines.isEmpty() ||
-        rawLines.first().trimmed() != QStringLiteral("[Via Native Document]")) {
+    if (rawLines.isEmpty() || rawLines.first().trimmed() != QStringLiteral("[Via Native Document]")) {
         if (errorOut) {
             *errorOut = QStringLiteral("missing Via native-doc header");
         }
@@ -113,8 +167,8 @@ inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(
     return info;
 }
 
-inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutFile(
-    const QString& path, QString* errorOut = nullptr) {
+inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutFile(const QString& path,
+                                                                       QString* errorOut = nullptr) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         if (errorOut) {

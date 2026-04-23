@@ -58,7 +58,9 @@ class TestMetadataCache : public QObject {
     void testPersistence_SurvivesReinit();
     void testReplaceRemoteChildren_DisambiguatesDuplicatesWithFileIdSuffix();
     void testReplaceRemoteChildren_DisambiguatesDuplicatesWithNumericSuffix();
+    void testReplaceRemoteChildren_NativeDocsUseVisibleExtension();
     void testUpsertRemoteMetadata_DisambiguatesAgainstExistingSibling();
+    void testUpsertRemoteMetadata_NativeDocLegacyPathGetsExtension();
     void testDuplicateFolderAliasesKeepDistinctChildren();
     void testDuplicateAliasesPersistAcrossReinit();
 
@@ -79,20 +81,18 @@ class TestMetadataCache : public QObject {
     FakeDriveClientMC* m_driveClient = nullptr;
     MetadataCache* m_cache = nullptr;
 
-    static FuseFileMetadata makeFile(const QString& id, const QString& path,
-                                     const QString& parentId = "root", qint64 size = 100);
-    static FuseFileMetadata makeFolder(const QString& id, const QString& path,
-                                       const QString& parentId = "root");
-    static DriveFile makeRemoteEntry(const QString& id, const QString& name,
-                                     const QString& parentId = "root", bool isFolder = false,
+    static FuseFileMetadata makeFile(const QString& id, const QString& path, const QString& parentId = "root",
                                      qint64 size = 100);
+    static FuseFileMetadata makeFolder(const QString& id, const QString& path, const QString& parentId = "root");
+    static DriveFile makeRemoteEntry(const QString& id, const QString& name, const QString& parentId = "root",
+                                     bool isFolder = false, qint64 size = 100);
 };
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-FuseFileMetadata TestMetadataCache::makeFile(const QString& id, const QString& path,
-                                             const QString& parentId, qint64 size) {
+FuseFileMetadata TestMetadataCache::makeFile(const QString& id, const QString& path, const QString& parentId,
+                                             qint64 size) {
     FuseFileMetadata m;
     m.fileId = id;
     m.path = path;
@@ -108,8 +108,7 @@ FuseFileMetadata TestMetadataCache::makeFile(const QString& id, const QString& p
     return m;
 }
 
-FuseFileMetadata TestMetadataCache::makeFolder(const QString& id, const QString& path,
-                                               const QString& parentId) {
+FuseFileMetadata TestMetadataCache::makeFolder(const QString& id, const QString& path, const QString& parentId) {
     FuseFileMetadata m;
     m.fileId = id;
     m.path = path;
@@ -125,16 +124,15 @@ FuseFileMetadata TestMetadataCache::makeFolder(const QString& id, const QString&
     return m;
 }
 
-DriveFile TestMetadataCache::makeRemoteEntry(const QString& id, const QString& name,
-                                             const QString& parentId, bool isFolder, qint64 size) {
+DriveFile TestMetadataCache::makeRemoteEntry(const QString& id, const QString& name, const QString& parentId,
+                                             bool isFolder, qint64 size) {
     DriveFile file;
     file.id = id;
     file.name = name;
     file.parents = {parentId};
     file.isFolder = isFolder;
     file.size = isFolder ? 0 : size;
-    file.mimeType = isFolder ? QStringLiteral("application/vnd.google-apps.folder")
-                             : QStringLiteral("text/plain");
+    file.mimeType = isFolder ? QStringLiteral("application/vnd.google-apps.folder") : QStringLiteral("text/plain");
     file.createdTime = QDateTime::currentDateTimeUtc();
     file.modifiedTime = QDateTime::currentDateTimeUtc();
     return file;
@@ -300,23 +298,63 @@ void TestMetadataCache::testReplaceRemoteChildren_DisambiguatesDuplicatesWithNum
     QCOMPARE(m_cache->getPathByFileId("idB"), QString("report (1).txt"));
 }
 
+void TestMetadataCache::testReplaceRemoteChildren_NativeDocsUseVisibleExtension() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+
+    DriveFile first = makeRemoteEntry("docA", "laser09");
+    first.mimeType = QStringLiteral("application/vnd.google-apps.document");
+    first.webViewLink = QStringLiteral("https://docs.google.com/document/d/docA/edit");
+
+    DriveFile second = makeRemoteEntry("docB", "laser09");
+    second.mimeType = QStringLiteral("application/vnd.google-apps.document");
+    second.webViewLink = QStringLiteral("https://docs.google.com/document/d/docB/edit");
+
+    const QList<FuseFileMetadata> stored = m_cache->replaceRemoteChildren("root", {first, second});
+
+    QCOMPARE(stored.size(), 2);
+    QCOMPARE(m_cache->getPathByFileId("docA"), QString("laser09.gdoc"));
+    QCOMPARE(m_cache->getPathByFileId("docB"), QString("laser09_docB.gdoc"));
+}
+
 void TestMetadataCache::testUpsertRemoteMetadata_DisambiguatesAgainstExistingSibling() {
     QList<DriveFile> initial;
     initial << makeRemoteEntry("idA", "report.txt");
     m_cache->replaceRemoteChildren("root", initial);
 
-    const FuseFileMetadata stored =
-        m_cache->upsertRemoteMetadata(makeRemoteEntry("idB", "report.txt"));
+    const FuseFileMetadata stored = m_cache->upsertRemoteMetadata(makeRemoteEntry("idB", "report.txt"));
 
     QVERIFY(stored.isValid());
     QCOMPARE(stored.path, QString("report_idB.txt"));
     QCOMPARE(m_cache->getPathByFileId("idB"), QString("report_idB.txt"));
 }
 
+void TestMetadataCache::testUpsertRemoteMetadata_NativeDocLegacyPathGetsExtension() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+
+    FuseFileMetadata legacy = makeFile("docA", "laser09");
+    legacy.mimeType = QStringLiteral("application/vnd.google-apps.document");
+    legacy.remoteMimeType = QStringLiteral("application/vnd.google-apps.document");
+    legacy.remoteName = QStringLiteral("laser09");
+    legacy.webViewLink = QStringLiteral("https://docs.google.com/document/d/docA/edit");
+    m_cache->setMetadata(legacy);
+
+    DriveFile updated = makeRemoteEntry("docA", "laser09");
+    updated.mimeType = QStringLiteral("application/vnd.google-apps.document");
+    updated.webViewLink = QStringLiteral("https://docs.google.com/document/d/docA/edit");
+
+    const FuseFileMetadata stored = m_cache->upsertRemoteMetadata(updated);
+
+    QVERIFY(stored.isValid());
+    QCOMPARE(stored.path, QString("laser09.gdoc"));
+    QCOMPARE(m_cache->getPathByFileId("docA"), QString("laser09.gdoc"));
+    QVERIFY(!m_cache->getMetadataByPath("laser09").isValid());
+}
+
 void TestMetadataCache::testDuplicateFolderAliasesKeepDistinctChildren() {
     QList<DriveFile> folders;
-    folders << makeRemoteEntry("folderA", "dup", "root", true)
-            << makeRemoteEntry("folderB", "dup", "root", true);
+    folders << makeRemoteEntry("folderA", "dup", "root", true) << makeRemoteEntry("folderB", "dup", "root", true);
 
     m_cache->replaceRemoteChildren("root", folders);
 
@@ -377,38 +415,32 @@ void TestMetadataCache::testNativeDocPolicy_HideMode_AllInvisible() {
 }
 
 void TestMetadataCache::testNativeDocPolicy_BrowserShortcut_DocsSheetsSlides() {
-    auto doc = nativeDocRepresentation("application/vnd.google-apps.document",
-                                       NativeDocMode::BrowserShortcut);
+    auto doc = nativeDocRepresentation("application/vnd.google-apps.document", NativeDocMode::BrowserShortcut);
     QVERIFY(doc.visible);
     QCOMPARE(doc.extension, QString(".gdoc"));
     QVERIFY(doc.synthetic);
 
-    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet",
-                                         NativeDocMode::BrowserShortcut);
+    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet", NativeDocMode::BrowserShortcut);
     QVERIFY(sheet.visible);
     QCOMPARE(sheet.extension, QString(".gsheet"));
 
-    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation",
-                                          NativeDocMode::BrowserShortcut);
+    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation", NativeDocMode::BrowserShortcut);
     QVERIFY(slides.visible);
     QCOMPARE(slides.extension, QString(".gslides"));
 }
 
 void TestMetadataCache::testNativeDocPolicy_OpenDocument_MapsCorrectly() {
-    auto doc = nativeDocRepresentation("application/vnd.google-apps.document",
-                                       NativeDocMode::OpenDocument);
+    auto doc = nativeDocRepresentation("application/vnd.google-apps.document", NativeDocMode::OpenDocument);
     QVERIFY(doc.visible);
     QCOMPARE(doc.extension, QString(".odt"));
     QCOMPARE(doc.outputMimeType, QString("application/vnd.oasis.opendocument.text"));
     QVERIFY(!doc.synthetic);
 
-    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet",
-                                         NativeDocMode::OpenDocument);
+    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet", NativeDocMode::OpenDocument);
     QVERIFY(sheet.visible);
     QCOMPARE(sheet.extension, QString(".ods"));
 
-    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation",
-                                          NativeDocMode::OpenDocument);
+    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation", NativeDocMode::OpenDocument);
     QVERIFY(slides.visible);
     QCOMPARE(slides.extension, QString(".odp"));
 }
@@ -419,33 +451,29 @@ void TestMetadataCache::testNativeDocPolicy_Text_MapsCorrectly() {
     QCOMPARE(doc.extension, QString(".md"));
     QCOMPARE(doc.outputMimeType, QString("text/markdown"));
 
-    auto sheet =
-        nativeDocRepresentation("application/vnd.google-apps.spreadsheet", NativeDocMode::Text);
+    auto sheet = nativeDocRepresentation("application/vnd.google-apps.spreadsheet", NativeDocMode::Text);
     QVERIFY(sheet.visible);
     QCOMPARE(sheet.extension, QString(".csv"));
 
-    auto slides =
-        nativeDocRepresentation("application/vnd.google-apps.presentation", NativeDocMode::Text);
+    auto slides = nativeDocRepresentation("application/vnd.google-apps.presentation", NativeDocMode::Text);
     QVERIFY(slides.visible);
     QCOMPARE(slides.extension, QString(".txt"));
 }
 
 void TestMetadataCache::testNativeDocPolicy_UnsupportedTypes_HiddenInExportModes() {
     // Drawings, Forms, Scripts have no OpenDocument/Text export
-    auto drawing =
-        nativeDocRepresentation("application/vnd.google-apps.drawing", NativeDocMode::OpenDocument);
+    auto drawing = nativeDocRepresentation("application/vnd.google-apps.drawing", NativeDocMode::OpenDocument);
     QVERIFY(!drawing.visible);
 
     auto form = nativeDocRepresentation("application/vnd.google-apps.form", NativeDocMode::Text);
     QVERIFY(!form.visible);
 
-    auto script =
-        nativeDocRepresentation("application/vnd.google-apps.script", NativeDocMode::OpenDocument);
+    auto script = nativeDocRepresentation("application/vnd.google-apps.script", NativeDocMode::OpenDocument);
     QVERIFY(!script.visible);
 
     // But they should be visible in browser-shortcut mode
-    auto drawingBrowser = nativeDocRepresentation("application/vnd.google-apps.drawing",
-                                                  NativeDocMode::BrowserShortcut);
+    auto drawingBrowser =
+        nativeDocRepresentation("application/vnd.google-apps.drawing", NativeDocMode::BrowserShortcut);
     QVERIFY(drawingBrowser.visible);
 }
 

@@ -83,6 +83,66 @@ QString remoteNameForMetadata(const FuseFileMetadata& metadata) {
     return fileNameForPath(metadata.path);
 }
 
+QString visibleNameForMetadata(const FuseFileMetadata& metadata) {
+    if (!metadata.name.isEmpty()) {
+        return metadata.name;
+    }
+    return remoteNameForMetadata(metadata);
+}
+
+bool isDigitsOnly(QStringView value) {
+    if (value.isEmpty()) {
+        return false;
+    }
+
+    for (const QChar ch : value) {
+        if (!ch.isDigit()) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool existingPathMatchesVisibleName(const QString& existingPath, const QString& visibleName,
+                                    const QString& duplicateNameStrategy, const QString& fileId) {
+    const QString existingName = fileNameForPath(existingPath);
+    if (existingName == visibleName) {
+        return true;
+    }
+
+    const QFileInfo desiredInfo(visibleName);
+    const QFileInfo existingInfo(existingName);
+    if (desiredInfo.suffix() != existingInfo.suffix()) {
+        return false;
+    }
+
+    const QString desiredBase = desiredInfo.completeBaseName();
+    const QString existingBase = existingInfo.completeBaseName();
+
+    if (duplicateNameStrategy == QStringLiteral("numeric-suffix") || fileId.isEmpty()) {
+        const QString prefix = desiredBase + QStringLiteral(" (");
+        if (!existingBase.startsWith(prefix) || !existingBase.endsWith(QLatin1Char(')'))) {
+            return false;
+        }
+
+        const QStringView suffix =
+            QStringView(existingBase).mid(prefix.size(), existingBase.size() - prefix.size() - 1);
+        return isDigitsOnly(suffix);
+    }
+
+    const QString prefix = desiredBase + QLatin1Char('_') + fileId;
+    if (existingBase == prefix) {
+        return true;
+    }
+    if (!existingBase.startsWith(prefix + QLatin1Char('_'))) {
+        return false;
+    }
+
+    const QStringView suffix = QStringView(existingBase).mid(prefix.size() + 1);
+    return isDigitsOnly(suffix);
+}
+
 bool shouldExposeRemoteFile(const DriveFile& file) {
     if (!file.isValid()) {
         return false;
@@ -93,8 +153,7 @@ bool shouldExposeRemoteFile(const DriveFile& file) {
     if (file.isGoogleDoc() && !file.isFolder) {
         // Check native-doc serving mode from settings
         QSettings settings;
-        NativeDocMode mode =
-            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        NativeDocMode mode = nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
         if (mode == NativeDocMode::Hide) {
             return false;
         }
@@ -161,8 +220,7 @@ FuseFileMetadata fromDriveFile(const DriveFile& file) {
         // Append pseudo-extension based on current serving mode so the
         // FUSE-visible name reflects the representation format.
         QSettings settings;
-        NativeDocMode mode =
-            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        NativeDocMode mode = nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
         NativeDocRepresentation rep = nativeDocRepresentation(file.mimeType, mode);
         if (rep.visible && !rep.extension.isEmpty()) {
             metadata.name = file.name + rep.extension;
@@ -199,13 +257,13 @@ QString buildDisambiguatedFileName(const QString& remoteName, const QString& dup
 
 FuseFileMetadata resolveRemoteMetadata(const FuseFileMetadata& metadata, const QString& parentPath,
                                        const QHash<QString, FuseFileMetadata>& existingByFileId,
-                                       QSet<QString>* claimedPaths,
-                                       const QString& duplicateNameStrategy) {
+                                       QSet<QString>* claimedPaths, const QString& duplicateNameStrategy) {
     FuseFileMetadata resolved = metadata;
     resolved.path.clear();
 
     const QString remoteName = remoteNameForMetadata(metadata);
-    if (metadata.fileId.isEmpty() || remoteName.isEmpty() || parentPath.isEmpty()) {
+    const QString visibleName = visibleNameForMetadata(metadata);
+    if (metadata.fileId.isEmpty() || remoteName.isEmpty() || visibleName.isEmpty() || parentPath.isEmpty()) {
         return FuseFileMetadata();
     }
 
@@ -217,6 +275,7 @@ FuseFileMetadata resolveRemoteMetadata(const FuseFileMetadata& metadata, const Q
         const QString existingPath = normalizeMetadataPath(existing.path);
         if (!existingPath.isEmpty() && parentPathFor(existingPath) == parentPath &&
             remoteNameForMetadata(existing) == remoteName &&
+            existingPathMatchesVisibleName(existingPath, visibleName, duplicateNameStrategy, metadata.fileId) &&
             (!claimedPaths || !claimedPaths->contains(existingPath))) {
             resolved.path = existingPath;
             resolved.name = fileNameForPath(existingPath);
@@ -227,7 +286,7 @@ FuseFileMetadata resolveRemoteMetadata(const FuseFileMetadata& metadata, const Q
         }
     }
 
-    QString candidatePath = joinMetadataPath(parentPath, remoteName);
+    QString candidatePath = joinMetadataPath(parentPath, visibleName);
     if (!claimedPaths || !claimedPaths->contains(candidatePath)) {
         resolved.path = candidatePath;
         resolved.name = fileNameForPath(candidatePath);
@@ -238,8 +297,8 @@ FuseFileMetadata resolveRemoteMetadata(const FuseFileMetadata& metadata, const Q
     }
 
     for (int collisionIndex = 1;; ++collisionIndex) {
-        const QString candidateName = buildDisambiguatedFileName(remoteName, duplicateNameStrategy,
-                                                                 metadata.fileId, collisionIndex);
+        const QString candidateName =
+            buildDisambiguatedFileName(visibleName, duplicateNameStrategy, metadata.fileId, collisionIndex);
         candidatePath = joinMetadataPath(parentPath, candidateName);
         if (!claimedPaths || !claimedPaths->contains(candidatePath)) {
             resolved.path = candidatePath;
@@ -266,8 +325,7 @@ bool pathIsWithinSubtree(const QString& candidatePath, const QString& rootPath) 
 
 }  // namespace
 
-MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveClient,
-                             QObject* parent)
+MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent)
     : QObject(parent),
       m_database(database),
       m_driveClient(driveClient),
@@ -277,9 +335,8 @@ MetadataCache::MetadataCache(SyncDatabase* database, GoogleDriveClient* driveCli
       m_cacheMisses(0) {
     // Connect to Google Drive client signals for async metadata fetch
     if (m_driveClient) {
-        connect(
-            m_driveClient, &GoogleDriveClient::fileReceived, this,
-            [this](const DriveFile& file) { onApiMetadataReceived(file.id, fromDriveFile(file)); });
+        connect(m_driveClient, &GoogleDriveClient::fileReceived, this,
+                [this](const DriveFile& file) { onApiMetadataReceived(file.id, fromDriveFile(file)); });
     }
 }
 
@@ -426,8 +483,7 @@ QList<FuseFileMetadata> MetadataCache::getChildren(const QString& parentPath) co
     return result;
 }
 
-QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentPath,
-                                                          bool* fetched) {
+QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentPath, bool* fetched) {
     if (fetched) {
         *fetched = false;
     }
@@ -503,8 +559,7 @@ FuseFileMetadata MetadataCache::upsertRemoteMetadata(const DriveFile& file) {
     return upsertRemoteMetadataInternal(fromDriveFile(file));
 }
 
-QList<FuseFileMetadata> MetadataCache::replaceRemoteChildren(const QString& parentId,
-                                                             const QList<DriveFile>& files) {
+QList<FuseFileMetadata> MetadataCache::replaceRemoteChildren(const QString& parentId, const QList<DriveFile>& files) {
     QList<FuseFileMetadata> children;
     children.reserve(files.size());
 
@@ -928,8 +983,7 @@ void MetadataCache::onApiMetadataReceived(const QString& fileId, const FuseFileM
     }
 }
 
-void MetadataCache::onApiChildrenReceived(const QString& parentId,
-                                          const QList<FuseFileMetadata>& children) {
+void MetadataCache::onApiChildrenReceived(const QString& parentId, const QList<FuseFileMetadata>& children) {
     replaceRemoteChildrenInternal(parentId, children);
 }
 
@@ -981,8 +1035,7 @@ QString MetadataCache::resolveParentPath(const QString& parentId) const {
 
     {
         QReadLocker locker(&m_lock);
-        if (parentId == QStringLiteral("root") ||
-            (!m_rootFolderId.isEmpty() && parentId == m_rootFolderId)) {
+        if (parentId == QStringLiteral("root") || (!m_rootFolderId.isEmpty() && parentId == m_rootFolderId)) {
             return QStringLiteral("/");
         }
 
@@ -1029,8 +1082,8 @@ FuseFileMetadata MetadataCache::upsertRemoteMetadataInternal(const FuseFileMetad
         }
     }
 
-    FuseFileMetadata resolved = resolveRemoteMetadata(metadata, parentPath, existingByFileId,
-                                                      &claimedPaths, m_duplicateNameStrategy);
+    FuseFileMetadata resolved =
+        resolveRemoteMetadata(metadata, parentPath, existingByFileId, &claimedPaths, m_duplicateNameStrategy);
     if (!resolved.isValid()) {
         return FuseFileMetadata();
     }
@@ -1039,8 +1092,8 @@ FuseFileMetadata MetadataCache::upsertRemoteMetadataInternal(const FuseFileMetad
     return resolved;
 }
 
-QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
-    const QString& parentId, const QList<FuseFileMetadata>& children) {
+QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(const QString& parentId,
+                                                                     const QList<FuseFileMetadata>& children) {
     const QString parentPath = resolveParentPath(parentId);
     if (parentPath.isEmpty()) {
         qWarning() << "MetadataCache: Cannot find parent path for parentId:" << parentId;
@@ -1068,8 +1121,8 @@ QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
         }
 
         incomingIds.insert(child.fileId);
-        FuseFileMetadata resolved = resolveRemoteMetadata(child, parentPath, existingByFileId,
-                                                          &claimedPaths, m_duplicateNameStrategy);
+        FuseFileMetadata resolved =
+            resolveRemoteMetadata(child, parentPath, existingByFileId, &claimedPaths, m_duplicateNameStrategy);
         if (!resolved.isValid()) {
             continue;
         }
@@ -1102,11 +1155,10 @@ QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
         }
 
         for (const QString& staleRoot : staleRoots) {
-            const auto staleSelf =
-                std::find_if(existingChildren.cbegin(), existingChildren.cend(),
-                             [&staleRoot](const FuseMetadata& existingChild) {
-                                 return normalizeMetadataPath(existingChild.path) == staleRoot;
-                             });
+            const auto staleSelf = std::find_if(existingChildren.cbegin(), existingChildren.cend(),
+                                                [&staleRoot](const FuseMetadata& existingChild) {
+                                                    return normalizeMetadataPath(existingChild.path) == staleRoot;
+                                                });
             if (staleSelf != existingChildren.cend()) {
                 staleFileIds.insert(staleSelf->fileId);
             }
@@ -1177,8 +1229,7 @@ QString MetadataCache::getParentPath(const QString& path) {
 void MetadataCache::requestMetadataFromApi(const QString& fileId) {
     if (m_driveClient) {
         QMetaObject::invokeMethod(
-            m_driveClient,
-            [driveClient = m_driveClient, fileId]() { driveClient->getFile(fileId); },
+            m_driveClient, [driveClient = m_driveClient, fileId]() { driveClient->getFile(fileId); },
             Qt::QueuedConnection);
     }
 }
@@ -1186,8 +1237,7 @@ void MetadataCache::requestMetadataFromApi(const QString& fileId) {
 void MetadataCache::requestChildrenFromApi(const QString& parentId) {
     if (m_driveClient) {
         QMetaObject::invokeMethod(
-            m_driveClient,
-            [driveClient = m_driveClient, parentId]() { driveClient->listFiles(parentId); },
+            m_driveClient, [driveClient = m_driveClient, parentId]() { driveClient->listFiles(parentId); },
             Qt::QueuedConnection);
     }
 }
