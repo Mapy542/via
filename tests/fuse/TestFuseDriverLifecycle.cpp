@@ -14,6 +14,7 @@
 #include <QtTest/QtTest>
 
 #include "api/GoogleDriveClient.h"
+#include "fuse/FileCache.h"
 #include "fuse/FuseDriver.h"
 #include "sync/SyncDatabase.h"
 

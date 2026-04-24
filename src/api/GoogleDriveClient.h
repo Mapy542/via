@@ -48,6 +48,16 @@ class GoogleDriveClient : public QObject {
 
     ~GoogleDriveClient() override;
 
+    /**
+     * @brief Extract the most useful user-facing message from an API error response
+     * @param responseBody Raw HTTP response body, if available
+     * @param httpStatus HTTP status code (0 if unavailable)
+     * @param errorString Qt network error string
+     * @return Parsed server message, raw body preview, or an HTTP/Qt fallback message
+     */
+    static QString describeErrorResponse(const QByteArray& responseBody, int httpStatus,
+                                         const QString& errorString);
+
    public slots:
     /**
      * @brief List files in a folder

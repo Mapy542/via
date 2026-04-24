@@ -7,6 +7,7 @@
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
+#include "api/GoogleDriveClient.h"
 #include "utils/NativeDocShortcutHandler.h"
 
 class TestNativeDocShortcutHandler : public QObject {
@@ -23,6 +24,7 @@ class TestNativeDocShortcutHandler : public QObject {
     void testMimePackageXml_ContainsAllMimeTypes();
     void testDesktopMimeTypes_AreDistinct();
     void testDesktopMimeTypes_MatchExpectedPrefix();
+    void testDescribeErrorResponse_PlainTextExportLimitMapsToFriendlyMessage();
     void testExportFailureMessage_SizeLimitUsesFriendlyMessage();
     void testExportFailureMessage_403PermissionPreservesOriginal();
     void testExportFailureMessage_403WithoutTextUsesGenericMessage();
@@ -58,7 +60,8 @@ void TestNativeDocShortcutHandler::testShortcutArgument_LocalFileUrlResolvesToPa
 void TestNativeDocShortcutHandler::testShortcutArgument_MissingNativeDocStillDetected() {
     QString resolvedPath;
 
-    QVERIFY(isNativeDocShortcutArgument(QStringLiteral("/tmp/missing-shortcut.gdoc"), &resolvedPath));
+    QVERIFY(
+        isNativeDocShortcutArgument(QStringLiteral("/tmp/missing-shortcut.gdoc"), &resolvedPath));
     QVERIFY(resolvedPath.endsWith(QStringLiteral("missing-shortcut.gdoc")));
 }
 
@@ -70,7 +73,8 @@ void TestNativeDocShortcutHandler::testParseShortcutText_ValidShortcut() {
 
     const auto parsed = parseNativeDocShortcutText(text);
     QVERIFY(parsed.has_value());
-    QCOMPARE(parsed->url.toString(), QStringLiteral("https://docs.google.com/document/d/example/edit"));
+    QCOMPARE(parsed->url.toString(),
+             QStringLiteral("https://docs.google.com/document/d/example/edit"));
     QCOMPARE(parsed->remoteMimeType, QStringLiteral("application/vnd.google-apps.document"));
 }
 
@@ -101,14 +105,16 @@ void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllExtensions() {
     const QString xml = nativeDocMimePackageXml();
     for (const QString& ext : nativeDocShortcutExtensions()) {
         const QString glob = QStringLiteral("*.") + ext;
-        QVERIFY2(xml.contains(glob), qPrintable(QStringLiteral("MIME package XML missing glob for .") + ext));
+        QVERIFY2(xml.contains(glob),
+                 qPrintable(QStringLiteral("MIME package XML missing glob for .") + ext));
     }
 }
 
 void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllMimeTypes() {
     const QString xml = nativeDocMimePackageXml();
     for (const QString& mime : nativeDocDesktopMimeTypes()) {
-        QVERIFY2(xml.contains(mime), qPrintable(QStringLiteral("MIME package XML missing type ") + mime));
+        QVERIFY2(xml.contains(mime),
+                 qPrintable(QStringLiteral("MIME package XML missing type ") + mime));
     }
 }
 
@@ -126,8 +132,18 @@ void TestNativeDocShortcutHandler::testDesktopMimeTypes_MatchExpectedPrefix() {
     }
 }
 
+void TestNativeDocShortcutHandler::
+    testDescribeErrorResponse_PlainTextExportLimitMapsToFriendlyMessage() {
+    const QString detail = GoogleDriveClient::describeErrorResponse(
+        QByteArray("This file is too large to be exported."), 403, QString());
+
+    QVERIFY(detail.contains(QStringLiteral("too large to be exported")));
+    QVERIFY(nativeDocExportFailureMessage(detail, 403).contains(QStringLiteral("10 MB")));
+}
+
 void TestNativeDocShortcutHandler::testExportFailureMessage_SizeLimitUsesFriendlyMessage() {
-    const QString detail = nativeDocExportFailureMessage(QStringLiteral("This file is too large to be exported."), 403);
+    const QString detail = nativeDocExportFailureMessage(
+        QStringLiteral("This file is too large to be exported."), 403);
 
     QVERIFY(detail.contains(QStringLiteral("10 MB")));
 }
@@ -136,7 +152,8 @@ void TestNativeDocShortcutHandler::testExportFailureMessage_403PermissionPreserv
     const QString detail = nativeDocExportFailureMessage(
         QStringLiteral("The user does not have sufficient permissions for this file."), 403);
 
-    QCOMPARE(detail, QStringLiteral("The user does not have sufficient permissions for this file."));
+    QCOMPARE(detail,
+             QStringLiteral("The user does not have sufficient permissions for this file."));
 }
 
 void TestNativeDocShortcutHandler::testExportFailureMessage_403WithoutTextUsesGenericMessage() {
