@@ -44,6 +44,7 @@ class TestFuseDriverLifecycle : public QObject {
 
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
+    void testRegisterOpenFile_TracksWritableHandlesSeparately();
 
    private:
     void seedCachedFile(const QString& fileId, const QString& path, const QByteArray& content);
@@ -85,7 +86,8 @@ void TestFuseDriverLifecycle::cleanup() {
     QStandardPaths::setTestModeEnabled(false);
 }
 
-void TestFuseDriverLifecycle::seedCachedFile(const QString& fileId, const QString& path, const QByteArray& content) {
+void TestFuseDriverLifecycle::seedCachedFile(const QString& fileId, const QString& path,
+                                             const QByteArray& content) {
     const QString cachePath = m_driver->fileCache()->getCachePathForFile(fileId);
     QVERIFY(!cachePath.isEmpty());
     QVERIFY(QDir().mkpath(QFileInfo(cachePath).dir().absolutePath()));
@@ -182,6 +184,43 @@ void TestFuseDriverLifecycle::testStageDirtyFileForUpload_RetargetsRemainingHand
 
     m_driver->unregisterOpenFile(releasingFh);
     m_driver->unregisterOpenFile(remainingFh);
+}
+
+void TestFuseDriverLifecycle::testRegisterOpenFile_TracksWritableHandlesSeparately() {
+    const QString fileId = QStringLiteral("tracked_handle_modes");
+    const QString logicalPath = QStringLiteral("tracked.txt");
+
+    seedCachedFile(fileId, logicalPath, QByteArray("tracked"));
+
+    const QString cachePath = m_driver->fileCache()->getCachePathForFile(fileId);
+    const QByteArray encodedPath = QFile::encodeName(cachePath);
+
+    FuseOpenFile readOnlyHandle;
+    readOnlyHandle.fileId = fileId;
+    readOnlyHandle.path = QStringLiteral("/") + logicalPath;
+    readOnlyHandle.localFd = ::open(encodedPath.constData(), O_RDONLY);
+    QVERIFY(readOnlyHandle.localFd >= 0);
+    readOnlyHandle.writable = false;
+
+    const uint64_t readOnlyFh = m_driver->registerOpenFile(readOnlyHandle);
+    QVERIFY(m_driver->fileCache()->hasOpenHandles(fileId));
+    QVERIFY(!m_driver->fileCache()->hasOpenWritableHandles(fileId));
+    m_driver->unregisterOpenFile(readOnlyFh);
+
+    FuseOpenFile writableHandle;
+    writableHandle.fileId = fileId;
+    writableHandle.path = QStringLiteral("/") + logicalPath;
+    writableHandle.localFd = ::open(encodedPath.constData(), O_RDWR);
+    QVERIFY(writableHandle.localFd >= 0);
+    writableHandle.writable = true;
+
+    const uint64_t writableFh = m_driver->registerOpenFile(writableHandle);
+    QVERIFY(m_driver->fileCache()->hasOpenHandles(fileId));
+    QVERIFY(m_driver->fileCache()->hasOpenWritableHandles(fileId));
+    m_driver->unregisterOpenFile(writableFh);
+
+    QVERIFY(!m_driver->fileCache()->hasOpenHandles(fileId));
+    QVERIFY(!m_driver->fileCache()->hasOpenWritableHandles(fileId));
 }
 
 QTEST_MAIN(TestFuseDriverLifecycle)

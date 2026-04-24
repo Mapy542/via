@@ -1137,33 +1137,58 @@ void FuseDriver::flushDirtyFiles() {
 
     int uploadedCount = 0;
     for (const DirtyFileEntry& entry : dirtyFiles) {
-        // Use getContentPath so we read from the pending store if the file was
-        // moved there after its write handle was closed.
-        QString cachePath = m_fileCache->getContentPath(entry.fileId);
-        if (QFile::exists(cachePath) && m_driveClient) {
-            QString error;
-            DriveFile updated;
-            bool authFailure = false;
-            if (waitForUpdate(
-                    m_driveClient, entry.fileId, &updated,
-                    [&]() {
-                        return invokeDriveCall(m_driveClient, [&]() {
-                            m_driveClient->updateFile(entry.fileId, cachePath);
-                        });
-                    },
-                    &error, &authFailure)) {
-                if (m_fileCache->clearDirty(entry.fileId, entry.generation)) {
-                    uploadedCount++;
-                } else {
-                    qInfo() << "FuseDriver: Unmount flush preserved dirty state for" << entry.path
-                            << "- a newer generation or reopened handle still exists";
-                }
-            } else {
-                m_fileCache->markUploadFailed(entry.fileId);
-                qWarning() << "FuseDriver: Unmount flush upload failed for" << entry.path << ":"
-                           << error << "authFailure=" << authFailure;
+        const UploadSnapshotResult snapshot =
+            m_fileCache->createUploadSnapshot(entry.fileId, entry.generation);
+        if (snapshot.status == UploadSnapshotStatus::AlreadyUploaded) {
+            if (m_fileCache->finalizeUploadedGeneration(entry.fileId)) {
+                uploadedCount++;
             }
+            continue;
         }
+
+        if (snapshot.status == UploadSnapshotStatus::BlockedByWriter) {
+            qInfo() << "FuseDriver: Preserving dirty state for" << entry.path
+                    << "- writable FUSE handle still open during flush";
+            continue;
+        }
+
+        if (snapshot.status == UploadSnapshotStatus::StaleGeneration) {
+            continue;
+        }
+
+        if (snapshot.status != UploadSnapshotStatus::Ready || !m_driveClient ||
+            !QFile::exists(snapshot.snapshotPath)) {
+            m_fileCache->markUploadFailed(entry.fileId);
+            qWarning() << "FuseDriver: Unmount flush could not prepare snapshot for" << entry.path;
+            continue;
+        }
+
+        QString error;
+        DriveFile updated;
+        bool authFailure = false;
+        if (waitForUpdate(
+                m_driveClient, entry.fileId, &updated,
+                [&]() {
+                    return invokeDriveCall(m_driveClient, [&]() {
+                        m_driveClient->updateFile(entry.fileId, snapshot.snapshotPath);
+                    });
+                },
+                &error, &authFailure)) {
+            m_fileCache->markUploadedGeneration(entry.fileId, entry.generation);
+            if (m_fileCache->clearDirty(entry.fileId, entry.generation) ||
+                m_fileCache->finalizeUploadedGeneration(entry.fileId)) {
+                uploadedCount++;
+            } else {
+                qInfo() << "FuseDriver: Unmount flush preserved dirty state for" << entry.path
+                        << "- a newer generation or open writable handle still exists";
+            }
+        } else {
+            m_fileCache->markUploadFailed(entry.fileId);
+            qWarning() << "FuseDriver: Unmount flush upload failed for" << entry.path << ":"
+                       << error << "authFailure=" << authFailure;
+        }
+
+        m_fileCache->cleanupUploadSnapshot(snapshot.snapshotPath);
     }
 
     qInfo() << "FuseDriver: Flushed" << uploadedCount << "files";
@@ -2576,7 +2601,7 @@ uint64_t FuseDriver::registerOpenFile(const FuseOpenFile& openFile) {
     // Fix 2: Tell FileCache that this file has an active FUSE handle so it
     // will not be evicted or invalidated while the handle is open.
     if (m_fileCache && !openFile.fileId.isEmpty()) {
-        m_fileCache->addOpenHandle(openFile.fileId);
+        m_fileCache->addOpenHandle(openFile.fileId, openFile.writable);
     }
     return handle;
 }
@@ -2610,12 +2635,14 @@ bool FuseDriver::markOpenFileClean(uint64_t fh) {
 void FuseDriver::unregisterOpenFile(uint64_t fh) {
     QString fileId;
     int localFd = -1;
+    bool writable = false;
     {
         QMutexLocker locker(&m_openFilesMutex);
         auto it = m_openFiles.find(fh);
         if (it != m_openFiles.end()) {
             fileId = it->fileId;
             localFd = it->localFd;
+            writable = it->writable;
             m_openFiles.erase(it);
         }
     }
@@ -2625,6 +2652,6 @@ void FuseDriver::unregisterOpenFile(uint64_t fh) {
     // Fix 2: Decrement the open-handle count so the file becomes eligible
     // for eviction and invalidation once all handles are closed.
     if (m_fileCache && !fileId.isEmpty()) {
-        m_fileCache->removeOpenHandle(fileId);
+        m_fileCache->removeOpenHandle(fileId, writable);
     }
 }

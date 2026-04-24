@@ -143,7 +143,11 @@ class TestFileCache : public QObject {
     void testGetContentPath_CleanFile_ReturnsCachePath();
     void testClearDirty_RemovesPendingFile();
     void testClearDirty_SkipsStaleGeneration();
-    void testClearDirty_SkipsWhenOpenHandleExists();
+    void testClearDirty_AllowsReadOnlyHandle();
+    void testClearDirty_SkipsWhenWritableHandleExists();
+    void testCreateUploadSnapshot_CopiesPendingContent();
+    void testCreateUploadSnapshot_SkipsUploadedGeneration();
+    void testFinalizeUploadedGeneration_ClearsWhenWriterCloses();
 
     // Representation-specific cache key
     void testGenerateCachePath_ExportMimeProducesDifferentPath();
@@ -511,7 +515,36 @@ void TestFileCache::testClearDirty_SkipsStaleGeneration() {
     QVERIFY(!m_cache->isCached(fileId));
 }
 
-void TestFileCache::testClearDirty_SkipsWhenOpenHandleExists() {
+void TestFileCache::testClearDirty_AllowsReadOnlyHandle() {
+    const QString fileId = "reader_generation";
+
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write("reader");
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, 6);
+    m_cache->markDirty(fileId, "/reader_generation.txt");
+
+    QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    quint64 generation = dirty.first().generation;
+
+    QString pendingPath = m_cache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+
+    m_cache->addOpenHandle(fileId);
+    QVERIFY(m_cache->clearDirty(fileId, generation));
+    QVERIFY(!m_cache->isDirty(fileId));
+    QVERIFY(m_cache->isCached(fileId));
+
+    m_cache->removeOpenHandle(fileId);
+}
+
+void TestFileCache::testClearDirty_SkipsWhenWritableHandleExists() {
     const QString fileId = "busy_generation";
 
     QString cachePath = m_cache->getCachePathForFile(fileId);
@@ -532,14 +565,103 @@ void TestFileCache::testClearDirty_SkipsWhenOpenHandleExists() {
     QVERIFY(!pendingPath.isEmpty());
     QVERIFY(QFile::exists(pendingPath));
 
-    m_cache->addOpenHandle(fileId);
+    m_cache->addOpenHandle(fileId, true);
     QVERIFY(!m_cache->clearDirty(fileId, generation));
     QVERIFY(m_cache->isDirty(fileId));
     QVERIFY(QFile::exists(pendingPath));
     QVERIFY(!m_cache->isCached(fileId));
 
-    m_cache->removeOpenHandle(fileId);
+    m_cache->removeOpenHandle(fileId, true);
     QVERIFY(m_cache->clearDirty(fileId, generation));
+    QVERIFY(!m_cache->isDirty(fileId));
+    QVERIFY(m_cache->isCached(fileId));
+}
+
+void TestFileCache::testCreateUploadSnapshot_CopiesPendingContent() {
+    const QString fileId = "snapshot_copy";
+    const QByteArray original("original snapshot bytes");
+    const QByteArray updated("new local bytes");
+
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write(original);
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, original.size());
+    m_cache->markDirty(fileId, "/snapshot_copy.txt");
+
+    const quint64 generation = m_cache->getDirtyFiles().first().generation;
+    const QString pendingPath = m_cache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+
+    const UploadSnapshotResult snapshot = m_cache->createUploadSnapshot(fileId, generation);
+    QCOMPARE(snapshot.status, UploadSnapshotStatus::Ready);
+    QVERIFY(QFile::exists(snapshot.snapshotPath));
+    QVERIFY(QFile::exists(pendingPath));
+
+    QFile snapshotFile(snapshot.snapshotPath);
+    QVERIFY(snapshotFile.open(QIODevice::ReadOnly));
+    QCOMPARE(snapshotFile.readAll(), original);
+    snapshotFile.close();
+
+    QFile pendingFile(pendingPath);
+    QVERIFY(pendingFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    pendingFile.write(updated);
+    pendingFile.close();
+
+    QVERIFY(snapshotFile.open(QIODevice::ReadOnly));
+    QCOMPARE(snapshotFile.readAll(), original);
+    snapshotFile.close();
+
+    m_cache->cleanupUploadSnapshot(snapshot.snapshotPath);
+}
+
+void TestFileCache::testCreateUploadSnapshot_SkipsUploadedGeneration() {
+    const QString fileId = "snapshot_uploaded";
+
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write("already uploaded");
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, 16);
+    m_cache->markDirty(fileId, "/snapshot_uploaded.txt");
+
+    const quint64 generation = m_cache->getDirtyFiles().first().generation;
+    QVERIFY(!m_cache->moveToDirtyStore(fileId).isEmpty());
+    m_cache->markUploadedGeneration(fileId, generation);
+
+    const UploadSnapshotResult snapshot = m_cache->createUploadSnapshot(fileId, generation);
+    QCOMPARE(snapshot.status, UploadSnapshotStatus::AlreadyUploaded);
+    QVERIFY(snapshot.snapshotPath.isEmpty());
+}
+
+void TestFileCache::testFinalizeUploadedGeneration_ClearsWhenWriterCloses() {
+    const QString fileId = "finalize_uploaded";
+
+    QString cachePath = m_cache->getCachePathForFile(fileId);
+    QFileInfo ci(cachePath);
+    QVERIFY(QDir().mkpath(ci.dir().absolutePath()));
+    QFile cf(cachePath);
+    QVERIFY(cf.open(QIODevice::WriteOnly));
+    cf.write("finalize me");
+    cf.close();
+    m_cache->recordCacheEntry(fileId, cachePath, 11);
+    m_cache->markDirty(fileId, "/finalize_uploaded.txt");
+
+    const quint64 generation = m_cache->getDirtyFiles().first().generation;
+    QVERIFY(!m_cache->moveToDirtyStore(fileId).isEmpty());
+
+    m_cache->addOpenHandle(fileId, true);
+    m_cache->markUploadedGeneration(fileId, generation);
+    QVERIFY(!m_cache->finalizeUploadedGeneration(fileId));
+    QVERIFY(m_cache->isDirty(fileId));
+
+    m_cache->removeOpenHandle(fileId, true);
     QVERIFY(!m_cache->isDirty(fileId));
     QVERIFY(m_cache->isCached(fileId));
 }

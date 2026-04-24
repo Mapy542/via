@@ -9,8 +9,10 @@
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 #include <QtTest/QtTest>
+#include <functional>
 
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
@@ -27,6 +29,10 @@ class FakeDriveClientDSW : public GoogleDriveClient {
    public:
     explicit FakeDriveClientDSW(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
+    std::function<void(const QString&, const QString&)> beforeCompleteUpdate;
+    QByteArray lastUploadedBytes;
+    QString lastUploadLocalPath;
+
     /// When updateFile is called, either succeed or fail depending on the
     /// set of file IDs configured to fail.
     /// Signals are emitted asynchronously (via QTimer::singleShot) to match
@@ -40,6 +46,19 @@ class FakeDriveClientDSW : public GoogleDriveClient {
             });
         } else {
             QTimer::singleShot(0, this, [this, fileId, localPath]() {
+                if (beforeCompleteUpdate) {
+                    beforeCompleteUpdate(fileId, localPath);
+                }
+
+                QFile uploadedFile(localPath);
+                if (uploadedFile.open(QIODevice::ReadOnly)) {
+                    lastUploadedBytes = uploadedFile.readAll();
+                    uploadedFile.close();
+                } else {
+                    lastUploadedBytes.clear();
+                }
+                lastUploadLocalPath = localPath;
+
                 DriveFile f;
                 f.id = fileId;
                 f.name = QFileInfo(localPath).fileName();
@@ -69,6 +88,40 @@ class FakeDriveClientDSW : public GoogleDriveClient {
     QSet<QString> m_failIds;
     QMap<QString, int> m_updateCalls;
 };
+
+namespace {
+
+class ThreadedDirtySyncWorkerHarness {
+   public:
+    ThreadedDirtySyncWorkerHarness(FileCache* fileCache, GoogleDriveClient* driveClient,
+                                   SyncDatabase* database)
+        : m_worker(new DirtySyncWorker(fileCache, driveClient, database)) {
+        m_worker->setMaxRetries(2);
+        m_worker->setUploadTimeoutMs(500);
+        m_worker->setSyncIntervalMs(60 * 1000);
+        m_worker->moveToThread(&m_thread);
+        m_thread.start();
+        QMetaObject::invokeMethod(m_worker, "start", Qt::QueuedConnection);
+    }
+
+    ~ThreadedDirtySyncWorkerHarness() {
+        if (m_thread.isRunning() && m_worker) {
+            QMetaObject::invokeMethod(m_worker, "stop", Qt::BlockingQueuedConnection);
+            m_thread.quit();
+            m_thread.wait(5000);
+        }
+
+        delete m_worker;
+    }
+
+    DirtySyncWorker* worker() const { return m_worker; }
+
+   private:
+    QThread m_thread;
+    DirtySyncWorker* m_worker = nullptr;
+};
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Test fixture
@@ -103,7 +156,9 @@ class TestDirtySyncWorker : public QObject {
     void testOpenHandle_PreventsInvalidation();
     void testOpenHandle_PreventsEviction();
     void testOpenHandle_ReleasedAllowsInvalidation();
-    void testSyncNow_SkipsFileWithOpenHandle();
+    void testSyncNow_UploadsFileWithReadOnlyHandle();
+    void testSyncNow_DefersFileWithWritableHandle();
+    void testSyncNow_UploadUsesImmutableSnapshot();
 
    private:
     void createCacheFile(const QString& fileId);
@@ -137,6 +192,7 @@ void TestDirtySyncWorker::init() {
     m_cacheDir = m_tempDir->path() + "/cache";
     QDir().mkpath(m_cacheDir);
     m_fileCache->setCacheDirectory(m_cacheDir);
+    m_fileCache->setDirtyDirectory(m_tempDir->path() + "/pending");
     QVERIFY(m_fileCache->initialize());
 
     m_worker = new DirtySyncWorker(m_fileCache, m_driveClient, m_db, this);
@@ -174,7 +230,8 @@ void TestDirtySyncWorker::createCacheFile(const QString& fileId) {
     m_fileCache->recordCacheEntry(fileId, path, 9);
 }
 
-void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId, const QByteArray& content) {
+void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId,
+                                                     const QByteArray& content) {
     // Use the deterministic cache path so getCachePathForFile matches
     QString path = m_fileCache->getCachePathForFile(fileId);
     QDir().mkpath(QFileInfo(path).dir().absolutePath());
@@ -236,7 +293,8 @@ void TestDirtySyncWorker::testUploadError_MismatchedFileId_ErrorNotAttributed() 
 
     // Emit a stray error before starting (it will also fire during the
     // upload window because the synchronous signal runs before wait).
-    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated", "/elsewhere");
+    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated",
+                                      "/elsewhere");
 
     m_worker->start();
 
@@ -386,7 +444,8 @@ void TestDirtySyncWorker::testUpload_MetadataSizeFromRecycledFile() {
 
     // Verify: metadata must have the correct size, NOT zero
     FuseMetadata finalMeta = m_db->getFuseMetadata(fid);
-    QVERIFY2(finalMeta.size > 0, qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
+    QVERIFY2(finalMeta.size > 0,
+             qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
     QCOMPARE(finalMeta.size, static_cast<qint64>(content.size()));
 }
 
@@ -556,12 +615,39 @@ void TestDirtySyncWorker::testOpenHandle_ReleasedAllowsInvalidation() {
     QVERIFY(!m_fileCache->isCached(fid));
 }
 
-void TestDirtySyncWorker::testSyncNow_SkipsFileWithOpenHandle() {
-    const QString fid = "open_handle_upload_skip";
+void TestDirtySyncWorker::testSyncNow_UploadsFileWithReadOnlyHandle() {
+    const QString fid = "open_handle_upload_reader";
+    const QByteArray content = "content that should upload with reader open";
 
-    createCacheFileWithContent(fid, "content that must not upload while open");
-    m_fileCache->markDirty(fid, "/open_handle_upload_skip.txt");
+    createDirtyPendingFile(fid, content);
     m_fileCache->addOpenHandle(fid);
+
+    ThreadedDirtySyncWorkerHarness threadedWorker(m_fileCache, m_driveClient, m_db);
+    QSignalSpy completedSpy(threadedWorker.worker(), &DirtySyncWorker::uploadCompleted);
+    QSignalSpy cycleSpy(threadedWorker.worker(), &DirtySyncWorker::syncCycleCompleted);
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.size(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 1, 5000);
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 1);
+    QCOMPARE(cycleSpy.last().at(0).toInt(), 1);
+    QCOMPARE(cycleSpy.last().at(1).toInt(), 0);
+    QVERIFY(!m_fileCache->isDirty(fid));
+    QVERIFY(m_fileCache->isCached(fid));
+
+    QFile recycledFile(m_fileCache->getCachePathForFile(fid));
+    QVERIFY(recycledFile.open(QIODevice::ReadOnly));
+    QCOMPARE(recycledFile.readAll(), content);
+    recycledFile.close();
+
+    m_fileCache->removeOpenHandle(fid);
+}
+
+void TestDirtySyncWorker::testSyncNow_DefersFileWithWritableHandle() {
+    const QString fid = "open_handle_upload_writer";
+
+    createDirtyPendingFile(fid, "content that must not upload while writer open");
+    m_fileCache->addOpenHandle(fid, true);
 
     QSignalSpy cycleSpy(m_worker, &DirtySyncWorker::syncCycleCompleted);
 
@@ -572,7 +658,48 @@ void TestDirtySyncWorker::testSyncNow_SkipsFileWithOpenHandle() {
     QVERIFY(m_fileCache->isDirty(fid));
 
     m_worker->stop();
-    m_fileCache->removeOpenHandle(fid);
+    m_fileCache->removeOpenHandle(fid, true);
+}
+
+void TestDirtySyncWorker::testSyncNow_UploadUsesImmutableSnapshot() {
+    const QString fid = "immutable_snapshot_upload";
+    const QByteArray original("snapshot bytes");
+    const QByteArray updated("mutated after snapshot");
+
+    createDirtyPendingFile(fid, original);
+
+    m_driveClient->beforeCompleteUpdate = [this, fid, updated](const QString&, const QString&) {
+        const QString pendingPath = m_fileCache->getDirtyPathForFile(fid);
+        QFile pendingFile(pendingPath);
+        QVERIFY(pendingFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        pendingFile.write(updated);
+        pendingFile.close();
+        m_fileCache->markDirty(fid, "/immutable_snapshot_upload.txt");
+    };
+
+    ThreadedDirtySyncWorkerHarness threadedWorker(m_fileCache, m_driveClient, m_db);
+    QSignalSpy completedSpy(threadedWorker.worker(), &DirtySyncWorker::uploadCompleted);
+    QSignalSpy cycleSpy(threadedWorker.worker(), &DirtySyncWorker::syncCycleCompleted);
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.size(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 1, 5000);
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 1);
+    QCOMPARE(cycleSpy.last().at(0).toInt(), 1);
+    QCOMPARE(cycleSpy.last().at(1).toInt(), 0);
+    QCOMPARE(m_driveClient->lastUploadedBytes, original);
+    QVERIFY(m_fileCache->isDirty(fid));
+
+    const QList<DirtyFileEntry> dirty = m_fileCache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    QCOMPARE(dirty.first().generation, quint64(2));
+
+    QFile pendingFile(m_fileCache->getDirtyPathForFile(fid));
+    QVERIFY(pendingFile.open(QIODevice::ReadOnly));
+    QCOMPARE(pendingFile.readAll(), updated);
+    pendingFile.close();
+
+    QVERIFY(m_driveClient->lastUploadLocalPath.contains(QStringLiteral("/snapshots/")));
 }
 
 QTEST_MAIN(TestDirtySyncWorker)

@@ -64,12 +64,27 @@ struct CacheEntry {
  * - upload_failed INTEGER DEFAULT 0
  */
 struct DirtyFileEntry {
-    QString fileId;               ///< Google Drive file ID
-    QString path;                 ///< Logical path in FUSE filesystem
-    QDateTime markedDirtyAt;      ///< When file was marked dirty
-    QDateTime lastUploadAttempt;  ///< Last upload attempt time
-    bool uploadFailed;            ///< Whether last upload failed
-    quint64 generation = 0;       ///< In-memory version to detect stale uploads
+    QString fileId;                  ///< Google Drive file ID
+    QString path;                    ///< Logical path in FUSE filesystem
+    QDateTime markedDirtyAt;         ///< When file was marked dirty
+    QDateTime lastUploadAttempt;     ///< Last upload attempt time
+    bool uploadFailed;               ///< Whether last upload failed
+    quint64 generation = 0;          ///< In-memory version to detect stale uploads
+    quint64 uploadedGeneration = 0;  ///< Last local generation already uploaded to Drive
+};
+
+enum class UploadSnapshotStatus {
+    Ready,
+    AlreadyUploaded,
+    BlockedByWriter,
+    StaleGeneration,
+    MissingContent,
+    Failed
+};
+
+struct UploadSnapshotResult {
+    UploadSnapshotStatus status = UploadSnapshotStatus::Failed;
+    QString snapshotPath;
 };
 
 Q_DECLARE_METATYPE(CacheEntry)
@@ -105,7 +120,8 @@ class FileCache : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent = nullptr);
+    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient,
+                       QObject* parent = nullptr);
 
     ~FileCache() override;
 
@@ -382,6 +398,38 @@ class FileCache : public QObject {
      */
     QList<DirtyFileEntry> getDirtyFiles() const;
 
+    /**
+     * @brief Create an immutable local snapshot for uploading a dirty file
+     *
+     * For dirty files already staged in the persistent pending store, this
+     * renames the current pending inode into a snapshot path and then copies
+     * the bytes back to the pending path. Existing read handles remain pinned
+     * to the snapshot inode while future opens and writes see the fresh copy.
+     *
+     * @param fileId Google Drive file ID
+     * @param expectedGeneration Dirty generation the caller intends to upload
+     * @return Snapshot result describing whether a snapshot is ready, blocked,
+     *         already uploaded, stale, or failed.
+     */
+    UploadSnapshotResult createUploadSnapshot(const QString& fileId, quint64 expectedGeneration);
+
+    /**
+     * @brief Remove a previously created upload snapshot path
+     * @param snapshotPath Absolute path to the snapshot file
+     */
+    void cleanupUploadSnapshot(const QString& snapshotPath);
+
+    /**
+     * @brief Finalize a generation that was already uploaded
+     *
+     * Clears the dirty state once no writable handles remain. Read-only
+     * handles are safe because they survive local renames.
+     *
+     * @param fileId Google Drive file ID
+     * @return true if the dirty entry was finalized and cleared
+     */
+    bool finalizeUploadedGeneration(const QString& fileId);
+
     // ========================================================================
     // Cache Management
     // ========================================================================
@@ -416,14 +464,16 @@ class FileCache : public QObject {
     /**
      * @brief Increment the open-handle reference count for a file
      * @param fileId Google Drive file ID
+     * @param writable Whether the handle can still mutate the local file
      */
-    void addOpenHandle(const QString& fileId);
+    void addOpenHandle(const QString& fileId, bool writable = false);
 
     /**
      * @brief Decrement the open-handle reference count for a file
      * @param fileId Google Drive file ID
+     * @param writable Whether the handle could mutate the local file
      */
-    void removeOpenHandle(const QString& fileId);
+    void removeOpenHandle(const QString& fileId, bool writable = false);
 
     /**
      * @brief Check whether a file has any open FUSE handles
@@ -431,6 +481,28 @@ class FileCache : public QObject {
      * @return true if at least one handle is open
      */
     bool hasOpenHandles(const QString& fileId) const;
+
+    /**
+     * @brief Check whether a file has any open writable FUSE handles
+     * @param fileId Google Drive file ID
+     * @return true if at least one writable handle is open
+     */
+    bool hasOpenWritableHandles(const QString& fileId) const;
+
+    /**
+     * @brief Record that a specific dirty generation was uploaded
+     * @param fileId Google Drive file ID
+     * @param generation Local dirty generation uploaded to Drive
+     */
+    void markUploadedGeneration(const QString& fileId, quint64 generation);
+
+    /**
+     * @brief Check whether a dirty generation was already uploaded
+     * @param fileId Google Drive file ID
+     * @param generation Local dirty generation
+     * @return true if that generation was already uploaded to Drive
+     */
+    bool hasUploadedGeneration(const QString& fileId, quint64 generation) const;
 
     // ========================================================================
     // Cache Management
@@ -516,14 +588,21 @@ class FileCache : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
-                         const QString& localPath);
+    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
+                         const QString& fileId, const QString& localPath);
 
    private:
     // Internal helpers
     QString generateCachePath(const QString& fileId) const;
     QString generateCachePath(const QString& fileId, const QString& exportMimeType) const;
     QString generateDirtyPath(const QString& fileId) const;
+    QString generateUploadSnapshotPath(const QString& fileId, quint64 generation) const;
+    QString getContentPathLocked(const QString& fileId,
+                                 const QString& exportMimeType = QString()) const;
+    bool clearDirtyLocked(const QString& fileId, quint64 expectedGeneration);
+    bool maybeFinalizeUploadedGenerationLocked(const QString& fileId);
+    bool recycleAuthoritativeCopyToCacheLocked(const QString& fileId);
+    bool resetSnapshotDirectoryLocked();
     void loadCacheFromDatabase();
     void evictLRU();
     void updateCacheSizeFromDisk();
@@ -551,6 +630,11 @@ class FileCache : public QObject {
     // Open-handle reference counts — files with open FUSE handles
     // must not be evicted or invalidated (Fix 2)
     QMap<QString, int> m_openHandleCounts;
+
+    // Writable-handle reference counts — files with open writable FUSE
+    // handles must not be snapshotted for upload because the pending file
+    // can still be mutated after one writer closes.
+    QMap<QString, int> m_openWritableHandleCounts;
 
     // Thread safety
     mutable QMutex m_mutex;
