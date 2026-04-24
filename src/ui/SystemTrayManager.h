@@ -11,6 +11,8 @@
 #define SYSTEMTRAYMANAGER_H
 
 #include <QAction>
+#include <QDateTime>
+#include <QList>
 #include <QMenu>
 #include <QObject>
 #include <QString>
@@ -81,6 +83,12 @@ class SystemTrayManager : public QObject {
     void hide();
 
     /**
+     * @brief Get the underlying tray icon instance
+     * @return Pointer to the tray icon
+     */
+    QSystemTrayIcon* trayIcon() const { return m_trayIcon; }
+
+    /**
      * @brief Update the tray icon tooltip
      * @param message Tooltip message
      */
@@ -117,6 +125,13 @@ class SystemTrayManager : public QObject {
     void notificationClicked();
 
    public slots:
+    /**
+     * @brief Record a notification in the tray history menu
+     * @param title Notification title
+     * @param message Notification message
+     */
+    void recordNotification(const QString& title, const QString& message);
+
     /**
      * @brief Update mirror-sync subsystem status
      * @param status Current mirror sync status text
@@ -167,6 +182,7 @@ class SystemTrayManager : public QObject {
    private:
     void createMenu();
     void updatePauseAction(bool paused);
+    void refreshNotificationMenu();
 
     /**
      * @brief Pick the highest-severity icon across all subsystems and apply it
@@ -195,8 +211,15 @@ class SystemTrayManager : public QObject {
     SyncActionQueue* m_syncActionQueue;
     ChangeProcessor* m_changeProcessor;
 
+    struct NotificationEntry {
+        QString title;
+        QString message;
+        QDateTime timestamp;
+    };
+
     QSystemTrayIcon* m_trayIcon;
     QMenu* m_trayMenu;
+    QMenu* m_notificationsMenu;
 
     // Menu actions
     QAction* m_statusAction;
@@ -204,9 +227,13 @@ class SystemTrayManager : public QObject {
     QAction* m_pauseSyncAction;
     QAction* m_syncNowAction;
     QAction* m_recentChangesAction;
+    QAction* m_noNotificationsAction;
     QAction* m_openWindowAction;
     QAction* m_settingsAction;
     QAction* m_quitAction;
+
+    QList<NotificationEntry> m_notificationHistory;
+    static constexpr int MAX_NOTIFICATION_HISTORY = 20;
 
     bool m_syncPaused;
     bool m_hasConflicts;

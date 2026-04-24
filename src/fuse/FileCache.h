@@ -44,7 +44,8 @@ class GoogleDriveClient;
  * - download_completed TEXT NOT NULL
  */
 struct CacheEntry {
-    QString fileId;               ///< Google Drive file ID (primary key)
+    QString fileId;               ///< Google Drive file ID
+    QString cacheKey;             ///< Unique cache identity (raw fileId or fileId|exportMimeType)
     QString cachePath;            ///< Local cache path
     qint64 size;                  ///< File size in bytes
     QDateTime lastAccessed;       ///< Last access time (for LRU)
@@ -188,6 +189,14 @@ class FileCache : public QObject {
     bool isCached(const QString& fileId) const;
 
     /**
+     * @brief Check if a specific exported representation is cached and fresh
+     * @param fileId Google Drive file ID
+     * @param exportMimeType Target MIME type for the export
+     * @return true if the exported representation is in cache and fresh
+     */
+    bool isCached(const QString& fileId, const QString& exportMimeType) const;
+
+    /**
      * @brief Get cached file path (downloads if not cached)
      *
      * This is the main entry point from fuse_open. It:
@@ -257,6 +266,14 @@ class FileCache : public QObject {
      * @return Absolute path to the file's content, may not exist on disk
      */
     QString getContentPath(const QString& fileId) const;
+
+    /**
+     * @brief Get the authoritative on-disk path for an exported representation
+     * @param fileId Google Drive file ID
+     * @param exportMimeType Target MIME type for the export
+     * @return Absolute path to the exported content, may not exist on disk yet
+     */
+    QString getContentPath(const QString& fileId, const QString& exportMimeType) const;
 
     /**
      * @brief Move dirty file content from LRU cache into persistent store
@@ -539,8 +556,9 @@ class FileCache : public QObject {
     mutable QMutex m_mutex;
 
     // Download synchronization
-    QMap<QString, bool> m_pendingDownloads;   // fileId -> completed
-    QMap<QString, QString> m_downloadErrors;  // fileId -> error
+    QMap<QString, bool> m_pendingDownloads;         // cacheKey -> completed
+    QMap<QString, QString> m_pendingDownloadPaths;  // localPath -> cacheKey
+    QMap<QString, QString> m_downloadErrors;        // cacheKey -> error
     QWaitCondition m_downloadCondition;
 
     // Default 10GB cache size (as specified in procedure chart)

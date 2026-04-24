@@ -51,8 +51,8 @@ void NotificationManager::setEnabled(bool enabled) {
 
 void NotificationManager::setTrayIcon(QSystemTrayIcon* trayIcon) { m_trayIcon = trayIcon; }
 
-void NotificationManager::showNotification(const QString& title, const QString& message, Urgency urgency,
-                                           int timeoutMs) {
+void NotificationManager::showNotification(const QString& title, const QString& message, Urgency urgency, int timeoutMs,
+                                           bool persistent) {
     // Re-read the setting each time so changes take effect without restart
     QSettings settings;
     m_enabled = settings.value("advanced/showNotifications", true).toBool();
@@ -60,6 +60,8 @@ void NotificationManager::showNotification(const QString& title, const QString& 
     if (!m_enabled) {
         return;
     }
+
+    bool delivered = false;
 
     if (m_useDBus) {
         QString icon;
@@ -75,8 +77,10 @@ void NotificationManager::showNotification(const QString& title, const QString& 
                 break;
         }
 
-        sendDBusNotification(title, message, icon, timeoutMs);
-    } else if (m_trayIcon) {
+        delivered = sendDBusNotification(title, message, icon, urgency, timeoutMs, persistent);
+    }
+
+    if (!delivered && m_trayIcon) {
         QSystemTrayIcon::MessageIcon icon = QSystemTrayIcon::Information;
         switch (urgency) {
             case Low:
@@ -91,8 +95,17 @@ void NotificationManager::showNotification(const QString& title, const QString& 
                 break;
         }
 
-        sendTrayNotification(title, message, icon, timeoutMs);
+        sendTrayNotification(title, message, icon, persistent ? 15000 : timeoutMs);
+        delivered = true;
     }
+
+    if (delivered) {
+        emit notificationShown(title, message, persistent);
+    }
+}
+
+void NotificationManager::showPersistentNotification(const QString& title, const QString& message, Urgency urgency) {
+    showNotification(title, message, urgency, 0, true);
 }
 
 void NotificationManager::showInfo(const QString& title, const QString& message) {
@@ -107,6 +120,10 @@ void NotificationManager::showError(const QString& title, const QString& message
     showNotification(title, message, Critical, 10000);
 }
 
+void NotificationManager::showPersistentError(const QString& title, const QString& message) {
+    showNotification(title, message, Critical, 0, true);
+}
+
 void NotificationManager::showFileSynced(const QString& fileName, bool uploaded) {
     QString action = uploaded ? "uploaded to" : "downloaded from";
     showNotification("File Synced", QString("%1 has been %2 Google Drive.").arg(fileName, action), Low, 3000);
@@ -118,24 +135,48 @@ void NotificationManager::showConflict(const QString& fileName) {
 }
 
 bool NotificationManager::sendDBusNotification(const QString& title, const QString& message, const QString& icon,
-                                               int timeout) {
+                                               Urgency urgency, int timeout, bool persistent) {
     if (!m_dbusInterface || !m_dbusInterface->isValid()) {
         return false;
     }
 
     QVariantMap hints;
-    hints["urgency"] = 1;  // Normal urgency
-    hints["category"] = "transfer";
+    int urgencyHint = 1;
+    QString category = QStringLiteral("transfer");
+    switch (urgency) {
+        case Low:
+            urgencyHint = 0;
+            category = QStringLiteral("status");
+            break;
+        case Normal:
+            urgencyHint = 1;
+            category = QStringLiteral("transfer");
+            break;
+        case Critical:
+            urgencyHint = 2;
+            category = QStringLiteral("device.error");
+            break;
+    }
+
+    hints["urgency"] = urgencyHint;
+    hints["category"] = category;
+    hints["desktop-entry"] = QStringLiteral("via");
+    hints["transient"] = false;
+
+    if (persistent) {
+        hints["resident"] = true;
+        hints["x-kde-resident"] = true;
+    }
 
     QList<QVariant> args;
-    args << "Via"          // app_name
-         << uint(0)        // replaces_id
-         << icon           // app_icon
-         << title          // summary
-         << message        // body
-         << QStringList()  // actions
-         << hints          // hints
-         << timeout;       // expire_timeout
+    args << "Via"                        // app_name
+         << uint(0)                      // replaces_id
+         << icon                         // app_icon
+         << title                        // summary
+         << message                      // body
+         << QStringList()                // actions
+         << hints                        // hints
+         << (persistent ? 0 : timeout);  // expire_timeout
 
     QDBusReply<uint> reply = m_dbusInterface->callWithArgumentList(QDBus::AutoDetect, "Notify", args);
 

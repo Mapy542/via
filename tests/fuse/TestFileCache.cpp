@@ -56,16 +56,15 @@ class FakeDriveClientFC : public GoogleDriveClient {
     QString lastExportPath;
 
     void downloadFile(const QString& /*fileId*/, const QString& /*localPath*/) override {}
-    void exportFile(const QString& fileId, const QString& exportMimeType,
-                    const QString& localPath) override {
+    void exportFile(const QString& fileId, const QString& exportMimeType, const QString& localPath) override {
         ++exportCallCount;
         lastExportFileId = fileId;
         lastExportMimeType = exportMimeType;
         lastExportPath = localPath;
 
         if (exportShouldFail) {
-            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), exportErrorMessage,
-                               exportErrorStatus, fileId, localPath);
+            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), exportErrorMessage, exportErrorStatus,
+                               fileId, localPath);
             return;
         }
 
@@ -74,21 +73,17 @@ class FakeDriveClientFC : public GoogleDriveClient {
 
         QFile file(localPath);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            const QString message =
-                QStringLiteral("Failed to open file for writing: %1").arg(localPath);
+            const QString message = QStringLiteral("Failed to open file for writing: %1").arg(localPath);
             emit error(QStringLiteral("exportFile:%1").arg(fileId), message);
-            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), message, 0, fileId,
-                               localPath);
+            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), message, 0, fileId, localPath);
             return;
         }
 
         if (file.write(exportPayload) != exportPayload.size()) {
-            const QString message =
-                QStringLiteral("Failed to write exported file: %1").arg(localPath);
+            const QString message = QStringLiteral("Failed to write exported file: %1").arg(localPath);
             file.close();
             emit error(QStringLiteral("exportFile:%1").arg(fileId), message);
-            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), message, 0, fileId,
-                               localPath);
+            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), message, 0, fileId, localPath);
             return;
         }
 
@@ -149,6 +144,8 @@ class TestFileCache : public QObject {
     void testGenerateCachePath_ExportMimeProducesDifferentPath();
     void testGetExportedPath_FailurePreservesDetailedMessage();
     void testGetExportedPath_SuccessCachesBufferedExport();
+    void testGetExportedPath_DifferentMimeTypesStayDistinct();
+    void testGetExportedPath_ZeroBytePayloadFails();
 
    private:
     void createTestDatabase();
@@ -215,8 +212,7 @@ void TestFileCache::destroyTestDatabase() {
 // ---------------------------------------------------------------------------
 // Helpers — put a file into cache so invalidate / remove have something to act on
 // ---------------------------------------------------------------------------
-static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId,
-                          qint64 size = 100) {
+static void seedCacheFile(FileCache* cache, const QString& cacheDir, const QString& fileId, qint64 size = 100) {
     // Create a real file on disk inside the cache directory
     QString filePath = cacheDir + "/" + fileId;
     QFile f(filePath);
@@ -254,9 +250,7 @@ void TestFileCache::testClearDirty_RemovesDirtyFlag() {
     QVERIFY(!m_cache->isDirty("f1"));
 }
 
-void TestFileCache::testIsDirty_ReturnsFalseForUnknown() {
-    QVERIFY(!m_cache->isDirty("nonexistent"));
-}
+void TestFileCache::testIsDirty_ReturnsFalseForUnknown() { QVERIFY(!m_cache->isDirty("nonexistent")); }
 
 void TestFileCache::testGetDirtyFiles_ReturnsAll() {
     m_cache->markDirty("a", "/a.txt");
@@ -624,6 +618,69 @@ void TestFileCache::testGetExportedPath_SuccessCachesBufferedExport() {
     const QList<QVariant> args = completedSpy.takeFirst();
     QCOMPARE(args.at(0).toString(), fileId);
     QCOMPARE(args.at(1).toString(), result);
+}
+
+void TestFileCache::testGetExportedPath_DifferentMimeTypesStayDistinct() {
+    const QString fileId = QStringLiteral("native-doc-multi-export");
+    const QString markdownMime = QStringLiteral("text/markdown");
+    const QString odtMime = QStringLiteral("application/vnd.oasis.opendocument.text");
+    const QByteArray markdownPayload("# Markdown export\n");
+    const QByteArray odtPayload("fake odt payload");
+
+    m_driveClient->exportShouldFail = false;
+    m_driveClient->exportPayload = markdownPayload;
+
+    const QString markdownPath = m_cache->getExportedPath(fileId, markdownMime);
+    QVERIFY(!markdownPath.isEmpty());
+    QVERIFY(m_cache->isCached(fileId, markdownMime));
+    QCOMPARE(m_cache->getContentPath(fileId, markdownMime), markdownPath);
+
+    m_driveClient->exportPayload = odtPayload;
+    const QString odtPath = m_cache->getExportedPath(fileId, odtMime);
+    QVERIFY(!odtPath.isEmpty());
+    QVERIFY(m_cache->isCached(fileId, odtMime));
+    QCOMPARE(m_cache->getContentPath(fileId, odtMime), odtPath);
+
+    QVERIFY(markdownPath != odtPath);
+    QCOMPARE(m_driveClient->exportCallCount, 2);
+
+    QFile markdownFile(markdownPath);
+    QVERIFY(markdownFile.open(QIODevice::ReadOnly));
+    QCOMPARE(markdownFile.readAll(), markdownPayload);
+    markdownFile.close();
+
+    QFile odtFile(odtPath);
+    QVERIFY(odtFile.open(QIODevice::ReadOnly));
+    QCOMPARE(odtFile.readAll(), odtPayload);
+    odtFile.close();
+
+    QCOMPARE(m_cache->getExportedPath(fileId, markdownMime), markdownPath);
+    QCOMPARE(m_cache->getExportedPath(fileId, odtMime), odtPath);
+    QCOMPARE(m_driveClient->exportCallCount, 2);
+}
+
+void TestFileCache::testGetExportedPath_ZeroBytePayloadFails() {
+    const QString fileId = QStringLiteral("native-doc-zero-byte");
+    const QString exportMimeType = QStringLiteral("text/markdown");
+
+    m_driveClient->exportShouldFail = false;
+    m_driveClient->exportPayload.clear();
+
+    QSignalSpy failedSpy(m_cache, &FileCache::downloadFailed);
+    QVERIFY(failedSpy.isValid());
+
+    QString result;
+    JoiningThread worker([&]() { result = m_cache->getExportedPath(fileId, exportMimeType); });
+
+    QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 2000);
+    worker.join();
+
+    QVERIFY(result.isEmpty());
+    QCOMPARE(m_driveClient->exportCallCount, 1);
+
+    const QList<QVariant> args = failedSpy.takeFirst();
+    QCOMPARE(args.at(0).toString(), fileId);
+    QCOMPARE(args.at(1).toString(), QStringLiteral("Export produced an empty file"));
 }
 
 QTEST_MAIN(TestFileCache)

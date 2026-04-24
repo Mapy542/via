@@ -444,15 +444,25 @@ int main(int argc, char* argv[]) {
     // depends on connecting to FuseDriver state signals.
     SystemTrayManager trayManager(&authManager, &syncActionQueue, &changeProcessor);
     trayManager.show();
+    notificationManager.setTrayIcon(trayManager.trayIcon());
+    QObject::connect(&notificationManager, &NotificationManager::notificationShown, &trayManager,
+                     [&trayManager](const QString& title, const QString& message, bool) {
+                         trayManager.recordNotification(title, message);
+                     });
 
-    // Surface export failures (e.g. Drive 10 MB export limit) as tray notifications
-    QObject::connect(&driveClient, &GoogleDriveClient::errorDetailed, &trayManager,
-                     [&trayManager](const QString& operation, const QString& errorMsg, int httpStatus,
-                                    const QString& /*fileId*/, const QString& /*localPath*/) {
+    // Surface export failures through the desktop notification backend so
+    // they can remain visible/persistent in supported notification centers.
+    QObject::connect(&driveClient, &GoogleDriveClient::errorDetailed, &notificationManager,
+                     [&notificationManager](const QString& operation, const QString& errorMsg, int httpStatus,
+                                            const QString& /*fileId*/, const QString& /*localPath*/) {
                          if (!operation.startsWith(QLatin1String("exportFile"))) return;
                          const QString detail = nativeDocExportFailureMessage(errorMsg, httpStatus);
-                         trayManager.showNotification(QStringLiteral("Export Failed"), detail,
-                                                      QSystemTrayIcon::Warning);
+                         notificationManager.showPersistentError(QStringLiteral("Export Failed"), detail);
+                     });
+    QObject::connect(&fuseDriver, &FuseDriver::nativeDocExportFailed, &notificationManager,
+                     [&notificationManager](const QString& path, const QString& error) {
+                         notificationManager.showPersistentError(QStringLiteral("Export Failed"),
+                                                                 QStringLiteral("%1\n%2").arg(path, error));
                      });
 
     // Initialize main window
@@ -797,6 +807,11 @@ int main(int argc, char* argv[]) {
                          [&mainWindow](const QString& path, const QString& error) {
                              mainWindow.addRecentActivity(QString("Upload failed: %1 (%2)").arg(path, error));
                          });
+        QObject::connect(
+            &fuseDriver, &FuseDriver::nativeDocExportFailed, &mainWindow,
+            [&mainWindow](const QString& path, const QString& error) {
+                mainWindow.addRecentActivity(QString("Native doc export failed: %1 (%2)").arg(path, error));
+            });
         QObject::connect(&fuseDriver, &FuseDriver::fuseRemoteChange, &mainWindow,
                          [&mainWindow](const QString& name, const QString& changeType) {
                              mainWindow.addRecentActivity(QString("Remote %1: %2").arg(changeType, name));

@@ -1163,6 +1163,13 @@ static bool isNativeDoc(const FuseMetadata& meta) {
            meta.remoteMimeType.startsWith(QLatin1String("application/vnd.google-apps.")) && !meta.isFolder;
 }
 
+static bool isLocalNativeDocExportFailure(const QString& error) {
+    return error == QStringLiteral("Export produced an empty file") ||
+           error == QStringLiteral("Export timed out after 30 seconds") ||
+           error == QStringLiteral("Export completed but no file was written") ||
+           error == QStringLiteral("No Google Drive client available for export");
+}
+
 /**
  * @brief Generate stub content for a browser-shortcut native doc
  *
@@ -1307,8 +1314,10 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                 } else {
                     // For export modes, report size 0 until content is cached
                     // (actual size is unknown until export completes)
-                    if (drv->m_fileCache && drv->m_fileCache->isCached(meta.fileId)) {
-                        QString localPath = drv->m_fileCache->getContentPath(meta.fileId);
+                    NativeDocRepresentation repr = nativeDocRepresentation(meta.remoteMimeType, mode);
+                    if (drv->m_fileCache && repr.visible && !repr.outputMimeType.isEmpty() &&
+                        drv->m_fileCache->isCached(meta.fileId, repr.outputMimeType)) {
+                        QString localPath = drv->m_fileCache->getContentPath(meta.fileId, repr.outputMimeType);
                         QFileInfo localInfo(localPath);
                         if (localInfo.exists()) {
                             stbuf->st_size = localInfo.size();
@@ -1477,6 +1486,7 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
             // generated on-the-fly in fuseRead from nativeDocStubContent().
             FuseOpenFile openFile;
             openFile.fileId = meta.fileId;
+            openFile.cacheKey = meta.fileId;
             openFile.path = qpath;
             openFile.size = nativeDocStubContent(meta).size();
             openFile.writable = false;
@@ -1502,6 +1512,7 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
 
             FuseOpenFile openFile;
             openFile.fileId = meta.fileId;
+            openFile.cacheKey = meta.fileId + QLatin1Char('|') + repr.outputMimeType;
             openFile.path = qpath;
             openFile.writable = false;
             openFile.dirty = false;
@@ -1533,6 +1544,7 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
     // Create open file handle
     FuseOpenFile openFile;
     openFile.fileId = meta.fileId;
+    openFile.cacheKey = meta.fileId;
     openFile.path = qpath;
     openFile.writable = (fi->flags & O_WRONLY) || (fi->flags & O_RDWR);
     openFile.dirty = false;
@@ -1589,7 +1601,7 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
 
     // Update access time
     if (drv->m_fileCache) {
-        drv->m_fileCache->updateAccessTime(openFile.fileId);
+        drv->m_fileCache->updateAccessTime(openFile.cacheKey.isEmpty() ? openFile.fileId : openFile.cacheKey);
     }
 
     if (openFile.localFd < 0) {
@@ -2386,8 +2398,28 @@ void FuseDriver::startBackgroundWorkers() {
         connect(m_fileCache, &FileCache::downloadStarted, this, &FuseDriver::downloadStarted);
         connect(m_fileCache, &FileCache::downloadCompleted, this,
                 [this](const QString& fileId, const QString&) { emit downloadFinished(fileId); });
-        connect(m_fileCache, &FileCache::downloadFailed, this,
-                [this](const QString& fileId, const QString&) { emit downloadFinished(fileId); });
+        connect(m_fileCache, &FileCache::downloadFailed, this, [this](const QString& fileId, const QString& error) {
+            emit downloadFinished(fileId);
+
+            if (!m_database || !isLocalNativeDocExportFailure(error)) {
+                return;
+            }
+
+            const FuseMetadata meta = m_database->getFuseMetadata(fileId);
+            if (meta.fileId.isEmpty() || !isNativeDoc(meta)) {
+                return;
+            }
+
+            QString path = meta.path;
+            if (path.isEmpty()) {
+                path = meta.name;
+            }
+            if (!path.startsWith(QLatin1Char('/'))) {
+                path.prepend(QLatin1Char('/'));
+            }
+
+            emit nativeDocExportFailed(path, error);
+        });
     }
 
     if (m_metadataCache && m_fileCache && m_database && m_driveClient && !m_metadataRefreshThread &&

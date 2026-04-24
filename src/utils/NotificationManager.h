@@ -62,8 +62,16 @@ class NotificationManager : public QObject {
      * @param urgency Urgency level
      * @param timeoutMs Display duration in milliseconds (0 = no timeout)
      */
-    void showNotification(const QString& title, const QString& message, Urgency urgency = Normal,
-                          int timeoutMs = 5000);
+    void showNotification(const QString& title, const QString& message, Urgency urgency = Normal, int timeoutMs = 5000,
+                          bool persistent = false);
+
+    /**
+     * @brief Show a persistent notification when supported by the backend
+     * @param title Notification title
+     * @param message Notification message
+     * @param urgency Urgency level
+     */
+    void showPersistentNotification(const QString& title, const QString& message, Urgency urgency = Normal);
 
     /**
      * @brief Show an info notification
@@ -85,6 +93,13 @@ class NotificationManager : public QObject {
      * @param message Notification message
      */
     void showError(const QString& title, const QString& message);
+
+    /**
+     * @brief Show a persistent error notification when supported by the backend
+     * @param title Notification title
+     * @param message Notification message
+     */
+    void showPersistentError(const QString& title, const QString& message);
 
     /**
      * @brief Show file sync completion notification
@@ -112,15 +127,23 @@ class NotificationManager : public QObject {
      */
     void notificationClosed(uint id);
 
+    /**
+     * @brief Emitted when a notification is successfully shown
+     * @param title Notification title
+     * @param message Notification message
+     * @param persistent Whether the notification requested persistence
+     */
+    void notificationShown(const QString& title, const QString& message, bool persistent);
+
    private slots:
     void onNotificationClosed(uint id, uint reason);
     void onActionInvoked(uint id, const QString& actionKey);
 
    private:
-    bool sendDBusNotification(const QString& title, const QString& message, const QString& icon,
+    bool sendDBusNotification(const QString& title, const QString& message, const QString& icon, Urgency urgency,
+                              int timeout, bool persistent);
+    void sendTrayNotification(const QString& title, const QString& message, QSystemTrayIcon::MessageIcon icon,
                               int timeout);
-    void sendTrayNotification(const QString& title, const QString& message,
-                              QSystemTrayIcon::MessageIcon icon, int timeout);
 
     bool m_enabled;
     QSystemTrayIcon* m_trayIcon;

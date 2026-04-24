@@ -209,6 +209,7 @@ class IFileCacheProvider {
  */
 struct FuseOpenFile {
     QString fileId;          ///< Google Drive file ID
+    QString cacheKey;        ///< Cache identity used for LRU updates (raw or exported)
     QString path;            ///< Path in FUSE filesystem
     int localFd = -1;        ///< Stable local fd for regular files; -1 for synthetic stubs
     qint64 size = 0;         ///< File size
@@ -452,6 +453,13 @@ class FuseDriver : public QObject {
      * @param error Error description
      */
     void fuseUploadFailed(const QString& path, const QString& error);
+
+    /**
+     * @brief Emitted when a native-doc export fails inside the FUSE export/cache path
+     * @param path FUSE path of the native document
+     * @param error Error description
+     */
+    void nativeDocExportFailed(const QString& path, const QString& error);
 
     /**
      * @brief Emitted when a new file is created via FUSE
