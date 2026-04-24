@@ -86,7 +86,8 @@ void TestFuseDriverLifecycle::cleanup() {
     QStandardPaths::setTestModeEnabled(false);
 }
 
-void TestFuseDriverLifecycle::seedCachedFile(const QString& fileId, const QString& path, const QByteArray& content) {
+void TestFuseDriverLifecycle::seedCachedFile(const QString& fileId, const QString& path,
+                                             const QByteArray& content) {
     const QString cachePath = m_driver->fileCache()->getCachePathForFile(fileId);
     QVERIFY(!cachePath.isEmpty());
     QVERIFY(QDir().mkpath(QFileInfo(cachePath).dir().absolutePath()));

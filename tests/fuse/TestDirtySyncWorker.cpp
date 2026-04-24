@@ -12,7 +12,6 @@
 #include <QThread>
 #include <QTimer>
 #include <QtTest/QtTest>
-
 #include <functional>
 
 #include "api/DriveFile.h"
@@ -94,7 +93,8 @@ namespace {
 
 class ThreadedDirtySyncWorkerHarness {
    public:
-    ThreadedDirtySyncWorkerHarness(FileCache* fileCache, GoogleDriveClient* driveClient, SyncDatabase* database)
+    ThreadedDirtySyncWorkerHarness(FileCache* fileCache, GoogleDriveClient* driveClient,
+                                   SyncDatabase* database)
         : m_worker(new DirtySyncWorker(fileCache, driveClient, database)) {
         m_worker->setMaxRetries(2);
         m_worker->setUploadTimeoutMs(500);
@@ -230,7 +230,8 @@ void TestDirtySyncWorker::createCacheFile(const QString& fileId) {
     m_fileCache->recordCacheEntry(fileId, path, 9);
 }
 
-void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId, const QByteArray& content) {
+void TestDirtySyncWorker::createCacheFileWithContent(const QString& fileId,
+                                                     const QByteArray& content) {
     // Use the deterministic cache path so getCachePathForFile matches
     QString path = m_fileCache->getCachePathForFile(fileId);
     QDir().mkpath(QFileInfo(path).dir().absolutePath());
@@ -292,7 +293,8 @@ void TestDirtySyncWorker::testUploadError_MismatchedFileId_ErrorNotAttributed() 
 
     // Emit a stray error before starting (it will also fire during the
     // upload window because the synchronous signal runs before wait).
-    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated", "/elsewhere");
+    emit m_driveClient->errorDetailed("updateFile", "STRAY_NOISE", 500, "totally_unrelated",
+                                      "/elsewhere");
 
     m_worker->start();
 
@@ -442,7 +444,8 @@ void TestDirtySyncWorker::testUpload_MetadataSizeFromRecycledFile() {
 
     // Verify: metadata must have the correct size, NOT zero
     FuseMetadata finalMeta = m_db->getFuseMetadata(fid);
-    QVERIFY2(finalMeta.size > 0, qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
+    QVERIFY2(finalMeta.size > 0,
+             qPrintable(QString("Expected non-zero metadata size, got %1").arg(finalMeta.size)));
     QCOMPARE(finalMeta.size, static_cast<qint64>(content.size()));
 }
 

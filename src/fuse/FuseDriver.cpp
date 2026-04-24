@@ -1137,7 +1137,8 @@ void FuseDriver::flushDirtyFiles() {
 
     int uploadedCount = 0;
     for (const DirtyFileEntry& entry : dirtyFiles) {
-        const UploadSnapshotResult snapshot = m_fileCache->createUploadSnapshot(entry.fileId, entry.generation);
+        const UploadSnapshotResult snapshot =
+            m_fileCache->createUploadSnapshot(entry.fileId, entry.generation);
         if (snapshot.status == UploadSnapshotStatus::AlreadyUploaded) {
             if (m_fileCache->finalizeUploadedGeneration(entry.fileId)) {
                 uploadedCount++;
@@ -1155,7 +1156,8 @@ void FuseDriver::flushDirtyFiles() {
             continue;
         }
 
-        if (snapshot.status != UploadSnapshotStatus::Ready || !m_driveClient || !QFile::exists(snapshot.snapshotPath)) {
+        if (snapshot.status != UploadSnapshotStatus::Ready || !m_driveClient ||
+            !QFile::exists(snapshot.snapshotPath)) {
             m_fileCache->markUploadFailed(entry.fileId);
             qWarning() << "FuseDriver: Unmount flush could not prepare snapshot for" << entry.path;
             continue;

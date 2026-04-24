@@ -64,12 +64,12 @@ struct CacheEntry {
  * - upload_failed INTEGER DEFAULT 0
  */
 struct DirtyFileEntry {
-    QString fileId;               ///< Google Drive file ID
-    QString path;                 ///< Logical path in FUSE filesystem
-    QDateTime markedDirtyAt;      ///< When file was marked dirty
-    QDateTime lastUploadAttempt;  ///< Last upload attempt time
-    bool uploadFailed;            ///< Whether last upload failed
-    quint64 generation = 0;       ///< In-memory version to detect stale uploads
+    QString fileId;                  ///< Google Drive file ID
+    QString path;                    ///< Logical path in FUSE filesystem
+    QDateTime markedDirtyAt;         ///< When file was marked dirty
+    QDateTime lastUploadAttempt;     ///< Last upload attempt time
+    bool uploadFailed;               ///< Whether last upload failed
+    quint64 generation = 0;          ///< In-memory version to detect stale uploads
     quint64 uploadedGeneration = 0;  ///< Last local generation already uploaded to Drive
 };
 
@@ -120,7 +120,8 @@ class FileCache : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent = nullptr);
+    explicit FileCache(SyncDatabase* database, GoogleDriveClient* driveClient,
+                       QObject* parent = nullptr);
 
     ~FileCache() override;
 
@@ -463,14 +464,14 @@ class FileCache : public QObject {
     /**
      * @brief Increment the open-handle reference count for a file
      * @param fileId Google Drive file ID
-        * @param writable Whether the handle can still mutate the local file
+     * @param writable Whether the handle can still mutate the local file
      */
     void addOpenHandle(const QString& fileId, bool writable = false);
 
     /**
      * @brief Decrement the open-handle reference count for a file
      * @param fileId Google Drive file ID
-        * @param writable Whether the handle could mutate the local file
+     * @param writable Whether the handle could mutate the local file
      */
     void removeOpenHandle(const QString& fileId, bool writable = false);
 
@@ -587,8 +588,8 @@ class FileCache : public QObject {
      * @param fileId File ID associated with the request (if known)
      * @param localPath Local path associated with the request (if known)
      */
-    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus, const QString& fileId,
-                         const QString& localPath);
+    void onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
+                         const QString& fileId, const QString& localPath);
 
    private:
     // Internal helpers
@@ -596,7 +597,8 @@ class FileCache : public QObject {
     QString generateCachePath(const QString& fileId, const QString& exportMimeType) const;
     QString generateDirtyPath(const QString& fileId) const;
     QString generateUploadSnapshotPath(const QString& fileId, quint64 generation) const;
-    QString getContentPathLocked(const QString& fileId, const QString& exportMimeType = QString()) const;
+    QString getContentPathLocked(const QString& fileId,
+                                 const QString& exportMimeType = QString()) const;
     bool clearDirtyLocked(const QString& fileId, quint64 expectedGeneration);
     bool maybeFinalizeUploadedGenerationLocked(const QString& fileId);
     bool recycleAuthoritativeCopyToCacheLocked(const QString& fileId);

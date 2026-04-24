@@ -39,17 +39,21 @@ FileCache::FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QOb
       m_maxCacheSize(DEFAULT_MAX_CACHE_SIZE),
       m_currentSize(0) {
     // Set default cache directory (evictable, under XDG_CACHE_HOME)
-    m_cacheDirectory = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/Via/files";
+    m_cacheDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/Via/files";
 
     // Set default pending-uploads directory (persistent, under XDG_DATA_HOME).
     // Dirty files are moved here after their write handle is closed so that
     // OS cache-cleaning tools cannot delete unsaved user data.
-    m_dirtyDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/Via/pending";
+    m_dirtyDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/Via/pending";
 
     // Connect to GoogleDriveClient signals for download completion
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this, &FileCache::onFileDownloaded);
-        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this, &FileCache::onDownloadError);
+        connect(m_driveClient, &GoogleDriveClient::fileDownloaded, this,
+                &FileCache::onFileDownloaded);
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
+                &FileCache::onDownloadError);
     }
 }
 
@@ -75,7 +79,8 @@ bool FileCache::initialize() {
     QDir dirtyDir(m_dirtyDirectory);
     if (!dirtyDir.exists()) {
         if (!dirtyDir.mkpath(".")) {
-            qWarning() << "FileCache: Failed to create pending-uploads directory:" << m_dirtyDirectory;
+            qWarning() << "FileCache: Failed to create pending-uploads directory:"
+                       << m_dirtyDirectory;
             return false;
         }
     }
@@ -219,7 +224,8 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
             }
             // Dirty file absent from both stores — local changes are lost; fall through
             // to re-download so the file handle at least remains valid.
-            qCritical() << "FileCache: Dirty file" << fileId << "is missing from both pending store and cache"
+            qCritical() << "FileCache: Dirty file" << fileId
+                        << "is missing from both pending store and cache"
                         << "— local changes may be lost; falling back to remote download";
         }
     }
@@ -270,7 +276,9 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
     if (m_driveClient) {
         QMetaObject::invokeMethod(
             m_driveClient,
-            [driveClient = m_driveClient, fileId, cachePath]() { driveClient->downloadFile(fileId, cachePath); },
+            [driveClient = m_driveClient, fileId, cachePath]() {
+                driveClient->downloadFile(fileId, cachePath);
+            },
             Qt::QueuedConnection);
     } else {
         qWarning() << "FileCache: No GoogleDriveClient available for download";
@@ -365,7 +373,8 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
         }
     }
 
-    qDebug() << "FileCache: Cache miss (export) for" << fileId << ", exporting as" << exportMimeType;
+    qDebug() << "FileCache: Cache miss (export) for" << fileId << ", exporting as"
+             << exportMimeType;
 
     QString cachePath = generateCachePath(fileId, exportMimeType);
 
@@ -512,14 +521,16 @@ void FileCache::invalidate(const QString& fileId) {
     // C1 fix: Never delete a dirty file — local modifications would be lost.
     // The file will be uploaded by DirtySyncWorker, then re-downloaded on next access.
     if (m_dirtyFiles.contains(fileId)) {
-        qWarning() << "FileCache: Skipping invalidation of dirty file" << fileId << "— local changes pending upload";
+        qWarning() << "FileCache: Skipping invalidation of dirty file" << fileId
+                   << "— local changes pending upload";
         return;
     }
 
     // Fix 2: Never invalidate a file with open FUSE handles — readers/writers
     // would get I/O errors on their next system call.
     if (m_openHandleCounts.value(fileId, 0) > 0) {
-        qWarning() << "FileCache: Skipping invalidation of file" << fileId << "— open FUSE handles exist";
+        qWarning() << "FileCache: Skipping invalidation of file" << fileId
+                   << "— open FUSE handles exist";
         return;
     }
 
@@ -601,7 +612,8 @@ void FileCache::clearCache() {
     // lives in the pending-uploads store (m_dirtyDirectory) and must survive.
     for (const auto& it : m_cacheEntries.asKeyValueRange()) {
         if (m_dirtyFiles.contains(it.second.fileId)) {
-            qWarning() << "FileCache: Skipping delete of dirty file in clearCache:" << it.second.fileId;
+            qWarning() << "FileCache: Skipping delete of dirty file in clearCache:"
+                       << it.second.fileId;
             continue;
         }
         if (QFile::exists(it.second.cachePath)) {
@@ -652,7 +664,8 @@ bool FileCache::clearDirty(const QString& fileId, quint64 expectedGeneration) {
     return clearDirtyLocked(fileId, expectedGeneration);
 }
 
-UploadSnapshotResult FileCache::createUploadSnapshot(const QString& fileId, quint64 expectedGeneration) {
+UploadSnapshotResult FileCache::createUploadSnapshot(const QString& fileId,
+                                                     quint64 expectedGeneration) {
     QMutexLocker locker(&m_mutex);
 
     UploadSnapshotResult result;
@@ -678,7 +691,8 @@ UploadSnapshotResult FileCache::createUploadSnapshot(const QString& fileId, quin
         return result;
     }
 
-    const quint64 snapshotGeneration = expectedGeneration != 0 ? expectedGeneration : dirtyIt->generation;
+    const quint64 snapshotGeneration =
+        expectedGeneration != 0 ? expectedGeneration : dirtyIt->generation;
     const QString sourcePath = getContentPathLocked(fileId);
     if (sourcePath.isEmpty() || !QFileInfo::exists(sourcePath)) {
         result.status = UploadSnapshotStatus::MissingContent;
@@ -957,7 +971,8 @@ void FileCache::onDownloadError(const QString& operation, const QString& errorMs
         } else {
             // Last resort: could not identify the failed file.
             // Only mark downloads as failed if we truly can't match.
-            qWarning() << "FileCache: Download error without file ID association:" << operation << errorMsg;
+            qWarning() << "FileCache: Download error without file ID association:" << operation
+                       << errorMsg;
 
             for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end(); ++it) {
                 if (!it.value()) {  // Still in progress
@@ -1006,11 +1021,13 @@ QString FileCache::generateDirtyPath(const QString& fileId) const {
 QString FileCache::generateUploadSnapshotPath(const QString& fileId, quint64 generation) const {
     QByteArray hash = QCryptographicHash::hash(fileId.toUtf8(), QCryptographicHash::Sha256).toHex();
     QString subDir = QString::fromLatin1(hash.left(2));
-    return m_dirtyDirectory + "/snapshots/" + subDir + "/" + QString::fromLatin1(hash) + "."
-           + QString::number(generation);
+    return m_dirtyDirectory + "/snapshots/" + subDir + "/" + QString::fromLatin1(hash) + "." +
+           QString::number(generation);
 }
 
-QString FileCache::getContentPath(const QString& fileId) const { return getContentPath(fileId, QString()); }
+QString FileCache::getContentPath(const QString& fileId) const {
+    return getContentPath(fileId, QString());
+}
 
 QString FileCache::getContentPath(const QString& fileId, const QString& exportMimeType) const {
     QMutexLocker locker(&m_mutex);
@@ -1018,8 +1035,8 @@ QString FileCache::getContentPath(const QString& fileId, const QString& exportMi
     return getContentPathLocked(fileId, exportMimeType);
 }
 
-QString FileCache::getContentPathLocked(const QString& fileId, const QString& exportMimeType) const {
-
+QString FileCache::getContentPathLocked(const QString& fileId,
+                                        const QString& exportMimeType) const {
     const QString cacheKey = cacheKeyFor(fileId, exportMimeType);
 
     // If dirty, the authoritative content is in the pending store (post-release)
@@ -1038,7 +1055,8 @@ QString FileCache::getContentPathLocked(const QString& fileId, const QString& ex
         return m_cacheEntries[cacheKey].cachePath;
     }
 
-    return exportMimeType.isEmpty() ? generateCachePath(fileId) : generateCachePath(fileId, exportMimeType);
+    return exportMimeType.isEmpty() ? generateCachePath(fileId)
+                                    : generateCachePath(fileId, exportMimeType);
 }
 
 QString FileCache::moveToDirtyStore(const QString& fileId) {
@@ -1099,7 +1117,8 @@ bool FileCache::clearDirtyLocked(const QString& fileId, quint64 expectedGenerati
     }
 
     if (expectedGeneration != 0 && dirtyIt->generation != expectedGeneration) {
-        qInfo() << "FileCache: Keeping dirty state for" << fileId << "- newer local writes landed during upload";
+        qInfo() << "FileCache: Keeping dirty state for" << fileId
+                << "- newer local writes landed during upload";
         return false;
     }
 
@@ -1152,7 +1171,9 @@ bool FileCache::recycleAuthoritativeCopyToCacheLocked(const QString& fileId) {
         QFileInfo pendingInfo(pendingPath);
 
         if (!QDir().mkpath(QFileInfo(cachePath).path())) {
-            qWarning() << "FileCache: Could not create cache directory while clearing dirty state for" << fileId;
+            qWarning()
+                << "FileCache: Could not create cache directory while clearing dirty state for"
+                << fileId;
             return false;
         }
 
@@ -1175,8 +1196,8 @@ bool FileCache::recycleAuthoritativeCopyToCacheLocked(const QString& fileId) {
             return false;
         }
 
-        qDebug() << "FileCache: Recycled pending file back into cache for" << fileId << "(" << pendingInfo.size()
-                 << "bytes)";
+        qDebug() << "FileCache: Recycled pending file back into cache for" << fileId << "("
+                 << pendingInfo.size() << "bytes)";
     }
 
     QFileInfo localInfo(cachePath);
