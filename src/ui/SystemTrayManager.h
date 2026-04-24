@@ -190,6 +190,7 @@ class SystemTrayManager : public QObject {
      * Computes effective priority = max(mirror, fuse, global), selects the
      * corresponding icon, and builds a combined status/tooltip string.
      */
+    //TODO: when errors occur or other cases, change the icon to be more expressive (show error icon for a priod of time etc.)
     void resolveIcon();
 
     /**

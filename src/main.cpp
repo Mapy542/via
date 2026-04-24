@@ -8,6 +8,9 @@
 
 // TODO: Make sure internal application version matches release version in app images, (and build
 // from source CMAKE? two sources of truth)
+
+// TODO: Feature: Detect if system is operating on power saver/metered network and automatically
+// pause sync and show notification
 #include <QApplication>
 #include <QDateTime>
 #include <QDebug>

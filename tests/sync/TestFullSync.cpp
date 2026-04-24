@@ -41,6 +41,7 @@ class FakeDriveClientForFS : public GoogleDriveClient {
     };
     QList<FilePage> filePages;
     int listFilesCallCount = 0;
+    bool autoEmitListedFiles = true;
 
     void listFiles(const QString& /*folderId*/ = "root",
                    const QString& pageToken = QString()) override {
@@ -49,13 +50,17 @@ class FakeDriveClientForFS : public GoogleDriveClient {
         if (!pageToken.isEmpty()) {
             pageIdx = pageToken.toInt();
         }
-        QTimer::singleShot(0, this, [this, pageIdx]() {
-            if (pageIdx >= 0 && pageIdx < filePages.size()) {
-                emit filesListed(filePages[pageIdx].files, filePages[pageIdx].nextPageToken);
-            } else {
-                emit filesListed({}, QString());
-            }
-        });
+        if (autoEmitListedFiles) {
+            QTimer::singleShot(0, this, [this, pageIdx]() { emitListedPage(pageIdx); });
+        } else {
+            m_queuedPageIndices.append(pageIdx);
+        }
+    }
+
+    void emitQueuedListFiles() {
+        while (!m_queuedPageIndices.isEmpty()) {
+            emitListedPage(m_queuedPageIndices.takeFirst());
+        }
     }
 
     QString getRootFolderId() override { return m_rootFolderId; }
@@ -77,7 +82,16 @@ class FakeDriveClientForFS : public GoogleDriveClient {
     void emitError(const QString& op, const QString& msg) { emit error(op, msg); }
 
    private:
+    void emitListedPage(int pageIdx) {
+        if (pageIdx >= 0 && pageIdx < filePages.size()) {
+            emit filesListed(filePages[pageIdx].files, filePages[pageIdx].nextPageToken);
+        } else {
+            emit filesListed({}, QString());
+        }
+    }
+
     QString m_rootFolderId = "root-id-123";
+    QList<int> m_queuedPageIndices;
 };
 
 // ---------------------------------------------------------------------------
@@ -764,23 +778,29 @@ void TestFullSync::testDriveErrorTransitionsToError() {
     QString syncDir = m_tempDir->filePath("sync");
     QDir().mkpath(syncDir);
     m_fullSync->setSyncFolder(syncDir);
+    m_driveClient->autoEmitListedFiles = false;
 
     // Set up empty remote file list so we reach FetchingRemote state
     FakeDriveClientForFS::FilePage page;
     page.nextPageToken = "";
     m_driveClient->filePages.append(page);
 
+    QSignalSpy errorSpy(m_fullSync, &FullSync::error);
+
     m_fullSync->fullSync();
 
     // Wait until we're in FetchingRemote state
     QTRY_COMPARE_WITH_TIMEOUT(m_fullSync->state(), FullSync::State::FetchingRemote, 1000);
 
-    QSignalSpy errorSpy(m_fullSync, &FullSync::error);
-
     // Emit a listFiles error from fake client
     m_driveClient->emitError("listFiles", "quota exceeded");
 
     QTRY_VERIFY(errorSpy.count() >= 1);
+    QCOMPARE(m_fullSync->state(), FullSync::State::Error);
+
+    // A delayed page from the original request must not recover the sync.
+    m_driveClient->emitQueuedListFiles();
+    QCoreApplication::processEvents();
     QCOMPARE(m_fullSync->state(), FullSync::State::Error);
 }
 
