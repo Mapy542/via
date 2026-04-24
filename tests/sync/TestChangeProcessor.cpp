@@ -204,7 +204,7 @@ QDateTime TestChangeProcessor::writeFileWithMtime(const QString& absPath, const 
 }
 
 QDateTime TestChangeProcessor::toWholeSecondUtc(const QDateTime& dateTime) {
-    return QDateTime::fromSecsSinceEpoch(dateTime.toUTC().toSecsSinceEpoch(), QTimeZone::UTC);
+    return QDateTime::fromSecsSinceEpoch(dateTime.toUTC().toSecsSinceEpoch(), QTimeZone::utc());
 }
 
 qint64 TestChangeProcessor::absSecondDelta(const QDateTime& lhs, const QDateTime& rhs) {

@@ -22,8 +22,9 @@
 // Key used to store the FUSE change token in the fuse_sync_state table
 const QString MetadataRefreshWorker::FUSE_CHANGE_TOKEN_KEY = QStringLiteral("fuse_change_token");
 
-MetadataRefreshWorker::MetadataRefreshWorker(MetadataCache* metadataCache, FileCache* fileCache, SyncDatabase* database,
-                                             GoogleDriveClient* driveClient, QObject* parent)
+MetadataRefreshWorker::MetadataRefreshWorker(MetadataCache* metadataCache, FileCache* fileCache,
+                                             SyncDatabase* database, GoogleDriveClient* driveClient,
+                                             QObject* parent)
     : QObject(parent),
       m_metadataCache(metadataCache),
       m_fileCache(fileCache),
@@ -40,7 +41,8 @@ MetadataRefreshWorker::MetadataRefreshWorker(MetadataCache* metadataCache, FileC
 
     // Connect to Google Drive client signals
     if (m_driveClient) {
-        connect(m_driveClient, &GoogleDriveClient::changesReceived, this, &MetadataRefreshWorker::onChangesReceived);
+        connect(m_driveClient, &GoogleDriveClient::changesReceived, this,
+                &MetadataRefreshWorker::onChangesReceived);
         connect(m_driveClient, &GoogleDriveClient::startPageTokenReceived, this,
                 &MetadataRefreshWorker::onStartPageTokenReceived);
         connect(m_driveClient, &GoogleDriveClient::error, this, &MetadataRefreshWorker::onApiError);
@@ -115,7 +117,8 @@ void MetadataRefreshWorker::start() {
     locker.unlock();
 
     emit stateChanged(State::Running);
-    qInfo() << "MetadataRefreshWorker: Started with polling interval" << m_pollingTimer->interval() << "ms";
+    qInfo() << "MetadataRefreshWorker: Started with polling interval" << m_pollingTimer->interval()
+            << "ms";
 
     // Perform an immediate check
     checkNow();
@@ -184,7 +187,8 @@ void MetadataRefreshWorker::checkNow() {
     qDebug() << "MetadataRefreshWorker: Checking for remote changes";
     // Invoke on the drive client's thread (main thread) to avoid cross-thread QNetworkAccessManager
     // usage
-    QMetaObject::invokeMethod(m_driveClient, "listChanges", Qt::QueuedConnection, Q_ARG(QString, token));
+    QMetaObject::invokeMethod(m_driveClient, "listChanges", Qt::QueuedConnection,
+                              Q_ARG(QString, token));
 }
 
 // ============================================================================
@@ -193,7 +197,8 @@ void MetadataRefreshWorker::checkNow() {
 
 void MetadataRefreshWorker::onPollingTimeout() { checkNow(); }
 
-void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes, const QString& newToken) {
+void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
+                                              const QString& newToken) {
     qDebug() << "MetadataRefreshWorker: Received" << changes.size() << "changes";
 
     // Process each change according to flow chart:
@@ -263,22 +268,13 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
     if (change.removed || change.file.trashed) {
         qDebug() << "MetadataRefreshWorker: File deleted -" << change.fileId;
 
-        // Capture display name before removeFromCaches wipes the metadata
-        QString displayName;
-        if (m_metadataCache) {
-            FuseFileMetadata existing = m_metadataCache->getMetadataByFileId(change.fileId);
-            if (existing.isValid()) {
-                displayName = existing.name;
-            }
-        }
-        if (displayName.isEmpty()) {
-            displayName = change.file.name;
-        }
+        // Capture display path before removeFromCaches wipes the metadata.
+        const QString displayPath = resolveDisplayPath(change.fileId, change.file.name);
 
         removeFromCaches(change.fileId);
         emit changeProcessed(change.fileId, QStringLiteral("deleted"));
-        if (!displayName.isEmpty()) {
-            emit changeProcessedDetailed(displayName, QStringLiteral("deleted"));
+        if (!displayPath.isEmpty()) {
+            emit changeProcessedDetailed(displayPath, QStringLiteral("deleted"));
         }
         return;
     }
@@ -304,7 +300,8 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
             // content and invalidating would delete the file from under
             // any open FUSE handles.
             if (m_fileCache && m_fileCache->consumeRecentlyUploaded(change.fileId)) {
-                qDebug() << "MetadataRefreshWorker: Skipping invalidation of self-uploaded file" << change.fileId;
+                qDebug() << "MetadataRefreshWorker: Skipping invalidation of self-uploaded file"
+                         << change.fileId;
             } else {
                 invalidateFileCache(change.fileId);
             }
@@ -315,9 +312,10 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
     updateMetadataCache(change.file);
 
     QString changeType = isModification ? QStringLiteral("modified") : QStringLiteral("created");
+    const QString displayPath = resolveDisplayPath(change.fileId, change.file.name);
     emit changeProcessed(change.fileId, changeType);
-    if (!change.file.name.isEmpty()) {
-        emit changeProcessedDetailed(change.file.name, changeType);
+    if (!displayPath.isEmpty()) {
+        emit changeProcessedDetailed(displayPath, changeType);
     }
 }
 
@@ -332,7 +330,8 @@ void MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
     } else {
         // Cannot resolve path - parent folder not in cache
         // This is expected for files in folders not yet browsed
-        qDebug() << "MetadataRefreshWorker: Could not resolve path for" << file.name << "(parent folder not in cache)";
+        qDebug() << "MetadataRefreshWorker: Could not resolve path for" << file.name
+                 << "(parent folder not in cache)";
     }
 }
 
@@ -365,6 +364,25 @@ void MetadataRefreshWorker::invalidateFileCache(const QString& fileId) {
     }
 }
 
+QString MetadataRefreshWorker::resolveDisplayPath(const QString& fileId,
+                                                  const QString& fallbackName) const {
+    if (m_metadataCache) {
+        const FuseFileMetadata metadata = m_metadataCache->getMetadataByFileId(fileId);
+        if (!metadata.path.isEmpty()) {
+            return metadata.path;
+        }
+    }
+
+    if (m_database) {
+        const FuseMetadata metadata = m_database->getFuseMetadata(fileId);
+        if (!metadata.path.isEmpty()) {
+            return metadata.path;
+        }
+    }
+
+    return fallbackName;
+}
+
 bool MetadataRefreshWorker::shouldProcess(const DriveFile& file) const {
     // Skip files not owned by user (shared files)
     if (!file.ownedByMe) {
@@ -376,7 +394,8 @@ bool MetadataRefreshWorker::shouldProcess(const DriveFile& file) const {
     // in other modes the policy helper decides per-type visibility.
     if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
         QSettings settings;
-        NativeDocMode mode = nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        NativeDocMode mode =
+            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
         if (mode == NativeDocMode::Hide) {
             return false;
         }

@@ -9,6 +9,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QIcon>
+#include <QLocale>
 #include <QSettings>
 #include <QStringList>
 #include <QUrl>
@@ -19,7 +20,8 @@
 #include "sync/SyncActionQueue.h"
 #include "utils/ThemeHelper.h"
 
-SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
+SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
+                                     SyncActionQueue* syncActionQueue,
                                      ChangeProcessor* changeProcessor, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
@@ -45,20 +47,24 @@ SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager, SyncActionQ
     // Connect signals
     connect(m_trayIcon, &QSystemTrayIcon::activated, this, &SystemTrayManager::onTrayIconActivated);
 
-    connect(m_trayIcon, &QSystemTrayIcon::messageClicked, this, &SystemTrayManager::notificationClicked);
+    connect(m_trayIcon, &QSystemTrayIcon::messageClicked, this,
+            &SystemTrayManager::notificationClicked);
 
     // Connect to auth manager
     if (m_authManager) {
-        connect(m_authManager, &GoogleAuthManager::authenticated, this, [this]() { updateAuthState(true); });
-        connect(m_authManager, &GoogleAuthManager::loggedOut, this, [this]() { updateAuthState(false); });
+        connect(m_authManager, &GoogleAuthManager::authenticated, this,
+                [this]() { updateAuthState(true); });
+        connect(m_authManager, &GoogleAuthManager::loggedOut, this,
+                [this]() { updateAuthState(false); });
     }
 
     // Connect to change processor state changes
     if (m_changeProcessor) {
-        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this, [this](ChangeProcessor::State) {
-            // The periodic timer handles status text; just refresh now
-            refreshStatus();
-        });
+        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this,
+                [this](ChangeProcessor::State) {
+                    // The periodic timer handles status text; just refresh now
+                    refreshStatus();
+                });
     }
 
     // Periodic status timer — mirrors MainWindow's update timer
@@ -73,7 +79,9 @@ void SystemTrayManager::show() { m_trayIcon->show(); }
 
 void SystemTrayManager::hide() { m_trayIcon->hide(); }
 
-void SystemTrayManager::setToolTip(const QString& message) { m_trayIcon->setToolTip("Via\n" + message); }
+void SystemTrayManager::setToolTip(const QString& message) {
+    m_trayIcon->setToolTip("Via\n" + message);
+}
 
 void SystemTrayManager::showNotification(const QString& title, const QString& message,
                                          QSystemTrayIcon::MessageIcon icon) {
@@ -88,7 +96,8 @@ void SystemTrayManager::recordNotification(const QString& title, const QString& 
     const QDateTime now = QDateTime::currentDateTime();
     if (!m_notificationHistory.isEmpty()) {
         const NotificationEntry& latest = m_notificationHistory.first();
-        if (latest.title == title && latest.message == message && latest.timestamp.secsTo(now) <= 2) {
+        if (latest.title == title && latest.message == message &&
+            latest.timestamp.secsTo(now) <= 2) {
             return;
         }
     }
@@ -137,7 +146,8 @@ void SystemTrayManager::createMenu() {
     // Recent changes
     m_recentChangesAction = m_trayMenu->addAction("Recent Changes...");
     m_recentChangesAction->setEnabled(false);
-    connect(m_recentChangesAction, &QAction::triggered, this, &SystemTrayManager::onRecentChangesClicked);
+    connect(m_recentChangesAction, &QAction::triggered, this,
+            &SystemTrayManager::onRecentChangesClicked);
 
     m_notificationsMenu = m_trayMenu->addMenu("Recent Notifications");
     m_noNotificationsAction = m_notificationsMenu->addAction("No notifications yet");
@@ -189,13 +199,15 @@ void SystemTrayManager::refreshNotificationMenu() {
         QAction* action = m_notificationsMenu->addAction(label);
         const QString fullText =
             QStringLiteral("%1\n%2\n%3")
-                .arg(entry.timestamp.toString(Qt::DefaultLocaleShortDate), entry.title, entry.message);
+                .arg(QLocale::system().toString(entry.timestamp, QLocale::ShortFormat), entry.title,
+                     entry.message);
         action->setToolTip(fullText);
         action->setStatusTip(fullText);
         action->setWhatsThis(fullText);
         connect(action, &QAction::triggered, this, [this, entry]() {
             if (m_trayIcon && m_trayIcon->isVisible()) {
-                m_trayIcon->showMessage(entry.title, entry.message, QSystemTrayIcon::Information, 15000);
+                m_trayIcon->showMessage(entry.title, entry.message, QSystemTrayIcon::Information,
+                                        15000);
             }
             emit notificationClicked();
         });
@@ -207,14 +219,16 @@ void SystemTrayManager::refreshNotificationMenu() {
 // ---------------------------------------------------------------------------
 
 TrayIconPriority SystemTrayManager::priorityFromStatusText(const QString& status) {
-    if (status.contains("expired") || status.contains("Authentication")) return TrayIconPriority::AuthExpired;
+    if (status.contains("expired") || status.contains("Authentication"))
+        return TrayIconPriority::AuthExpired;
     if (status.contains("Error") || status.contains("Failed")) return TrayIconPriority::Error;
-    if (status.contains("Not connected") || status.contains("Offline")) return TrayIconPriority::Offline;
+    if (status.contains("Not connected") || status.contains("Offline"))
+        return TrayIconPriority::Offline;
     if (status.contains("Warning")) return TrayIconPriority::Warning;
     if (status.contains("Paused")) return TrayIconPriority::Paused;
-    if (status.contains("Syncing") || status.contains("Uploading") || status.contains("Downloading") ||
-        status.contains("Scanning") || status.contains("Fetching") || status.contains("Flushing") ||
-        status.contains("Refreshing"))
+    if (status.contains("Syncing") || status.contains("Uploading") ||
+        status.contains("Downloading") || status.contains("Scanning") ||
+        status.contains("Fetching") || status.contains("Flushing") || status.contains("Refreshing"))
         return TrayIconPriority::Syncing;
     return TrayIconPriority::Idle;
 }
@@ -263,7 +277,8 @@ void SystemTrayManager::resolveIcon() {
 
     // Build combined status text
     QStringList parts;
-    if (!m_mirrorStatusText.isEmpty()) parts << QStringLiteral("Mirror: %1").arg(m_mirrorStatusText);
+    if (!m_mirrorStatusText.isEmpty())
+        parts << QStringLiteral("Mirror: %1").arg(m_mirrorStatusText);
     if (!m_fuseStatusText.isEmpty()) parts << QStringLiteral("FUSE: %1").arg(m_fuseStatusText);
     QString combined = parts.isEmpty() ? QStringLiteral("Idle") : parts.join(" | ");
 
@@ -293,7 +308,8 @@ void SystemTrayManager::setHasConflicts(bool hasConflicts) {
         recalcGlobalPriority();
         resolveIcon();
         if (hasConflicts) {
-            showNotification("Conflicts Detected", "There are file conflicts that need your attention.",
+            showNotification("Conflicts Detected",
+                             "There are file conflicts that need your attention.",
                              QSystemTrayIcon::Warning);
         }
     }
@@ -366,11 +382,13 @@ void SystemTrayManager::updateStorageInfo(qint64 storageUsed, qint64 storageLimi
 
     if (m_storagePercent >= 90.0) {
         showNotification("Critical Storage Warning",
-                         QString("Google Drive storage is %1% full!").arg(QString::number(m_storagePercent, 'f', 1)),
+                         QString("Google Drive storage is %1% full!")
+                             .arg(QString::number(m_storagePercent, 'f', 1)),
                          QSystemTrayIcon::Critical);
     } else if (m_storagePercent >= 75.0) {
         showNotification("Low Storage Warning",
-                         QString("Google Drive storage is %1% full.").arg(QString::number(m_storagePercent, 'f', 1)),
+                         QString("Google Drive storage is %1% full.")
+                             .arg(QString::number(m_storagePercent, 'f', 1)),
                          QSystemTrayIcon::Warning);
     }
 

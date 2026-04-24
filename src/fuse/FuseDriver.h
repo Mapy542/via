@@ -264,7 +264,8 @@ class FuseDriver : public QObject {
      * @param database Pointer to sync database (for FUSE-specific tables)
      * @param parent Parent QObject
      */
-    explicit FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, QObject* parent = nullptr);
+    explicit FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database,
+                        QObject* parent = nullptr);
 
     ~FuseDriver() override;
 
@@ -495,10 +496,10 @@ class FuseDriver : public QObject {
 
     /**
      * @brief Emitted when a remote change is detected with display-ready info
-     * @param name File or folder name
+     * @param displayPath Logical path, or file/folder name fallback
      * @param changeType "created", "modified", or "deleted"
      */
-    void fuseRemoteChange(const QString& name, const QString& changeType);
+    void fuseRemoteChange(const QString& displayPath, const QString& changeType);
 
    private:
     // ========================================================================
@@ -526,8 +527,8 @@ class FuseDriver : public QObject {
      * 2. If not cached, query API for children
      * 3. Fill buffer with child names
      */
-    static int fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi,
-                           enum fuse_readdir_flags flags);
+    static int fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset,
+                           struct fuse_file_info* fi, enum fuse_readdir_flags flags);
 
     /**
      * @brief Open a file
@@ -548,7 +549,8 @@ class FuseDriver : public QObject {
      * 1. Read from cached file
      * 2. Update fuse_cache_entries.last_accessed
      */
-    static int fuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
+    static int fuseRead(const char* path, char* buf, size_t size, off_t offset,
+                        struct fuse_file_info* fi);
 
     /**
      * @brief Write file data
@@ -559,7 +561,8 @@ class FuseDriver : public QObject {
      * 3. Record in fuse_dirty_files
      * 4. Upload is deferred to DirtySyncWorker
      */
-    static int fuseWrite(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
+    static int fuseWrite(const char* path, const char* buf, size_t size, off_t offset,
+                         struct fuse_file_info* fi);
 
     /**
      * @brief Release (close) a file
@@ -667,7 +670,8 @@ class FuseDriver : public QObject {
     /**
      * @brief Set file timestamps (M5 no-op stub)
      */
-    static int fuseUtimens(const char* path, const struct timespec tv[2], struct fuse_file_info* fi);
+    static int fuseUtimens(const char* path, const struct timespec tv[2],
+                           struct fuse_file_info* fi);
 
     // ========================================================================
     // Internal Helper Methods
@@ -702,7 +706,8 @@ class FuseDriver : public QObject {
      * @param size New file size in bytes
      * @return 0 on success, or a negative errno-style value on failure
      */
-    int truncateWithoutHandle(const QString& fileId, qint64 expectedSize, const QString& path, off_t size);
+    int truncateWithoutHandle(const QString& fileId, qint64 expectedSize, const QString& path,
+                              off_t size);
 
     /**
      * @brief Start background worker threads

@@ -78,8 +78,9 @@ class MetadataRefreshWorker : public QObject {
      * @param driveClient Pointer to Google Drive API client
      * @param parent Parent QObject
      */
-    explicit MetadataRefreshWorker(MetadataCache* metadataCache, FileCache* fileCache, SyncDatabase* database,
-                                   GoogleDriveClient* driveClient, QObject* parent = nullptr);
+    explicit MetadataRefreshWorker(MetadataCache* metadataCache, FileCache* fileCache,
+                                   SyncDatabase* database, GoogleDriveClient* driveClient,
+                                   QObject* parent = nullptr);
 
     ~MetadataRefreshWorker() override;
 
@@ -186,10 +187,10 @@ class MetadataRefreshWorker : public QObject {
 
     /**
      * @brief Emitted when a remote change is processed with display-ready info
-     * @param name Human-readable file/folder name
+     * @param displayPath Human-readable logical path, or file/folder name fallback
      * @param changeType Type of change: "created", "modified", "deleted"
      */
-    void changeProcessedDetailed(const QString& name, const QString& changeType);
+    void changeProcessedDetailed(const QString& displayPath, const QString& changeType);
 
     /**
      * @brief Emitted when refresh cycle completes
@@ -254,6 +255,14 @@ class MetadataRefreshWorker : public QObject {
      * Forces re-download on next access.
      */
     void invalidateFileCache(const QString& fileId);
+
+    /**
+     * @brief Resolve a display path for UI logging
+     * @param fileId Google Drive file ID
+     * @param fallbackName File or folder name to use when path cannot be resolved
+     * @return Logical path if available, otherwise fallbackName
+     */
+    QString resolveDisplayPath(const QString& fileId, const QString& fallbackName) const;
 
     /**
      * @brief Check if file should be processed
