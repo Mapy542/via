@@ -42,6 +42,7 @@ set(SOURCES
     src/ui/MainWindow.cpp
     src/ui/SettingsWindow.cpp
     src/ui/SystemTrayManager.cpp
+    src/ui/UiStatusCoordinator.cpp
     src/ui/ConflictDialog.cpp
     src/auth/GoogleAuthManager.cpp
     src/auth/TokenStorage.cpp
@@ -76,6 +77,7 @@ set(HEADERS
     src/ui/MainWindow.h
     src/ui/SettingsWindow.h
     src/ui/SystemTrayManager.h
+    src/ui/UiStatusCoordinator.h
     src/ui/ConflictDialog.h
     src/auth/GoogleAuthManager.h
     src/auth/TokenStorage.h
@@ -228,6 +230,10 @@ if(BUILD_TESTS)
     add_qt_test(test_MetadataCache tests/fuse/TestMetadataCache.cpp)
     add_qt_test(test_MetadataRefreshWorker tests/fuse/TestMetadataRefreshWorker.cpp)
     add_qt_test(test_NativeDocShortcutHandler tests/fuse/TestNativeDocShortcutHandler.cpp)
+
+    # UI tests
+    add_qt_test(test_UiStatusCoordinator tests/ui/TestUiStatusCoordinator.cpp)
+    add_qt_test(test_UiStatusIntegration tests/ui/TestUiStatusIntegration.cpp)
 
     # Auth subsystem tests
     add_qt_test(test_TokenRefresh tests/auth/TestTokenRefresh.cpp)

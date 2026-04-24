@@ -16,7 +16,6 @@
 #include <QMainWindow>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QTimer>
 #include <QVBoxLayout>
 
 class GoogleAuthManager;
@@ -27,6 +26,7 @@ class SyncActionQueue;
 class SyncActionThread;
 class ChangeProcessor;
 class FullSync;
+class UiStatusCoordinator;
 
 /**
  * @class MainWindow
@@ -52,6 +52,7 @@ class MainWindow : public QMainWindow {
     explicit MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
                         SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
                         SyncActionThread* syncActionThread, FullSync* fullSync,
+                        UiStatusCoordinator* statusCoordinator,
                         NotificationManager* notificationManager, QWidget* parent = nullptr);
 
     ~MainWindow() override;
@@ -125,6 +126,7 @@ class MainWindow : public QMainWindow {
     void onOpenFolderClicked();
     void onPauseSyncClicked();
     void onRefreshClicked();
+    void applyStatusSnapshot();
 
    private:
     void setupUi();
@@ -138,6 +140,7 @@ class MainWindow : public QMainWindow {
     SyncActionThread* m_syncActionThread;
     ChangeProcessor* m_changeProcessor;
     FullSync* m_fullSync;
+    UiStatusCoordinator* m_statusCoordinator;
     NotificationManager* m_notificationManager;
     SettingsWindow* m_settingsWindow;
 
@@ -168,9 +171,6 @@ class MainWindow : public QMainWindow {
     // Recent activity section
     QGroupBox* m_activityGroup;
     QListWidget* m_activityList;
-
-    // Update timer
-    QTimer* m_updateTimer;
 
     bool m_syncPaused;
     bool m_authExpired;

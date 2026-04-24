@@ -11,28 +11,21 @@
 #include <QIcon>
 #include <QLocale>
 #include <QSettings>
-#include <QStringList>
 #include <QUrl>
-#include <algorithm>
 
+#include "UiStatusCoordinator.h"
 #include "auth/GoogleAuthManager.h"
 #include "sync/ChangeProcessor.h"
-#include "sync/SyncActionQueue.h"
 #include "utils/ThemeHelper.h"
 
 SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
-                                     SyncActionQueue* syncActionQueue,
-                                     ChangeProcessor* changeProcessor, QObject* parent)
+                                     ChangeProcessor* changeProcessor,
+                                     UiStatusCoordinator* statusCoordinator, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
-      m_syncActionQueue(syncActionQueue),
       m_changeProcessor(changeProcessor),
+      m_statusCoordinator(statusCoordinator),
       m_syncPaused(false),
-      m_hasConflicts(false),
-      m_storagePercent(-1.0),
-      m_mirrorPriority(TrayIconPriority::Idle),
-      m_fusePriority(TrayIconPriority::Idle),
-      m_globalPriority(TrayIconPriority::Idle),
       m_authenticated(false) {
     // Create system tray icon
     m_trayIcon = new QSystemTrayIcon(this);
@@ -58,19 +51,11 @@ SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
                 [this]() { updateAuthState(false); });
     }
 
-    // Connect to change processor state changes
-    if (m_changeProcessor) {
-        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this,
-                [this](ChangeProcessor::State) {
-                    // The periodic timer handles status text; just refresh now
-                    refreshStatus();
-                });
+    if (m_statusCoordinator) {
+        connect(m_statusCoordinator, &UiStatusCoordinator::statusChanged, this,
+                &SystemTrayManager::applyStatusSnapshot);
+        applyStatusSnapshot();
     }
-
-    // Periodic status timer — mirrors MainWindow's update timer
-    m_statusTimer = new QTimer(this);
-    connect(m_statusTimer, &QTimer::timeout, this, &SystemTrayManager::refreshStatus);
-    m_statusTimer->start(5000);
 }
 
 SystemTrayManager::~SystemTrayManager() { hide(); }
@@ -214,116 +199,15 @@ void SystemTrayManager::refreshNotificationMenu() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Priority helpers
-// ---------------------------------------------------------------------------
-
-TrayIconPriority SystemTrayManager::priorityFromStatusText(const QString& status) {
-    if (status.contains("expired") || status.contains("Authentication"))
-        return TrayIconPriority::AuthExpired;
-    if (status.contains("Error") || status.contains("Failed")) return TrayIconPriority::Error;
-    if (status.contains("Not connected") || status.contains("Offline"))
-        return TrayIconPriority::Offline;
-    if (status.contains("Warning")) return TrayIconPriority::Warning;
-    if (status.contains("Paused")) return TrayIconPriority::Paused;
-    if (status.contains("Syncing") || status.contains("Uploading") ||
-        status.contains("Downloading") || status.contains("Scanning") ||
-        status.contains("Fetching") || status.contains("Flushing") || status.contains("Refreshing"))
-        return TrayIconPriority::Syncing;
-    return TrayIconPriority::Idle;
-}
-
-QString SystemTrayManager::iconForPriority(TrayIconPriority priority) {
-    switch (priority) {
-        case TrayIconPriority::AuthExpired:
-            return QStringLiteral("auth-expired.svg");
-        case TrayIconPriority::Error:
-            return QStringLiteral("error.svg");
-        case TrayIconPriority::Warning:
-            return QStringLiteral("warn.svg");
-        case TrayIconPriority::Offline:
-            return QStringLiteral("no-connection.svg");
-        case TrayIconPriority::CriticalStorage:
-            return QStringLiteral("critical-low-storage.svg");
-        case TrayIconPriority::LowStorage:
-            return QStringLiteral("low-storage.svg");
-        case TrayIconPriority::Paused:
-            return QStringLiteral("paused.svg");
-        case TrayIconPriority::Syncing:
-            return QStringLiteral("sync-active.svg");
-        case TrayIconPriority::Idle:
-        default:
-            return QStringLiteral("drive-idle.svg");
-    }
-}
-
-void SystemTrayManager::recalcGlobalPriority() {
-    // Start from idle and layer on severity
-    TrayIconPriority p = TrayIconPriority::Idle;
-
-    if (!m_authenticated) p = std::max(p, TrayIconPriority::AuthExpired);
-    if (m_hasConflicts) p = std::max(p, TrayIconPriority::Warning);
-    if (m_storagePercent >= 90.0)
-        p = std::max(p, TrayIconPriority::CriticalStorage);
-    else if (m_storagePercent >= 75.0)
-        p = std::max(p, TrayIconPriority::LowStorage);
-
-    m_globalPriority = p;
-}
-
-void SystemTrayManager::resolveIcon() {
-    TrayIconPriority effective = std::max({m_mirrorPriority, m_fusePriority, m_globalPriority});
-    m_trayIcon->setIcon(ThemeHelper::trayIcon(iconForPriority(effective)));
-
-    // Build combined status text
-    QStringList parts;
-    if (!m_mirrorStatusText.isEmpty())
-        parts << QStringLiteral("Mirror: %1").arg(m_mirrorStatusText);
-    if (!m_fuseStatusText.isEmpty()) parts << QStringLiteral("FUSE: %1").arg(m_fuseStatusText);
-    QString combined = parts.isEmpty() ? QStringLiteral("Idle") : parts.join(" | ");
-
-    m_statusAction->setText(combined);
-    setToolTip(combined);
-}
-
-// ---------------------------------------------------------------------------
-// Subsystem status slots
-// ---------------------------------------------------------------------------
-
-void SystemTrayManager::updateSyncStatus(const QString& status) {
-    m_mirrorPriority = priorityFromStatusText(status);
-    m_mirrorStatusText = status;
-    resolveIcon();
-}
-
-void SystemTrayManager::updateFuseStatus(const QString& status) {
-    m_fusePriority = priorityFromStatusText(status);
-    m_fuseStatusText = status;
-    resolveIcon();
-}
-
-void SystemTrayManager::setHasConflicts(bool hasConflicts) {
-    if (m_hasConflicts != hasConflicts) {
-        m_hasConflicts = hasConflicts;
-        recalcGlobalPriority();
-        resolveIcon();
-        if (hasConflicts) {
-            showNotification("Conflicts Detected",
-                             "There are file conflicts that need your attention.",
-                             QSystemTrayIcon::Warning);
-        }
-    }
-}
-
 void SystemTrayManager::updateAuthState(bool authenticated) {
     m_authenticated = authenticated;
     m_openFolderAction->setEnabled(authenticated);
     m_pauseSyncAction->setEnabled(authenticated);
     m_syncNowAction->setEnabled(authenticated);
     m_recentChangesAction->setEnabled(authenticated);
-
-    recalcGlobalPriority();
-    resolveIcon();
+    if (!authenticated) {
+        updatePauseAction(false);
+    }
 }
 
 void SystemTrayManager::updatePauseAction(bool paused) {
@@ -372,52 +256,16 @@ void SystemTrayManager::onSyncNowClicked() {
 
 void SystemTrayManager::onRecentChangesClicked() { emit showWindowRequested(); }
 
-void SystemTrayManager::updateStorageInfo(qint64 storageUsed, qint64 storageLimit) {
-    if (storageLimit <= 0) {
-        m_storagePercent = -1.0;
+void SystemTrayManager::applyStatusSnapshot() {
+    if (!m_statusCoordinator) {
         return;
     }
 
-    m_storagePercent = (storageUsed * 100.0) / storageLimit;
-
-    if (m_storagePercent >= 90.0) {
-        showNotification("Critical Storage Warning",
-                         QString("Google Drive storage is %1% full!")
-                             .arg(QString::number(m_storagePercent, 'f', 1)),
-                         QSystemTrayIcon::Critical);
-    } else if (m_storagePercent >= 75.0) {
-        showNotification("Low Storage Warning",
-                         QString("Google Drive storage is %1% full.")
-                             .arg(QString::number(m_storagePercent, 'f', 1)),
-                         QSystemTrayIcon::Warning);
-    }
-
-    // Refresh priority to reflect storage state
-    recalcGlobalPriority();
-    resolveIcon();
-}
-
-void SystemTrayManager::refreshStatus() {
-    if (!m_changeProcessor) {
-        return;
-    }
-
-    ChangeProcessor::State state = m_changeProcessor->state();
-    switch (state) {
-        case ChangeProcessor::State::Running: {
-            int pending = m_syncActionQueue ? m_syncActionQueue->count() : 0;
-            if (pending > 0) {
-                updateSyncStatus(QString("Syncing... (%1 pending)").arg(pending));
-            } else {
-                updateSyncStatus("Up to date");
-            }
-            break;
-        }
-        case ChangeProcessor::State::Paused:
-            updateSyncStatus("Paused");
-            break;
-        case ChangeProcessor::State::Stopped:
-            updateSyncStatus("Stopped");
-            break;
-    }
+    const UiStatusSnapshot status = m_statusCoordinator->snapshot();
+    const QString summary =
+        status.combinedStatusText.isEmpty() ? QStringLiteral("Idle") : status.combinedStatusText;
+    m_trayIcon->setIcon(
+        ThemeHelper::trayIcon(UiStatusCoordinator::iconForPriority(status.resolvedPriority)));
+    m_statusAction->setText(summary);
+    setToolTip(summary);
 }

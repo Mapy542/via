@@ -19,6 +19,7 @@
 #include <QUrl>
 
 #include "SettingsWindow.h"
+#include "UiStatusCoordinator.h"
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
 #include "sync/ChangeProcessor.h"
@@ -31,6 +32,7 @@
 MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
                        SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
                        SyncActionThread* syncActionThread, FullSync* fullSync,
+                       UiStatusCoordinator* statusCoordinator,
                        NotificationManager* notificationManager, QWidget* parent)
     : QMainWindow(parent),
       m_authManager(authManager),
@@ -39,6 +41,7 @@ MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveC
       m_syncActionThread(syncActionThread),
       m_changeProcessor(changeProcessor),
       m_fullSync(fullSync),
+      m_statusCoordinator(statusCoordinator),
       m_notificationManager(notificationManager),
       m_settingsWindow(nullptr),
       m_syncPaused(false),
@@ -51,34 +54,9 @@ MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveC
     setupMenuBar();
     connectSignals();
 
-    // Setup update timer for periodic status updates
-    m_updateTimer = new QTimer(this);
-    connect(m_updateTimer, &QTimer::timeout, this, [this]() {
-        if (m_authExpired) {
-            updateSyncStatus("Authentication expired");
-            return;
-        }
-
-        if (m_changeProcessor) {
-            ChangeProcessor::State state = m_changeProcessor->state();
-            if (state == ChangeProcessor::State::Running) {
-                int pendingActions = m_syncActionQueue ? m_syncActionQueue->count() : 0;
-                if (pendingActions > 0) {
-                    updateSyncStatus(QString("Syncing... (%1 pending)").arg(pendingActions));
-                } else {
-                    updateSyncStatus("Up to date");
-                }
-            } else if (state == ChangeProcessor::State::Paused) {
-                updateSyncStatus("Paused");
-            } else {
-                updateSyncStatus("Stopped");
-            }
-        }
-    });
-    m_updateTimer->start(5000);  // Update every 5 seconds
-
     // Initialize auth state
     updateAuthState(m_authManager ? m_authManager->isAuthenticated() : false);
+    applyStatusSnapshot();
 }
 
 MainWindow::~MainWindow() {
@@ -96,7 +74,7 @@ void MainWindow::setupUi() {
     m_mainLayout->setContentsMargins(20, 20, 20, 20);
 
     // === Status Section ===
-    m_statusGroup = new QGroupBox("Sync Status", this);
+    m_statusGroup = new QGroupBox("Status", this);
     QVBoxLayout* statusLayout = new QVBoxLayout(m_statusGroup);
 
     QHBoxLayout* statusRow = new QHBoxLayout();
@@ -110,7 +88,7 @@ void MainWindow::setupUi() {
     statusLayout->addLayout(statusRow);
 
     // Pending actions counter
-    m_pendingActionsLabel = new QLabel("Pending actions: 0", this);
+    m_pendingActionsLabel = new QLabel("Pending mirror actions: 0", this);
     m_pendingActionsLabel->setStyleSheet("QLabel { font-size: 12px; color: #666; }");
     statusLayout->addWidget(m_pendingActionsLabel);
 
@@ -285,6 +263,11 @@ void MainWindow::connectSignals() {
     connect(m_pauseSyncButton, &QPushButton::clicked, this, &MainWindow::onPauseSyncClicked);
     connect(m_refreshButton, &QPushButton::clicked, this, &MainWindow::onRefreshClicked);
 
+    if (m_statusCoordinator) {
+        connect(m_statusCoordinator, &UiStatusCoordinator::statusChanged, this,
+                &MainWindow::applyStatusSnapshot);
+    }
+
     // Auth manager connections
     if (m_authManager) {
         connect(m_authManager, &GoogleAuthManager::authenticated, this,
@@ -337,20 +320,6 @@ void MainWindow::connectSignals() {
     }
 
     if (m_changeProcessor) {
-        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this,
-                [this](ChangeProcessor::State state) {
-                    switch (state) {
-                        case ChangeProcessor::State::Running:
-                            updateSyncStatus("Syncing...");
-                            break;
-                        case ChangeProcessor::State::Paused:
-                            updateSyncStatus("Paused");
-                            break;
-                        case ChangeProcessor::State::Stopped:
-                            updateSyncStatus("Stopped");
-                            break;
-                    }
-                });
         connect(m_changeProcessor, &ChangeProcessor::error, this,
                 [this](const QString& error) { addRecentActivity("Error: " + error); });
         connect(
@@ -366,25 +335,6 @@ void MainWindow::connectSignals() {
 
     // FullSync connections
     if (m_fullSync) {
-        connect(m_fullSync, &FullSync::stateChanged, this, [this](FullSync::State state) {
-            switch (state) {
-                case FullSync::State::ScanningLocal:
-                    updateSyncStatus("Scanning local files...");
-                    break;
-                case FullSync::State::FetchingRemote:
-                    updateSyncStatus("Fetching remote files...");
-                    break;
-                case FullSync::State::Complete:
-                    updateSyncStatus("Syncing...");
-                    break;
-                case FullSync::State::Error:
-                    updateSyncStatus("Sync error");
-                    break;
-                case FullSync::State::Idle:
-                    // Don't change status for idle
-                    break;
-            }
-        });
         connect(m_fullSync, &FullSync::progressUpdated, this,
                 [this](const QString& phase, int current, int total) {
                     Q_UNUSED(total);
@@ -400,30 +350,28 @@ void MainWindow::connectSignals() {
     }
 }
 
+void MainWindow::applyStatusSnapshot() {
+    if (!m_statusCoordinator) {
+        return;
+    }
+
+    const UiStatusSnapshot status = m_statusCoordinator->snapshot();
+    const QString summary =
+        status.combinedStatusText.isEmpty() ? QStringLiteral("Idle") : status.combinedStatusText;
+    m_statusLabel->setText(summary);
+    m_statusIcon->setPixmap(
+        ThemeHelper::guiIcon(UiStatusCoordinator::iconForPriority(status.resolvedPriority))
+            .pixmap(32, 32));
+    updatePendingActions(status.pendingActions);
+}
+
 void MainWindow::updateSyncStatus(const QString& status) {
     m_statusLabel->setText(status);
 
-    // Update status icon using palette-based theme detection for GUI
-    if (status.contains("Syncing") || status.contains("Uploading") ||
-        status.contains("Downloading") || status.contains("Scanning") ||
-        status.contains("Fetching")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("sync-active.svg").pixmap(32, 32));
-    } else if (status.contains("Up to date") || status.contains("Complete") ||
-               status.contains("Ready")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("drive-idle.svg").pixmap(32, 32));
-    } else if (status.contains("Error") || status.contains("Failed")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("error.svg").pixmap(32, 32));
-    } else if (status.contains("Paused")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("paused.svg").pixmap(32, 32));
-    } else if (status.contains("expired") || status.contains("Authentication")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("auth-expired.svg").pixmap(32, 32));
-    } else if (status.contains("Not connected") || status.contains("Offline")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("no-connection.svg").pixmap(32, 32));
-    } else if (status.contains("Conflict")) {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("warn.svg").pixmap(32, 32));
-    } else {
-        m_statusIcon->setPixmap(ThemeHelper::guiIcon("drive-idle.svg").pixmap(32, 32));
-    }
+    m_statusIcon->setPixmap(
+        ThemeHelper::guiIcon(UiStatusCoordinator::iconForPriority(
+                                 UiStatusCoordinator::priorityFromStatusText(status)))
+            .pixmap(32, 32));
 }
 
 void MainWindow::updateSyncProgress(qint64 current, qint64 total) {
@@ -438,11 +386,11 @@ void MainWindow::updateSyncProgress(qint64 current, qint64 total) {
 
 void MainWindow::updatePendingActions(int count) {
     if (count > 0) {
-        m_pendingActionsLabel->setText(QString("Pending actions: %1").arg(count));
+        m_pendingActionsLabel->setText(QString("Pending mirror actions: %1").arg(count));
         m_pendingActionsLabel->setStyleSheet(
             "QLabel { font-size: 12px; color: #0066cc; font-weight: bold; }");
     } else {
-        m_pendingActionsLabel->setText("Pending actions: 0");
+        m_pendingActionsLabel->setText("Pending mirror actions: 0");
         m_pendingActionsLabel->setStyleSheet("QLabel { font-size: 12px; color: #666; }");
     }
 }
@@ -469,11 +417,15 @@ void MainWindow::updateAuthState(bool authenticated) {
 
     if (authenticated) {
         m_accountLabel->setText("Signed in to Google Drive");
-        updateSyncStatus("Ready to sync");
+        if (!m_statusCoordinator) {
+            updateSyncStatus("Ready to sync");
+        }
         addRecentActivity("Signed in successfully");
     } else {
         m_accountLabel->setText("Not logged in");
-        updateSyncStatus("Not connected");
+        if (!m_statusCoordinator) {
+            updateSyncStatus("Not connected");
+        }
     }
 }
 
@@ -491,7 +443,9 @@ void MainWindow::setAuthExpired(const QString& reason) {
     }
 
     m_accountLabel->setText(message);
-    updateSyncStatus("Authentication expired");
+    if (!m_statusCoordinator) {
+        updateSyncStatus("Authentication expired");
+    }
     addRecentActivity("Authentication expired: " + reason);
 }
 
