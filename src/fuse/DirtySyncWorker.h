@@ -310,10 +310,10 @@ class DirtySyncWorker : public QObject {
     /**
      * @brief Upload a single file
      * @param fileId File ID to upload
-     * @param path File path
+        * @param localPath Immutable local path to upload
      * @return true if upload was initiated successfully
      */
-    bool uploadFile(const QString& fileId, const QString& path);
+        bool uploadFile(const QString& fileId, const QString& localPath);
 
     /**
      * @brief Set the worker state

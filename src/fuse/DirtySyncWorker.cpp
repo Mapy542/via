@@ -348,6 +348,21 @@ void DirtySyncWorker::processDirtyFiles() {
     int cycleUploaded = 0;
     int cycleFailed = 0;
 
+    const auto recordLocalFailure = [&](const DirtyFileEntry& entry, const QString& errorMessage) {
+        m_fileCache->markUploadFailed(entry.fileId);
+        cycleFailed++;
+
+        {
+            QMutexLocker locker(&m_mutex);
+            m_failedCount++;
+            m_retryCounts[entry.fileId] = m_retryCounts.value(entry.fileId, 0) + 1;
+            m_uploadError = errorMessage;
+        }
+
+        emit uploadFailed(entry.fileId, entry.path, errorMessage);
+        qWarning() << "DirtySyncWorker: Failed to prepare upload for" << entry.path << ":" << errorMessage;
+    };
+
     for (const DirtyFileEntry& entry : dirtyFiles) {
         // Check if we should stop
         {
@@ -370,17 +385,35 @@ void DirtySyncWorker::processDirtyFiles() {
             }
         }
 
-        if (m_fileCache->hasOpenHandles(entry.fileId)) {
-            // TODO: Replace this coarse gate with immutable per-upload local
-            // snapshots so long-lived readers do not delay sync after a save.
-            qDebug() << "DirtySyncWorker: Deferring upload for" << entry.path << "- file still has open FUSE handles";
-            continue;
+        const UploadSnapshotResult snapshot = m_fileCache->createUploadSnapshot(entry.fileId, entry.generation);
+        switch (snapshot.status) {
+            case UploadSnapshotStatus::Ready:
+                break;
+            case UploadSnapshotStatus::AlreadyUploaded:
+                m_fileCache->finalizeUploadedGeneration(entry.fileId);
+                qDebug() << "DirtySyncWorker: Skipping" << entry.path
+                         << "- generation already uploaded, waiting for writable handles to close";
+                continue;
+            case UploadSnapshotStatus::BlockedByWriter:
+                qDebug() << "DirtySyncWorker: Deferring upload for" << entry.path
+                         << "- writable FUSE handle still open";
+                continue;
+            case UploadSnapshotStatus::StaleGeneration:
+                qDebug() << "DirtySyncWorker: Skipping stale dirty generation for" << entry.path;
+                continue;
+            case UploadSnapshotStatus::MissingContent:
+                recordLocalFailure(entry, QStringLiteral("Local upload content missing"));
+                continue;
+            case UploadSnapshotStatus::Failed:
+                recordLocalFailure(entry, QStringLiteral("Could not create immutable local upload snapshot"));
+                continue;
         }
 
         emit uploadStarted(entry.fileId, entry.path);
 
         // Attempt upload
-        bool success = uploadFile(entry.fileId, entry.path);
+        bool success = uploadFile(entry.fileId, snapshot.snapshotPath);
+        m_fileCache->cleanupUploadSnapshot(snapshot.snapshotPath);
 
         if (success) {
             cycleUploaded++;
@@ -393,10 +426,13 @@ void DirtySyncWorker::processDirtyFiles() {
                 uploaded = m_lastUploadedFile;
             }
 
+            m_fileCache->markUploadedGeneration(entry.fileId, entry.generation);
+
             if (!m_fileCache->clearDirty(entry.fileId, entry.generation)) {
+                m_fileCache->finalizeUploadedGeneration(entry.fileId);
                 emit uploadCompleted(entry.fileId, entry.path);
                 qInfo() << "DirtySyncWorker: Uploaded" << entry.path
-                        << "but left it dirty for a newer generation or reopened handle";
+                        << "but left it dirty for a newer generation or open writable handle";
                 continue;
             }
 
@@ -466,17 +502,12 @@ void DirtySyncWorker::processDirtyFiles() {
 }
 
 bool DirtySyncWorker::uploadFile(const QString& fileId, const QString& path) {
-    Q_UNUSED(path)
-
     if (!m_driveClient || !m_fileCache) {
         return false;
     }
 
-    // Get the content path — checks the pending store first (post-release),
-    // then falls back to the cache dir (handle still open).
-    QString cachePath = m_fileCache->getContentPath(fileId);
-    if (cachePath.isEmpty() || !QFileInfo::exists(cachePath)) {
-        qWarning() << "DirtySyncWorker: Cached file not found for" << fileId;
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        qWarning() << "DirtySyncWorker: Upload snapshot not found for" << fileId;
         return false;
     }
 
@@ -495,7 +526,7 @@ bool DirtySyncWorker::uploadFile(const QString& fileId, const QString& path) {
     // Initiate upload on the drive client's thread (main thread) to avoid cross-thread
     // QNetworkAccessManager usage
     QMetaObject::invokeMethod(m_driveClient, "updateFile", Qt::QueuedConnection, Q_ARG(QString, fileId),
-                              Q_ARG(QString, cachePath));
+                              Q_ARG(QString, path));
 
     // Wait for upload completion with timeout
     {
