@@ -9,9 +9,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
+#include <functional>
+#include <thread>
 
 #include "api/GoogleDriveClient.h"
 #include "fuse/FileCache.h"
@@ -24,7 +27,28 @@ class FakeDriveClientFDL : public GoogleDriveClient {
    public:
     explicit FakeDriveClientFDL(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
+    QByteArray exportPayload = QByteArray("exported native doc");
+    int exportCallCount = 0;
+    QString lastExportFileId;
+    QString lastExportMimeType;
+
     void downloadFile(const QString&, const QString&) override {}
+    void exportFile(const QString& fileId, const QString& exportMimeType,
+                    const QString& localPath) override {
+        ++exportCallCount;
+        lastExportFileId = fileId;
+        lastExportMimeType = exportMimeType;
+
+        QFileInfo fileInfo(localPath);
+        QDir().mkpath(fileInfo.dir().absolutePath());
+
+        QFile file(localPath);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QCOMPARE(file.write(exportPayload), exportPayload.size());
+        file.close();
+
+        emit fileDownloaded(fileId, localPath);
+    }
     void uploadFile(const QString&, const QString&, const QString&) override {}
     void updateFile(const QString&, const QString&) override {}
     void moveFile(const QString&, const QString&, const QString&) override {}
@@ -33,6 +57,26 @@ class FakeDriveClientFDL : public GoogleDriveClient {
     void createFolder(const QString&, const QString&, const QString&) override {}
     QJsonArray getParentsByFileId(const QString&) override { return {}; }
     QString getFolderIdByPath(const QString&) override { return {}; }
+};
+
+class JoiningThread {
+   public:
+    explicit JoiningThread(std::function<void()> function) : m_thread(std::move(function)) {}
+
+    ~JoiningThread() {
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+    }
+
+    void join() {
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+    }
+
+   private:
+    std::thread m_thread;
 };
 
 class TestFuseDriverLifecycle : public QObject {
@@ -45,6 +89,7 @@ class TestFuseDriverLifecycle : public QObject {
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
     void testRegisterOpenFile_TracksWritableHandlesSeparately();
+    void testNativeDocReportedSize_MaterializesExportOnFirstStat();
 
    private:
     void seedCachedFile(const QString& fileId, const QString& path, const QByteArray& content);
@@ -221,6 +266,51 @@ void TestFuseDriverLifecycle::testRegisterOpenFile_TracksWritableHandlesSeparate
 
     QVERIFY(!m_driver->fileCache()->hasOpenHandles(fileId));
     QVERIFY(!m_driver->fileCache()->hasOpenWritableHandles(fileId));
+}
+
+void TestFuseDriverLifecycle::testNativeDocReportedSize_MaterializesExportOnFirstStat() {
+    const QString fileId = QStringLiteral("native-doc-first-stat");
+    const QByteArray payload =
+        QByteArray("PK") + QByteArray::fromHex("0304") + QByteArray("fake-ods-payload");
+    const QString exportMimeType = QStringLiteral("application/vnd.oasis.opendocument.spreadsheet");
+
+    FuseMetadata meta;
+    meta.fileId = fileId;
+    meta.path = QStringLiteral("report.ods");
+    meta.name = QStringLiteral("report.ods");
+    meta.remoteName = QStringLiteral("report");
+    meta.parentId = QStringLiteral("root");
+    meta.isFolder = false;
+    meta.size = 0;
+    meta.mimeType = exportMimeType;
+    meta.remoteMimeType = QStringLiteral("application/vnd.google-apps.spreadsheet");
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = QDateTime::currentDateTimeUtc();
+    meta.cachedAt = QDateTime::currentDateTimeUtc();
+    meta.lastAccessed = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->exportPayload = payload;
+
+    QSignalSpy completedSpy(m_driver->fileCache(), &FileCache::downloadCompleted);
+    QVERIFY(completedSpy.isValid());
+
+    qint64 reportedSize = 0;
+    JoiningThread worker([&]() {
+        reportedSize = m_driver->nativeDocReportedSize(meta, NativeDocMode::OpenDocument);
+    });
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 2000);
+    worker.join();
+
+    QCOMPARE(reportedSize, qint64(payload.size()));
+    QCOMPARE(m_driveClient->exportCallCount, 1);
+    QCOMPARE(m_driveClient->lastExportFileId, fileId);
+    QCOMPARE(m_driveClient->lastExportMimeType, exportMimeType);
+    QVERIFY(m_driver->fileCache()->isCached(fileId, exportMimeType));
+
+    const qint64 cachedSize = m_driver->nativeDocReportedSize(meta, NativeDocMode::OpenDocument);
+    QCOMPARE(cachedSize, qint64(payload.size()));
+    QCOMPARE(m_driveClient->exportCallCount, 1);
 }
 
 QTEST_MAIN(TestFuseDriverLifecycle)

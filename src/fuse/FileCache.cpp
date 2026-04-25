@@ -30,6 +30,11 @@ QString remoteFileIdFromCacheKey(const QString& cacheKey) {
 bool cacheKeyBelongsToFile(const QString& cacheKey, const QString& fileId) {
     return cacheKey == fileId || cacheKey.startsWith(fileId + QLatin1Char('|'));
 }
+
+bool hasUsableExportBytes(const QString& cachePath) {
+    QFileInfo info(cachePath);
+    return info.exists() && info.size() > 0;
+}
 }  // namespace
 
 FileCache::FileCache(SyncDatabase* database, GoogleDriveClient* driveClient, QObject* parent)
@@ -162,7 +167,11 @@ bool FileCache::isCached(const QString& fileId, const QString& exportMimeType) c
 
     // Verify file actually exists on disk
     const CacheEntry& entry = m_cacheEntries[cacheKey];
-    return QFile::exists(entry.cachePath);
+    if (exportMimeType.isEmpty()) {
+        return QFile::exists(entry.cachePath);
+    }
+
+    return hasUsableExportBytes(entry.cachePath);
 }
 
 QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
@@ -357,7 +366,7 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
 
         if (m_cacheEntries.contains(cacheKey)) {
             const CacheEntry& entry = m_cacheEntries[cacheKey];
-            if (QFile::exists(entry.cachePath)) {
+            if (hasUsableExportBytes(entry.cachePath)) {
                 m_cacheEntries[cacheKey].lastAccessed = QDateTime::currentDateTime();
                 if (m_database) {
                     m_database->updateCacheAccessTime(cacheKey);
@@ -365,6 +374,7 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
                 qDebug() << "FileCache: Cache hit (export) for" << fileId;
                 return entry.cachePath;
             } else {
+                QFile::remove(entry.cachePath);
                 m_cacheEntries.remove(cacheKey);
                 if (m_database) {
                     m_database->evictFuseCacheEntry(cacheKey);

@@ -155,6 +155,7 @@ class TestFileCache : public QObject {
     void testGetExportedPath_SuccessCachesBufferedExport();
     void testGetExportedPath_DifferentMimeTypesStayDistinct();
     void testGetExportedPath_ZeroBytePayloadFails();
+    void testGetExportedPath_ZeroByteRemnantReexports();
 
    private:
     void createTestDatabase();
@@ -822,6 +823,50 @@ void TestFileCache::testGetExportedPath_ZeroBytePayloadFails() {
     const QList<QVariant> args = failedSpy.takeFirst();
     QCOMPARE(args.at(0).toString(), fileId);
     QCOMPARE(args.at(1).toString(), QStringLiteral("Export produced an empty file"));
+}
+
+void TestFileCache::testGetExportedPath_ZeroByteRemnantReexports() {
+    const QString fileId = QStringLiteral("native-doc-zero-byte-remnant");
+    const QString exportMimeType = QStringLiteral("text/markdown");
+    const QString cacheKey = fileId + QStringLiteral("|") + exportMimeType;
+    const QByteArray payload("# Re-exported snapshot\n");
+
+    const QString remnantPath = m_cache->getContentPath(fileId, exportMimeType);
+    QVERIFY(QDir().mkpath(QFileInfo(remnantPath).dir().absolutePath()));
+
+    QFile remnant(remnantPath);
+    QVERIFY(remnant.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    remnant.close();
+    QCOMPARE(QFileInfo(remnantPath).size(), qint64(0));
+
+    QVERIFY(m_db->recordFuseCacheEntry(cacheKey, remnantPath, 0));
+
+    delete m_cache;
+    m_cache = new FileCache(m_db, m_driveClient, this);
+    m_cache->setCacheDirectory(m_tempDir->path() + "/cache");
+    m_cache->setDirtyDirectory(m_tempDir->path() + "/pending");
+    QVERIFY(m_cache->initialize());
+
+    m_driveClient->exportShouldFail = false;
+    m_driveClient->exportPayload = payload;
+
+    QSignalSpy completedSpy(m_cache, &FileCache::downloadCompleted);
+    QVERIFY(completedSpy.isValid());
+
+    QString result;
+    JoiningThread worker([&]() { result = m_cache->getExportedPath(fileId, exportMimeType); });
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 2000);
+    worker.join();
+
+    QVERIFY(!result.isEmpty());
+    QCOMPARE(result, remnantPath);
+    QCOMPARE(m_driveClient->exportCallCount, 1);
+
+    QFile exportedFile(result);
+    QVERIFY(exportedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(exportedFile.readAll(), payload);
+    exportedFile.close();
 }
 
 QTEST_MAIN(TestFileCache)

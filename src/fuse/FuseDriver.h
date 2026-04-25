@@ -38,6 +38,8 @@
 #include <QThread>
 #include <optional>
 
+#include "NativeDocPolicy.h"
+
 #define FUSE_USE_VERSION 35
 #include <fuse3/fuse.h>
 
@@ -46,6 +48,7 @@ class GoogleDriveClient;
 class SyncDatabase;
 class FileCache;
 class MetadataCache;
+struct FuseMetadata;
 
 // Forward declaration for internal worker classes
 class DirtySyncWorker;
@@ -708,6 +711,19 @@ class FuseDriver : public QObject {
      */
     int truncateWithoutHandle(const QString& fileId, qint64 expectedSize, const QString& path,
                               off_t size);
+
+    /**
+     * @brief Resolve the size that FUSE should report for a native doc
+     *
+     * For export-backed modes, this may synchronously materialize the exported
+     * representation on first stat so file managers do not cache a stale 0-byte
+     * size before the first open.
+     *
+     * @param meta Native-doc metadata entry
+     * @param mode Current native-doc serving mode
+     * @return Size in bytes to expose through getattr
+     */
+    qint64 nativeDocReportedSize(const FuseMetadata& meta, NativeDocMode mode);
 
     /**
      * @brief Start background worker threads
