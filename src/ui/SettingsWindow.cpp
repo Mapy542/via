@@ -109,7 +109,9 @@ void SettingsWindow::setupAccountTab() {
     credentialsForm->addRow("Client ID:", m_clientIdEdit);
 
     m_clientSecretEdit = new QLineEdit(m_accountTab);
-    m_clientSecretEdit->setPlaceholderText("Enter your OAuth Client Secret");
+    m_clientSecretEdit->setPlaceholderText(
+        "Enter your OAuth Client Secret");  // TODO: Shows empty instead of password-mode key
+                                            // (••••••) on subsequent opens after saving
     m_clientSecretEdit->setEchoMode(QLineEdit::Password);
     credentialsForm->addRow("Client Secret:", m_clientSecretEdit);
     apiLayout->addLayout(credentialsForm);
@@ -240,6 +242,7 @@ void SettingsWindow::setupSyncTab() {
     QVBoxLayout* layout = new QVBoxLayout(m_syncTab);
 
     // Sync folder group
+    // TODO: Advanced and sync settings are all mixed up. Add Mirror sync page, Fuse page, adv page.
     QGroupBox* folderGroup = new QGroupBox("Sync Folder", m_syncTab);
     QVBoxLayout* folderLayout = new QVBoxLayout(folderGroup);
 
@@ -412,7 +415,9 @@ void SettingsWindow::setupAdvancedTab() {
     fuseLayout->addLayout(mountLayout);
 
     QHBoxLayout* cacheSizeLayout = new QHBoxLayout();
-    cacheSizeLayout->addWidget(new QLabel("Maximum FUSE cache size:", m_advancedTab));
+    cacheSizeLayout->addWidget(
+        new QLabel("Maximum FUSE cache size:",
+                   m_advancedTab));  // TODO: Validate this actually limits cache size
     m_cacheSize = new QSpinBox(m_advancedTab);
     m_cacheSize->setRange(100, 100000);
     m_cacheSize->setValue(5000);
@@ -426,7 +431,9 @@ void SettingsWindow::setupAdvancedTab() {
     nativeDocLayout->addWidget(new QLabel("Google-native docs:", m_advancedTab));
     m_nativeDocModeCombo = new QComboBox(m_advancedTab);
     m_nativeDocModeCombo->addItem("Hide (don't show in mount)", "hide");
-    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, …)", "browser-shortcut");
+    m_nativeDocModeCombo->addItem(
+        "Browser shortcuts (.gdoc, …)",
+        "browser-shortcut");  // TODO: Implement custom icons for these shortcuts
     m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, …)", "open-document");
     m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, …)", "text");
     m_nativeDocModeCombo->setEnabled(false);
@@ -434,7 +441,9 @@ void SettingsWindow::setupAdvancedTab() {
     nativeDocLayout->addStretch();
     fuseLayout->addLayout(nativeDocLayout);
 
-    QPushButton* clearCacheButton = new QPushButton("Clear Cache", m_advancedTab);
+    QPushButton* clearCacheButton = new QPushButton(
+        "Clear Cache",
+        m_advancedTab);  // TODO: this button does not appear to have any functionality.
     clearCacheButton->setEnabled(false);
     QHBoxLayout* clearLayout = new QHBoxLayout();
     clearLayout->addWidget(clearCacheButton);
