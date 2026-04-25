@@ -87,6 +87,13 @@ struct UploadSnapshotResult {
     QString snapshotPath;
 };
 
+struct PendingExportRequest {
+    QString fileId;
+    QString exportMimeType;
+    QString cacheKey;
+    QString cachePath;
+};
+
 Q_DECLARE_METATYPE(CacheEntry)
 Q_DECLARE_METATYPE(DirtyFileEntry)
 
@@ -242,6 +249,18 @@ class FileCache : public QObject {
      * @return Local cache path, or empty string on failure
      */
     QString getExportedPath(const QString& fileId, const QString& exportMimeType);
+
+    /**
+     * @brief Queue a background export for a Google-native doc
+     *
+     * Starts immediately when a prefetch slot is available, otherwise queues
+     * the request behind existing background exports. Repeated calls for the
+     * same representation are deduplicated.
+     *
+     * @param fileId Google Drive file ID
+     * @param exportMimeType Target MIME type for the export
+     */
+    void queueExportedPath(const QString& fileId, const QString& exportMimeType);
 
     /**
      * @brief Get cache path without downloading
@@ -554,6 +573,14 @@ class FileCache : public QObject {
     void downloadFailed(const QString& fileId, const QString& error);
 
     /**
+     * @brief Emitted when a download/export fails with HTTP status detail
+     * @param fileId File ID
+     * @param error Error message
+     * @param httpStatus HTTP status code when available, otherwise 0
+     */
+    void downloadFailedDetailed(const QString& fileId, const QString& error, int httpStatus);
+
+    /**
      * @brief Emitted when a file is evicted from cache
      * @param fileId Evicted file ID
      */
@@ -599,6 +626,13 @@ class FileCache : public QObject {
     QString generateUploadSnapshotPath(const QString& fileId, quint64 generation) const;
     QString getContentPathLocked(const QString& fileId,
                                  const QString& exportMimeType = QString()) const;
+    QString getReadyExportPathLocked(const QString& fileId, const QString& cacheKey,
+                                     const QString& cachePath);
+    bool recordCacheEntryLocked(const QString& cacheKey, const QString& fileId,
+                                const QString& cachePath, qint64 size,
+                                const QDateTime& completedAt);
+    QList<PendingExportRequest> collectQueuedExportsToStartLocked();
+    void startExportRequests(const QList<PendingExportRequest>& requests);
     bool clearDirtyLocked(const QString& fileId, quint64 expectedGeneration);
     bool maybeFinalizeUploadedGenerationLocked(const QString& fileId);
     bool recycleAuthoritativeCopyToCacheLocked(const QString& fileId);
@@ -645,8 +679,14 @@ class FileCache : public QObject {
     QMap<QString, QString> m_downloadErrors;        // cacheKey -> error
     QWaitCondition m_downloadCondition;
 
+    // Native-doc export scheduling
+    QMap<QString, PendingExportRequest> m_pendingExportRequests;
+    QSet<QString> m_activeExportKeys;
+    QList<QString> m_queuedExportKeys;
+
     // Default 10GB cache size (as specified in procedure chart)
     static constexpr qint64 DEFAULT_MAX_CACHE_SIZE = 10LL * 1024 * 1024 * 1024;
+    static constexpr int MAX_BACKGROUND_EXPORTS = 2;
 };
 
 #endif  // FILECACHE_H

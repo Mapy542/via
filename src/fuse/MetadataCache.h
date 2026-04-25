@@ -32,20 +32,21 @@ class GoogleDriveClient;
  * including stat attributes and Google Drive specific information.
  */
 struct FuseFileMetadata {
-    QString fileId;          ///< Google Drive file ID
-    QString path;            ///< Full path relative to mount point
-    QString name;            ///< File/folder name
-    QString remoteName;      ///< Original Google Drive name before aliasing
-    QString parentId;        ///< Parent folder's Google Drive file ID
-    bool isFolder = false;   ///< Whether this is a folder
-    qint64 size = 0;         ///< File size in bytes (0 for folders)
-    QString mimeType;        ///< MIME type
-    QString remoteMimeType;  ///< Original Google-native MIME type (for native docs)
-    QString webViewLink;     ///< Google Drive web view URL (for native docs)
-    QDateTime createdTime;   ///< Creation timestamp
-    QDateTime modifiedTime;  ///< Last modification timestamp
-    QDateTime cachedAt;      ///< When this metadata was cached
-    QDateTime lastAccessed;  ///< When this entry was last accessed
+    QString fileId;                 ///< Google Drive file ID
+    QString path;                   ///< Full path relative to mount point
+    QString name;                   ///< File/folder name
+    QString remoteName;             ///< Original Google Drive name before aliasing
+    QString nativeDocModeOverride;  ///< Per-file native-doc representation override
+    QString parentId;               ///< Parent folder's Google Drive file ID
+    bool isFolder = false;          ///< Whether this is a folder
+    qint64 size = 0;                ///< File size in bytes (0 for folders)
+    QString mimeType;               ///< MIME type
+    QString remoteMimeType;         ///< Original Google-native MIME type (for native docs)
+    QString webViewLink;            ///< Google Drive web view URL (for native docs)
+    QDateTime createdTime;          ///< Creation timestamp
+    QDateTime modifiedTime;         ///< Last modification timestamp
+    QDateTime cachedAt;             ///< When this metadata was cached
+    QDateTime lastAccessed;         ///< When this entry was last accessed
 
     /**
      * @brief Check if this metadata entry is valid
@@ -209,6 +210,16 @@ class MetadataCache : public QObject {
      */
     QList<FuseFileMetadata> replaceRemoteChildren(const QString& parentId,
                                                   const QList<DriveFile>& files);
+
+    /**
+     * @brief Apply a per-file native doc mode override and recompute its visible path
+     * @param fileId Google Drive file ID
+     * @param modeOverride Override value to persist (empty clears the override)
+     * @param previousPathOut Optional old visible path before the rewrite
+     * @return Updated metadata, or invalid metadata if the file could not be rewritten
+     */
+    FuseFileMetadata applyNativeDocModeOverride(const QString& fileId, const QString& modeOverride,
+                                                QString* previousPathOut = nullptr);
 
     // ========================================
     // Cache modification

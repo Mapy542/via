@@ -359,34 +359,15 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
 
 QString FileCache::getExportedPath(const QString& fileId, const QString& exportMimeType) {
     const QString cacheKey = cacheKeyFor(fileId, exportMimeType);
+    const QString cachePath = generateCachePath(fileId, exportMimeType);
 
-    // Check if already cached (with lock)
-    {
-        QMutexLocker locker(&m_mutex);
-
-        if (m_cacheEntries.contains(cacheKey)) {
-            const CacheEntry& entry = m_cacheEntries[cacheKey];
-            if (hasUsableExportBytes(entry.cachePath)) {
-                m_cacheEntries[cacheKey].lastAccessed = QDateTime::currentDateTime();
-                if (m_database) {
-                    m_database->updateCacheAccessTime(cacheKey);
-                }
-                qDebug() << "FileCache: Cache hit (export) for" << fileId;
-                return entry.cachePath;
-            } else {
-                QFile::remove(entry.cachePath);
-                m_cacheEntries.remove(cacheKey);
-                if (m_database) {
-                    m_database->evictFuseCacheEntry(cacheKey);
-                }
-            }
-        }
+    if (!m_driveClient) {
+        qWarning() << "FileCache: No GoogleDriveClient available for export";
+        emit downloadFailedDetailed(
+            fileId, QStringLiteral("No Google Drive client available for export"), 0);
+        emit downloadFailed(fileId, QStringLiteral("No Google Drive client available for export"));
+        return QString();
     }
-
-    qDebug() << "FileCache: Cache miss (export) for" << fileId << ", exporting as"
-             << exportMimeType;
-
-    QString cachePath = generateCachePath(fileId, exportMimeType);
 
     QFileInfo fileInfo(cachePath);
     QDir parentDir = fileInfo.dir();
@@ -394,99 +375,131 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
         parentDir.mkpath(".");
     }
 
-    // Initiate export
+    QList<PendingExportRequest> toStart;
     {
         QMutexLocker locker(&m_mutex);
-        m_pendingDownloads[cacheKey] = false;
-        m_pendingDownloadPaths[cachePath] = cacheKey;
-        m_downloadErrors.remove(cacheKey);
-    }
-
-    emit downloadStarted(fileId);
-
-    if (m_driveClient) {
-        QMetaObject::invokeMethod(
-            m_driveClient,
-            [driveClient = m_driveClient, fileId, exportMimeType, cachePath]() {
-                driveClient->exportFile(fileId, exportMimeType, cachePath);
-            },
-            Qt::QueuedConnection);
-    } else {
-        qWarning() << "FileCache: No GoogleDriveClient available for export";
-        {
-            QMutexLocker locker(&m_mutex);
-            m_pendingDownloads.remove(cacheKey);
-            m_pendingDownloadPaths.remove(cachePath);
+        const QString readyPath = getReadyExportPathLocked(fileId, cacheKey, cachePath);
+        if (!readyPath.isEmpty()) {
+            qDebug() << "FileCache: Cache hit (export) for" << fileId;
+            return readyPath;
         }
-        emit downloadFailed(fileId, QStringLiteral("No Google Drive client available for export"));
-        return QString();
+
+        if (m_pendingExportRequests.contains(cacheKey)) {
+            const int queuedIndex = m_queuedExportKeys.indexOf(cacheKey);
+            if (queuedIndex >= 0) {
+                m_queuedExportKeys.removeAt(queuedIndex);
+                m_activeExportKeys.insert(cacheKey);
+                toStart.append(m_pendingExportRequests.value(cacheKey));
+            }
+        } else {
+            PendingExportRequest request;
+            request.fileId = fileId;
+            request.exportMimeType = exportMimeType;
+            request.cacheKey = cacheKey;
+            request.cachePath = cachePath;
+
+            qDebug() << "FileCache: Cache miss (export) for" << fileId << ", exporting as"
+                     << exportMimeType;
+
+            m_pendingDownloads[cacheKey] = false;
+            m_pendingDownloadPaths[cachePath] = cacheKey;
+            m_downloadErrors.remove(cacheKey);
+            m_pendingExportRequests[cacheKey] = request;
+            m_activeExportKeys.insert(cacheKey);
+            toStart.append(request);
+        }
     }
+
+    startExportRequests(toStart);
 
     // Wait for export to complete (same mechanism as download)
+    QString error;
+    QList<PendingExportRequest> nextToStart;
     {
         QMutexLocker locker(&m_mutex);
-        while (!m_pendingDownloads.value(cacheKey, true)) {
+        while (m_pendingDownloads.contains(cacheKey) && !m_pendingDownloads.value(cacheKey, true)) {
             if (!m_downloadCondition.wait(&m_mutex, 30000)) {
                 qWarning() << "FileCache: Export timeout for" << fileId;
+                error = QStringLiteral("Export timed out after 30 seconds");
+                m_downloadErrors[cacheKey] = error;
                 m_pendingDownloads.remove(cacheKey);
                 m_pendingDownloadPaths.remove(cachePath);
-                emit downloadFailed(fileId, QStringLiteral("Export timed out after 30 seconds"));
-                return QString();
+                m_activeExportKeys.remove(cacheKey);
+                m_pendingExportRequests.remove(cacheKey);
+                m_queuedExportKeys.removeAll(cacheKey);
+                nextToStart = collectQueuedExportsToStartLocked();
+                break;
             }
         }
 
         if (m_downloadErrors.contains(cacheKey)) {
-            QString error = m_downloadErrors.take(cacheKey);
-            m_pendingDownloads.remove(cacheKey);
-            m_pendingDownloadPaths.remove(cachePath);
+            error = m_downloadErrors.take(cacheKey);
             qWarning() << "FileCache: Export failed for" << fileId << ":" << error;
-            emit downloadFailed(fileId, error);
-            return QString();
         }
-
-        m_pendingDownloads.remove(cacheKey);
-        m_pendingDownloadPaths.remove(cachePath);
     }
 
-    if (!QFile::exists(cachePath)) {
-        qWarning() << "FileCache: Exported file not found at" << cachePath;
-        emit downloadFailed(fileId, QStringLiteral("Export completed but no file was written"));
+    startExportRequests(nextToStart);
+
+    if (!error.isEmpty()) {
+        if (error == QStringLiteral("Export timed out after 30 seconds")) {
+            emit downloadFailedDetailed(fileId, error, 0);
+            emit downloadFailed(fileId, error);
+        }
         return QString();
     }
-
-    QFileInfo downloadedFile(cachePath);
-
-    // Reject zero-byte exports as a defense-in-depth check.
-    if (downloadedFile.size() <= 0) {
-        qWarning() << "FileCache: Export for" << fileId << "produced a zero-byte file, discarding";
-        QFile::remove(cachePath);
-        emit downloadFailed(fileId, "Export produced an empty file");
-        return QString();
-    }
-    CacheEntry entry;
-    entry.fileId = fileId;
-    entry.cacheKey = cacheKey;
-    entry.cachePath = cachePath;
-    entry.size = downloadedFile.size();
-    entry.lastAccessed = QDateTime::currentDateTime();
-    entry.downloadCompleted = QDateTime::currentDateTime();
 
     {
         QMutexLocker locker(&m_mutex);
-        m_cacheEntries[cacheKey] = entry;
-        m_currentSize += entry.size;
+        return getReadyExportPathLocked(fileId, cacheKey, cachePath);
+    }
+}
+
+void FileCache::queueExportedPath(const QString& fileId, const QString& exportMimeType) {
+    if (exportMimeType.isEmpty() || !m_driveClient) {
+        return;
     }
 
-    if (m_database) {
-        m_database->recordFuseCacheEntry(cacheKey, cachePath, entry.size);
+    const QString cacheKey = cacheKeyFor(fileId, exportMimeType);
+    const QString cachePath = generateCachePath(fileId, exportMimeType);
+
+    QFileInfo fileInfo(cachePath);
+    QDir parentDir = fileInfo.dir();
+    if (!parentDir.exists()) {
+        parentDir.mkpath(".");
     }
 
-    emit downloadCompleted(fileId, cachePath);
-    emit cacheSizeChanged(m_currentSize);
+    QList<PendingExportRequest> toStart;
+    {
+        QMutexLocker locker(&m_mutex);
+        const QString readyPath = getReadyExportPathLocked(fileId, cacheKey, cachePath);
+        if (!readyPath.isEmpty()) {
+            return;
+        }
 
-    qInfo() << "FileCache: Exported and cached" << fileId << "(" << entry.size << "bytes)";
+        if (m_pendingExportRequests.contains(cacheKey)) {
+            return;
+        }
 
-    return cachePath;
+        PendingExportRequest request;
+        request.fileId = fileId;
+        request.exportMimeType = exportMimeType;
+        request.cacheKey = cacheKey;
+        request.cachePath = cachePath;
+
+        m_pendingDownloads[cacheKey] = false;
+        m_pendingDownloadPaths[cachePath] = cacheKey;
+        m_downloadErrors.remove(cacheKey);
+        m_pendingExportRequests[cacheKey] = request;
+
+        if (m_activeExportKeys.size() < MAX_BACKGROUND_EXPORTS) {
+            m_activeExportKeys.insert(cacheKey);
+            toStart.append(request);
+        } else {
+            m_queuedExportKeys.append(cacheKey);
+        }
+    }
+
+    startExportRequests(toStart);
 }
 
 QString FileCache::getCachePathForFile(const QString& fileId) const {
@@ -932,68 +945,151 @@ bool FileCache::hasUploadedGeneration(const QString& fileId, quint64 generation)
 // ============================================================================
 
 void FileCache::onFileDownloaded(const QString& fileId, const QString& localPath) {
-    QMutexLocker locker(&m_mutex);
+    QList<PendingExportRequest> toStart;
+    QString error;
+    QString completedPath;
+    qint64 cacheSizeAfter = 0;
+    bool emitCompleted = false;
+    bool emitCacheSize = false;
 
-    QString cacheKey = localPath.isEmpty() ? QString() : m_pendingDownloadPaths.value(localPath);
-    if (cacheKey.isEmpty() && m_pendingDownloads.contains(fileId)) {
-        cacheKey = fileId;
+    {
+        QMutexLocker locker(&m_mutex);
+
+        QString cacheKey =
+            localPath.isEmpty() ? QString() : m_pendingDownloadPaths.value(localPath);
+        if (!cacheKey.isEmpty() && m_pendingExportRequests.contains(cacheKey)) {
+            const PendingExportRequest request = m_pendingExportRequests.value(cacheKey);
+            m_activeExportKeys.remove(cacheKey);
+
+            QFileInfo exportedFile(localPath);
+            if (!exportedFile.exists()) {
+                error = QStringLiteral("Export completed but no file was written");
+            } else if (exportedFile.size() <= 0) {
+                qWarning() << "FileCache: Export for" << request.fileId
+                           << "produced a zero-byte file, discarding";
+                QFile::remove(localPath);
+                error = QStringLiteral("Export produced an empty file");
+            } else {
+                emitCacheSize =
+                    recordCacheEntryLocked(cacheKey, request.fileId, localPath, exportedFile.size(),
+                                           QDateTime::currentDateTime());
+                completedPath = localPath;
+                cacheSizeAfter = m_currentSize;
+                emitCompleted = true;
+            }
+
+            if (!error.isEmpty()) {
+                m_downloadErrors[cacheKey] = error;
+            }
+
+            m_pendingDownloads.remove(cacheKey);
+            m_pendingDownloadPaths.remove(localPath);
+            m_pendingExportRequests.remove(cacheKey);
+            toStart = collectQueuedExportsToStartLocked();
+            m_downloadCondition.wakeAll();
+        } else {
+            if (cacheKey.isEmpty() && m_pendingDownloads.contains(fileId)) {
+                cacheKey = fileId;
+            }
+
+            // Mark download as completed successfully
+            if (!cacheKey.isEmpty() && m_pendingDownloads.contains(cacheKey)) {
+                m_pendingDownloads[cacheKey] = true;  // Mark as completed
+                m_downloadCondition.wakeAll();
+            }
+            return;
+        }
     }
 
-    // Mark download as completed successfully
-    if (!cacheKey.isEmpty() && m_pendingDownloads.contains(cacheKey)) {
-        m_pendingDownloads[cacheKey] = true;  // Mark as completed
-        m_downloadCondition.wakeAll();
+    if (!error.isEmpty()) {
+        qWarning() << "FileCache: Export failed for" << fileId << ":" << error;
+        emit downloadFailedDetailed(fileId, error, 0);
+        emit downloadFailed(fileId, error);
+    } else if (emitCompleted) {
+        emit downloadCompleted(fileId, completedPath);
+        if (emitCacheSize) {
+            emit cacheSizeChanged(cacheSizeAfter);
+        }
+        qInfo() << "FileCache: Exported and cached" << fileId << "("
+                << QFileInfo(completedPath).size() << "bytes)";
     }
+
+    startExportRequests(toStart);
 }
 
 void FileCache::onDownloadError(const QString& operation, const QString& errorMsg, int httpStatus,
                                 const QString& fileId, const QString& localPath) {
-    Q_UNUSED(httpStatus)
-
     // Check if this is a download or export error
     if (!operation.startsWith("download") && !operation.startsWith("export")) {
         return;
     }
 
-    QMutexLocker locker(&m_mutex);
+    QList<PendingExportRequest> toStart;
+    bool handledExport = false;
 
-    QString cacheKey = localPath.isEmpty() ? QString() : m_pendingDownloadPaths.value(localPath);
-    if (cacheKey.isEmpty() && !fileId.isEmpty() && m_pendingDownloads.contains(fileId)) {
-        cacheKey = fileId;
-    }
+    {
+        QMutexLocker locker(&m_mutex);
 
-    // The errorDetailed signal provides fileId/localPath via tagReply(),
-    // so use the local path first to disambiguate exported representations.
-    if (!cacheKey.isEmpty() && m_pendingDownloads.contains(cacheKey)) {
-        m_downloadErrors[cacheKey] = errorMsg;
-        m_pendingDownloads[cacheKey] = true;  // Mark as completed (with error)
-    } else {
-        // Fallback: try to extract fileId from operation string
-        // (format "downloadFile:<fileId>")
-        QString parsedId;
-        if (operation.contains(':')) {
-            parsedId = operation.mid(operation.indexOf(':') + 1);
-        }
-
-        if (!parsedId.isEmpty() && m_pendingDownloads.contains(parsedId)) {
-            m_downloadErrors[parsedId] = errorMsg;
-            m_pendingDownloads[parsedId] = true;
+        QString cacheKey =
+            localPath.isEmpty() ? QString() : m_pendingDownloadPaths.value(localPath);
+        if (!cacheKey.isEmpty() && m_pendingExportRequests.contains(cacheKey)) {
+            m_downloadErrors[cacheKey] = errorMsg;
+            m_pendingDownloads.remove(cacheKey);
+            m_pendingDownloadPaths.remove(localPath);
+            m_activeExportKeys.remove(cacheKey);
+            m_pendingExportRequests.remove(cacheKey);
+            toStart = collectQueuedExportsToStartLocked();
+            m_downloadCondition.wakeAll();
+            handledExport = true;
+        } else if (operation.startsWith("export")) {
+            return;
         } else {
-            // Last resort: could not identify the failed file.
-            // Only mark downloads as failed if we truly can't match.
-            qWarning() << "FileCache: Download error without file ID association:" << operation
-                       << errorMsg;
+            if (cacheKey.isEmpty() && !fileId.isEmpty() && m_pendingDownloads.contains(fileId)) {
+                cacheKey = fileId;
+            }
 
-            for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end(); ++it) {
-                if (!it.value()) {  // Still in progress
-                    m_downloadErrors[it.key()] = errorMsg;
-                    it.value() = true;  // Mark as completed (with error)
+            // The errorDetailed signal provides fileId/localPath via tagReply(),
+            // so use the local path first to disambiguate exported representations.
+            if (!cacheKey.isEmpty() && m_pendingDownloads.contains(cacheKey)) {
+                m_downloadErrors[cacheKey] = errorMsg;
+                m_pendingDownloads[cacheKey] = true;  // Mark as completed (with error)
+            } else {
+                // Fallback: try to extract fileId from operation string
+                // (format "downloadFile:<fileId>")
+                QString parsedId;
+                if (operation.contains(':')) {
+                    parsedId = operation.mid(operation.indexOf(':') + 1);
+                }
+
+                if (!parsedId.isEmpty() && m_pendingDownloads.contains(parsedId)) {
+                    m_downloadErrors[parsedId] = errorMsg;
+                    m_pendingDownloads[parsedId] = true;
+                } else {
+                    // Last resort: could not identify the failed file.
+                    // Only mark downloads as failed if we truly can't match.
+                    qWarning() << "FileCache: Download error without file ID association:"
+                               << operation << errorMsg;
+
+                    for (auto it = m_pendingDownloads.begin(); it != m_pendingDownloads.end();
+                         ++it) {
+                        if (!it.value()) {  // Still in progress
+                            m_downloadErrors[it.key()] = errorMsg;
+                            it.value() = true;  // Mark as completed (with error)
+                        }
+                    }
                 }
             }
+
+            m_downloadCondition.wakeAll();
         }
     }
 
-    m_downloadCondition.wakeAll();
+    if (handledExport) {
+        qWarning() << "FileCache: Export failed for" << fileId << ":" << errorMsg;
+        emit downloadFailedDetailed(fileId, errorMsg, httpStatus);
+        emit downloadFailed(fileId, errorMsg);
+        startExportRequests(toStart);
+    }
 }
 
 // ============================================================================
@@ -1033,6 +1129,94 @@ QString FileCache::generateUploadSnapshotPath(const QString& fileId, quint64 gen
     QString subDir = QString::fromLatin1(hash.left(2));
     return m_dirtyDirectory + "/snapshots/" + subDir + "/" + QString::fromLatin1(hash) + "." +
            QString::number(generation);
+}
+
+QString FileCache::getReadyExportPathLocked(const QString& fileId, const QString& cacheKey,
+                                            const QString& cachePath) {
+    if (m_cacheEntries.contains(cacheKey)) {
+        const CacheEntry entry = m_cacheEntries.value(cacheKey);
+        if (hasUsableExportBytes(entry.cachePath)) {
+            m_cacheEntries[cacheKey].lastAccessed = QDateTime::currentDateTime();
+            if (m_database) {
+                m_database->updateCacheAccessTime(cacheKey);
+            }
+            return entry.cachePath;
+        }
+
+        QFile::remove(entry.cachePath);
+        m_currentSize -= entry.size;
+        m_cacheEntries.remove(cacheKey);
+        if (m_database) {
+            m_database->evictFuseCacheEntry(cacheKey);
+        }
+    }
+
+    if (!hasUsableExportBytes(cachePath)) {
+        return QString();
+    }
+
+    QFileInfo exportedFile(cachePath);
+    recordCacheEntryLocked(cacheKey, fileId, cachePath, exportedFile.size(),
+                           exportedFile.lastModified());
+    return cachePath;
+}
+
+bool FileCache::recordCacheEntryLocked(const QString& cacheKey, const QString& fileId,
+                                       const QString& cachePath, qint64 size,
+                                       const QDateTime& completedAt) {
+    const bool hadEntry = m_cacheEntries.contains(cacheKey);
+    const qint64 oldSize = hadEntry ? m_cacheEntries.value(cacheKey).size : 0;
+    if (hadEntry) {
+        m_currentSize -= oldSize;
+    }
+
+    CacheEntry entry;
+    entry.fileId = fileId;
+    entry.cacheKey = cacheKey;
+    entry.cachePath = cachePath;
+    entry.size = size;
+    entry.lastAccessed = QDateTime::currentDateTime();
+    entry.downloadCompleted = completedAt;
+
+    m_cacheEntries[cacheKey] = entry;
+    m_currentSize += size;
+    if (m_database) {
+        m_database->recordFuseCacheEntry(cacheKey, cachePath, size);
+    }
+
+    return !hadEntry || oldSize != size;
+}
+
+QList<PendingExportRequest> FileCache::collectQueuedExportsToStartLocked() {
+    QList<PendingExportRequest> requests;
+
+    while (m_activeExportKeys.size() < MAX_BACKGROUND_EXPORTS && !m_queuedExportKeys.isEmpty()) {
+        const QString cacheKey = m_queuedExportKeys.takeFirst();
+        if (!m_pendingExportRequests.contains(cacheKey)) {
+            continue;
+        }
+
+        m_activeExportKeys.insert(cacheKey);
+        requests.append(m_pendingExportRequests.value(cacheKey));
+    }
+
+    return requests;
+}
+
+void FileCache::startExportRequests(const QList<PendingExportRequest>& requests) {
+    if (requests.isEmpty() || !m_driveClient) {
+        return;
+    }
+
+    for (const PendingExportRequest& request : requests) {
+        emit downloadStarted(request.fileId);
+        QMetaObject::invokeMethod(
+            m_driveClient,
+            [driveClient = m_driveClient, request]() {
+                driveClient->exportFile(request.fileId, request.exportMimeType, request.cachePath);
+            },
+            Qt::QueuedConnection);
+    }
 }
 
 QString FileCache::getContentPath(const QString& fileId) const {

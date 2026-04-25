@@ -393,13 +393,23 @@ bool MetadataRefreshWorker::shouldProcess(const DriveFile& file) const {
     // native-doc serving mode.  In "hide" mode they are skipped entirely;
     // in other modes the policy helper decides per-type visibility.
     if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
-        QSettings settings;
-        NativeDocMode mode =
-            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
-        if (mode == NativeDocMode::Hide) {
-            return false;
+        QString nativeDocModeOverride;
+        if (m_metadataCache) {
+            const FuseFileMetadata cached = m_metadataCache->getMetadataByFileId(file.id);
+            if (cached.isValid()) {
+                nativeDocModeOverride = cached.nativeDocModeOverride;
+            }
         }
-        NativeDocRepresentation rep = nativeDocRepresentation(file.mimeType, mode);
+
+        if (nativeDocModeOverride.isEmpty() && m_database) {
+            nativeDocModeOverride = m_database->getFuseMetadata(file.id).nativeDocModeOverride;
+        }
+
+        QSettings settings;
+        const NativeDocMode globalMode =
+            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        NativeDocRepresentation rep =
+            effectiveNativeDocRepresentation(file.mimeType, nativeDocModeOverride, globalMode);
         return rep.visible;
     }
 

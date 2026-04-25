@@ -277,7 +277,8 @@ void TestSyncDatabase::testInitialize_RejectsNewerVersion() {
         setupDb.setDatabaseName(dbPath);
         QVERIFY(setupDb.open());
         QSqlQuery query(setupDb);
-        QVERIFY(query.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"));
+        QVERIFY(
+            query.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"));
         QVERIFY(query.exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', 999)"));
         setupDb.close();
     }
@@ -787,7 +788,8 @@ void TestSyncDatabase::testGetFileState_Miss_AllFieldsEmpty() {
     // CRITICAL: On miss, ALL fields must be empty/default
     QVERIFY2(result.localPath.isEmpty(), "SAFETY VIOLATION: localPath should be empty on miss");
     QVERIFY2(result.fileId.isEmpty(), "SAFETY VIOLATION: fileId should be empty on miss");
-    QVERIFY2(!result.modifiedTimeAtSync.isValid(), "SAFETY VIOLATION: modifiedTimeAtSync should be invalid on miss");
+    QVERIFY2(!result.modifiedTimeAtSync.isValid(),
+             "SAFETY VIOLATION: modifiedTimeAtSync should be invalid on miss");
 
     // CRITICAL SAFETY BUG DOCUMENTED:
     // isFolder returns uninitialized garbage on miss!
@@ -1498,7 +1500,8 @@ void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
                 } else if (i % 4 == 2) {
                     // Read by path
                     int idx = i % 10;
-                    FuseMetadata meta = m_db->getFuseMetadataByPath(QString("/fuse/file%1.txt").arg(idx));
+                    FuseMetadata meta =
+                        m_db->getFuseMetadataByPath(QString("/fuse/file%1.txt").arg(idx));
                     if (meta.fileId.isEmpty()) {
                         errors.fetchAndAddRelaxed(1);
                     }
@@ -1541,6 +1544,7 @@ void TestSyncDatabase::testFuseMetadata_NativeDocFields_SaveAndRetrieve() {
     meta.mimeType = "application/vnd.google-apps.document";
     meta.remoteMimeType = "application/vnd.google-apps.document";
     meta.webViewLink = "https://docs.google.com/document/d/abc123/edit";
+    meta.nativeDocModeOverride = "browser-shortcut";
     meta.cachedAt = QDateTime::currentDateTime();
     meta.createdTime = QDateTime::currentDateTime();
     meta.modifiedTime = QDateTime::currentDateTime();
@@ -1552,6 +1556,7 @@ void TestSyncDatabase::testFuseMetadata_NativeDocFields_SaveAndRetrieve() {
     QCOMPARE(retrieved.fileId, QString("NATIVE_DOC_ID"));
     QCOMPARE(retrieved.remoteMimeType, QString("application/vnd.google-apps.document"));
     QCOMPARE(retrieved.webViewLink, QString("https://docs.google.com/document/d/abc123/edit"));
+    QCOMPARE(retrieved.nativeDocModeOverride, QString("browser-shortcut"));
 }
 
 void TestSyncDatabase::testClearFuseRepresentationState_ClearsMetadataAndCache() {

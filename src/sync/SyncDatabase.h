@@ -65,21 +65,22 @@ struct ConflictRecord {
  * Maps to fuse_metadata table schema
  */
 struct FuseMetadata {
-    QString fileId;          ///< Google Drive file ID (primary key)
-    QString path;            ///< Logical path in FUSE filesystem
-    QString name;            ///< File/folder name
-    QString remoteName;      ///< Original Google Drive name before aliasing
-    QString parentId;        ///< Parent folder ID
-    bool isFolder;           ///< Whether this is a folder
-    qint64 size;             ///< File size in bytes
-    QString mimeType;        ///< MIME type
-    QString remoteMimeType;  ///< Original Google-native MIME type (e.g.
-                             ///< application/vnd.google-apps.document)
-    QString webViewLink;     ///< Google Drive web view URL
-    QDateTime createdTime;   ///< Creation timestamp
-    QDateTime modifiedTime;  ///< Last modification timestamp
-    QDateTime cachedAt;      ///< When metadata was cached
-    QDateTime lastAccessed;  ///< Last access time for LRU
+    QString fileId;                 ///< Google Drive file ID (primary key)
+    QString path;                   ///< Logical path in FUSE filesystem
+    QString name;                   ///< File/folder name
+    QString remoteName;             ///< Original Google Drive name before aliasing
+    QString nativeDocModeOverride;  ///< Per-file native-doc representation override
+    QString parentId;               ///< Parent folder ID
+    bool isFolder;                  ///< Whether this is a folder
+    qint64 size;                    ///< File size in bytes
+    QString mimeType;               ///< MIME type
+    QString remoteMimeType;         ///< Original Google-native MIME type (e.g.
+                                    ///< application/vnd.google-apps.document)
+    QString webViewLink;            ///< Google Drive web view URL
+    QDateTime createdTime;          ///< Creation timestamp
+    QDateTime modifiedTime;         ///< Last modification timestamp
+    QDateTime cachedAt;             ///< When metadata was cached
+    QDateTime lastAccessed;         ///< Last access time for LRU
 };
 
 /**

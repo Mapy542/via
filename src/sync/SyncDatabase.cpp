@@ -58,6 +58,11 @@ FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
         metadata.remoteName = metadata.name;
     }
 
+    const int nativeDocModeOverrideIndex = query.record().indexOf("native_doc_mode_override");
+    if (nativeDocModeOverrideIndex >= 0) {
+        metadata.nativeDocModeOverride = query.value(nativeDocModeOverrideIndex).toString();
+    }
+
     metadata.parentId = query.value("parent_id").toString();
     metadata.isFolder = query.value("is_folder").toInt() == 1;
     metadata.size = query.value("size").toLongLong();
@@ -1185,6 +1190,12 @@ bool SyncDatabase::createFuseTables() {
         return false;
     }
 
+    if (!addColumnIfMissing(m_db, "fuse_metadata", "native_doc_mode_override TEXT")) {
+        logError("createFuseTables (fuse_metadata.native_doc_mode_override)",
+                 query.lastError().text());
+        return false;
+    }
+
     // FUSE dirty files table
     QString createFuseDirtyFilesTable = R"(
         CREATE TABLE IF NOT EXISTS fuse_dirty_files (
@@ -1287,16 +1298,18 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
 
     query.prepare(R"(
         INSERT OR REPLACE INTO fuse_metadata 
-        (file_id, path, name, remote_name, parent_id, is_folder, size, mime_type,
+        (file_id, path, name, remote_name, native_doc_mode_override, parent_id,
+         is_folder, size, mime_type,
          remote_mime_type, web_view_link,
          created_time, modified_time, cached_at, last_accessed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )");
 
     query.addBindValue(metadata.fileId);
     query.addBindValue(metadata.path);
     query.addBindValue(metadata.name);
     query.addBindValue(metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName);
+    query.addBindValue(metadata.nativeDocModeOverride);
     query.addBindValue(metadata.parentId);
     query.addBindValue(metadata.isFolder ? 1 : 0);
     query.addBindValue(metadata.size);

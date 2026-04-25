@@ -36,6 +36,7 @@
 #include "NativeDocPolicy.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
+#include "utils/NativeDocShortcutHandler.h"
 
 namespace {
 
@@ -1208,11 +1209,54 @@ static bool isNativeDoc(const FuseMetadata& meta) {
            !meta.isFolder;
 }
 
+static bool isNativeDoc(const FuseFileMetadata& meta) {
+    return !meta.remoteMimeType.isEmpty() &&
+           meta.remoteMimeType.startsWith(QLatin1String("application/vnd.google-apps.")) &&
+           !meta.isFolder;
+}
+
+static enum fuse_fill_dir_flags readdirFlagsForChild(const FuseFileMetadata& child,
+                                                     NativeDocMode globalMode) {
+    if (isNativeDoc(child)) {
+        NativeDocRepresentation repr = effectiveNativeDocRepresentation(
+            child.remoteMimeType, child.nativeDocModeOverride, globalMode);
+        if (repr.visible && !repr.synthetic) {
+            return static_cast<enum fuse_fill_dir_flags>(0);
+        }
+    }
+
+    return FUSE_FILL_DIR_PLUS;
+}
+
+static void queueNativeDocPrefetch(FileCache* fileCache, const FuseFileMetadata& child,
+                                   NativeDocMode globalMode) {
+    if (!fileCache || !isNativeDoc(child)) {
+        return;
+    }
+
+    const NativeDocRepresentation repr = effectiveNativeDocRepresentation(
+        child.remoteMimeType, child.nativeDocModeOverride, globalMode);
+    if (!repr.visible || repr.synthetic || repr.outputMimeType.isEmpty()) {
+        return;
+    }
+
+    fileCache->queueExportedPath(child.fileId, repr.outputMimeType);
+}
+
 static bool isLocalNativeDocExportFailure(const QString& error) {
     return error == QStringLiteral("Export produced an empty file") ||
            error == QStringLiteral("Export timed out after 30 seconds") ||
            error == QStringLiteral("Export completed but no file was written") ||
            error == QStringLiteral("No Google Drive client available for export");
+}
+
+static NativeDocMode globalNativeDocMode() {
+    QSettings settings;
+    return nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+}
+
+static NativeDocMode effectiveNativeDocModeFor(const FuseMetadata& meta, NativeDocMode globalMode) {
+    return effectiveNativeDocMode(meta.nativeDocModeOverride, globalMode);
 }
 
 static QString nativeDocFusePath(const FuseMetadata& meta) {
@@ -1224,6 +1268,29 @@ static QString nativeDocFusePath(const FuseMetadata& meta) {
         path.prepend(QLatin1Char('/'));
     }
     return path;
+}
+
+static QString fusePathFromMetadataPath(const QString& metadataPath) {
+    QString path = metadataPath;
+    if (path.isEmpty()) {
+        return QStringLiteral("/");
+    }
+    if (!path.startsWith(QLatin1Char('/'))) {
+        path.prepend(QLatin1Char('/'));
+    }
+    return path;
+}
+
+static void invalidateFusePath(struct fuse* fuseHandle, const QString& path) {
+    if (!fuseHandle || path.isEmpty()) {
+        return;
+    }
+
+    const QByteArray encodedPath = QFile::encodeName(path);
+    const int rc = fuse_invalidate_path(fuseHandle, encodedPath.constData());
+    if (rc != 0 && rc != -ENOENT) {
+        qWarning() << "FuseDriver: Failed to invalidate FUSE path" << path << ":" << rc;
+    }
 }
 
 /**
@@ -1363,9 +1430,7 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
                 // Native docs are always read-only in FUSE
                 stbuf->st_mode = S_IFREG | 0444;
                 stbuf->st_nlink = 1;
-                QSettings settings;
-                NativeDocMode mode = nativeDocModeFromString(
-                    settings.value("advanced/nativeDocMode", "hide").toString());
+                const NativeDocMode mode = effectiveNativeDocModeFor(meta, globalNativeDocMode());
                 stbuf->st_size = drv->nativeDocReportedSize(meta, mode);
             } else {
                 stbuf->st_mode = S_IFREG | 0644;
@@ -1414,7 +1479,8 @@ qint64 FuseDriver::nativeDocReportedSize(const FuseMetadata& meta, NativeDocMode
         return nativeDocStubContent(meta).size();
     }
 
-    NativeDocRepresentation repr = nativeDocRepresentation(meta.remoteMimeType, mode);
+    NativeDocRepresentation repr =
+        effectiveNativeDocRepresentation(meta.remoteMimeType, meta.nativeDocModeOverride, mode);
     if (!m_fileCache || !repr.visible || repr.outputMimeType.isEmpty()) {
         return 0;
     }
@@ -1425,12 +1491,7 @@ qint64 FuseDriver::nativeDocReportedSize(const FuseMetadata& meta, NativeDocMode
         return cachedSize;
     }
 
-    const QString exportedPath = m_fileCache->getExportedPath(meta.fileId, repr.outputMimeType);
-    if (exportedPath.isEmpty()) {
-        return 0;
-    }
-
-    return sizeForExistingPath(exportedPath);
+    return 0;
 }
 
 int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset,
@@ -1439,6 +1500,7 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     Q_UNUSED(fi)
     Q_UNUSED(flags)
     auto* drv = self();
+    const NativeDocMode mode = globalNativeDocMode();
 
     QString qpath = normalizePath(path);
 
@@ -1466,7 +1528,9 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         qDebug() << "FuseDriver::readdir: Serving" << cached.size() << "entries from cache for"
                  << qpath;
         for (const FuseFileMetadata& child : cached) {
-            filler(buf, child.name.toUtf8().constData(), nullptr, 0, FUSE_FILL_DIR_PLUS);
+            filler(buf, child.name.toUtf8().constData(), nullptr, 0,
+                   readdirFlagsForChild(child, mode));
+            queueNativeDocPrefetch(drv->m_fileCache, child, mode);
         }
         return 0;
     }
@@ -1521,7 +1585,8 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         drv->m_metadataCache->replaceRemoteChildren(effectiveParentId, apiFiles);
 
     for (const FuseFileMetadata& child : children) {
-        filler(buf, child.name.toUtf8().constData(), nullptr, 0, FUSE_FILL_DIR_PLUS);
+        filler(buf, child.name.toUtf8().constData(), nullptr, 0, readdirFlagsForChild(child, mode));
+        queueNativeDocPrefetch(drv->m_fileCache, child, mode);
     }
 
     return 0;
@@ -1552,9 +1617,7 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
             return -EACCES;
         }
 
-        QSettings settings;
-        NativeDocMode mode =
-            nativeDocModeFromString(settings.value("advanced/nativeDocMode", "hide").toString());
+        NativeDocMode mode = effectiveNativeDocModeFor(meta, globalNativeDocMode());
 
         if (mode == NativeDocMode::BrowserShortcut) {
             // Synthetic stub — bypass FileCache entirely; content is
@@ -1576,7 +1639,8 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         }
 
         // Export modes (OpenDocument / Text) — use Drive export API
-        NativeDocRepresentation repr = nativeDocRepresentation(meta.remoteMimeType, mode);
+        NativeDocRepresentation repr =
+            effectiveNativeDocRepresentation(meta.remoteMimeType, meta.nativeDocModeOverride, mode);
         if (repr.visible && !repr.synthetic && !repr.outputMimeType.isEmpty()) {
             QString cachePath = drv->m_fileCache->getExportedPath(meta.fileId, repr.outputMimeType);
             if (cachePath.isEmpty()) {
@@ -2521,6 +2585,38 @@ void FuseDriver::startBackgroundWorkers() {
                                    << path << "after export:" << rc;
                     }
                 });
+        connect(m_fileCache, &FileCache::downloadFailedDetailed, this,
+                [this](const QString& fileId, const QString& error, int httpStatus) {
+                    if (!m_database || !m_metadataCache ||
+                        !isNativeDocExportLimitError(error, httpStatus)) {
+                        return;
+                    }
+
+                    QString oldPath;
+                    const FuseFileMetadata updated = m_metadataCache->applyNativeDocModeOverride(
+                        fileId, nativeDocModeToString(NativeDocMode::BrowserShortcut), &oldPath);
+                    if (!updated.isValid()) {
+                        return;
+                    }
+
+                    const QString oldFusePath = fusePathFromMetadataPath(oldPath);
+                    const QString newFusePath = fusePathFromMetadataPath(updated.path);
+                    const QString parentFusePath = [&]() {
+                        const QString rawParent = QFileInfo(newFusePath).path();
+                        return rawParent.isEmpty() || rawParent == QStringLiteral(".")
+                                   ? QStringLiteral("/")
+                                   : rawParent;
+                    }();
+                    const QString metadataParentPath = parentFusePath == QStringLiteral("/")
+                                                           ? QStringLiteral("/")
+                                                           : parentFusePath.mid(1);
+
+                    m_metadataCache->invalidateChildren(metadataParentPath);
+
+                    invalidateFusePath(m_fuse, oldFusePath);
+                    invalidateFusePath(m_fuse, newFusePath);
+                    invalidateFusePath(m_fuse, parentFusePath);
+                });
         connect(m_fileCache, &FileCache::downloadFailed, this,
                 [this](const QString& fileId, const QString& error) {
                     emit downloadFinished(fileId);
@@ -2531,6 +2627,11 @@ void FuseDriver::startBackgroundWorkers() {
 
                     const FuseMetadata meta = m_database->getFuseMetadata(fileId);
                     if (meta.fileId.isEmpty() || !isNativeDoc(meta)) {
+                        return;
+                    }
+
+                    if (meta.nativeDocModeOverride ==
+                        nativeDocModeToString(NativeDocMode::BrowserShortcut)) {
                         return;
                     }
 

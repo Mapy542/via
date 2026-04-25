@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -89,7 +90,8 @@ class TestFuseDriverLifecycle : public QObject {
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
     void testRegisterOpenFile_TracksWritableHandlesSeparately();
-    void testNativeDocReportedSize_MaterializesExportOnFirstStat();
+    void testNativeDocReportedSize_DoesNotMaterializeExportOnFirstStat();
+    void testNativeDocExportLimitFailure_FallsBackToBrowserShortcutOverride();
 
    private:
     void seedCachedFile(const QString& fileId, const QString& path, const QByteArray& content);
@@ -117,6 +119,9 @@ void TestFuseDriverLifecycle::init() {
 }
 
 void TestFuseDriverLifecycle::cleanup() {
+    if (m_driver) {
+        m_driver->stopBackgroundWorkers();
+    }
     delete m_driver;
     m_driver = nullptr;
     delete m_driveClient;
@@ -268,7 +273,7 @@ void TestFuseDriverLifecycle::testRegisterOpenFile_TracksWritableHandlesSeparate
     QVERIFY(!m_driver->fileCache()->hasOpenWritableHandles(fileId));
 }
 
-void TestFuseDriverLifecycle::testNativeDocReportedSize_MaterializesExportOnFirstStat() {
+void TestFuseDriverLifecycle::testNativeDocReportedSize_DoesNotMaterializeExportOnFirstStat() {
     const QString fileId = QStringLiteral("native-doc-first-stat");
     const QByteArray payload =
         QByteArray("PK") + QByteArray::fromHex("0304") + QByteArray("fake-ods-payload");
@@ -294,15 +299,21 @@ void TestFuseDriverLifecycle::testNativeDocReportedSize_MaterializesExportOnFirs
     QSignalSpy completedSpy(m_driver->fileCache(), &FileCache::downloadCompleted);
     QVERIFY(completedSpy.isValid());
 
-    qint64 reportedSize = 0;
-    JoiningThread worker([&]() {
-        reportedSize = m_driver->nativeDocReportedSize(meta, NativeDocMode::OpenDocument);
-    });
+    const qint64 reportedSize = m_driver->nativeDocReportedSize(meta, NativeDocMode::OpenDocument);
+
+    QCOMPARE(reportedSize, qint64(0));
+    QCOMPARE(completedSpy.count(), 0);
+    QCOMPARE(m_driveClient->exportCallCount, 0);
+    QVERIFY(!m_driver->fileCache()->isCached(fileId, exportMimeType));
+
+    QString exportedPath;
+    JoiningThread worker(
+        [&]() { exportedPath = m_driver->fileCache()->getExportedPath(fileId, exportMimeType); });
 
     QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 2000);
     worker.join();
 
-    QCOMPARE(reportedSize, qint64(payload.size()));
+    QVERIFY(!exportedPath.isEmpty());
     QCOMPARE(m_driveClient->exportCallCount, 1);
     QCOMPARE(m_driveClient->lastExportFileId, fileId);
     QCOMPARE(m_driveClient->lastExportMimeType, exportMimeType);
@@ -311,6 +322,46 @@ void TestFuseDriverLifecycle::testNativeDocReportedSize_MaterializesExportOnFirs
     const qint64 cachedSize = m_driver->nativeDocReportedSize(meta, NativeDocMode::OpenDocument);
     QCOMPARE(cachedSize, qint64(payload.size()));
     QCOMPARE(m_driveClient->exportCallCount, 1);
+}
+
+void TestFuseDriverLifecycle::testNativeDocExportLimitFailure_FallsBackToBrowserShortcutOverride() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "open-document");
+
+    QVERIFY(m_driver->initializeMetadataCache());
+    m_driver->startBackgroundWorkers();
+
+    const QString fileId = QStringLiteral("native-doc-export-limit");
+
+    FuseMetadata meta;
+    meta.fileId = fileId;
+    meta.path = QStringLiteral("report.odt");
+    meta.name = QStringLiteral("report.odt");
+    meta.remoteName = QStringLiteral("report");
+    meta.parentId = QStringLiteral("root");
+    meta.isFolder = false;
+    meta.size = 0;
+    meta.mimeType = QStringLiteral("application/vnd.google-apps.document");
+    meta.remoteMimeType = QStringLiteral("application/vnd.google-apps.document");
+    meta.webViewLink = QStringLiteral("https://docs.google.com/document/d/report/edit");
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = QDateTime::currentDateTimeUtc();
+    meta.cachedAt = QDateTime::currentDateTimeUtc();
+    meta.lastAccessed = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    m_driver->fileCache()->downloadFailedDetailed(
+        fileId, QStringLiteral("This file is too large to be exported."), 403);
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_db->getFuseMetadata(fileId).nativeDocModeOverride,
+                              QString("browser-shortcut"), 2000);
+
+    const FuseMetadata updated = m_db->getFuseMetadata(fileId);
+    QCOMPARE(updated.path, QString("report.gdoc"));
+    QCOMPARE(updated.name, QString("report.gdoc"));
+
+    QVERIFY(m_db->getFuseMetadataByPath(QStringLiteral("report.odt")).fileId.isEmpty());
+    QCOMPARE(m_db->getFuseMetadataByPath(QStringLiteral("report.gdoc")).fileId, fileId);
 }
 
 QTEST_MAIN(TestFuseDriverLifecycle)

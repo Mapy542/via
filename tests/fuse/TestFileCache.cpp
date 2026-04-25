@@ -45,15 +45,27 @@ class FakeDriveClientFC : public GoogleDriveClient {
    public:
     explicit FakeDriveClientFC(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
+    struct HeldExport {
+        QString fileId;
+        QString exportMimeType;
+        QString localPath;
+        QByteArray payload;
+        bool shouldFail = false;
+        QString errorMessage;
+        int errorStatus = 0;
+    };
+
     QByteArray exportPayload = QByteArray("exported native doc");
     QString exportErrorMessage;
     int exportErrorStatus = 0;
     bool exportShouldFail = false;
+    bool holdExports = false;
     int exportCallCount = 0;
     int exportWriteCount = 0;
     QString lastExportFileId;
     QString lastExportMimeType;
     QString lastExportPath;
+    QList<HeldExport> heldExports;
 
     void downloadFile(const QString& /*fileId*/, const QString& /*localPath*/) override {}
     void exportFile(const QString& fileId, const QString& exportMimeType,
@@ -63,9 +75,41 @@ class FakeDriveClientFC : public GoogleDriveClient {
         lastExportMimeType = exportMimeType;
         lastExportPath = localPath;
 
-        if (exportShouldFail) {
-            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), exportErrorMessage,
-                               exportErrorStatus, fileId, localPath);
+        if (holdExports) {
+            HeldExport held;
+            held.fileId = fileId;
+            held.exportMimeType = exportMimeType;
+            held.localPath = localPath;
+            held.payload = exportPayload;
+            held.shouldFail = exportShouldFail;
+            held.errorMessage = exportErrorMessage;
+            held.errorStatus = exportErrorStatus;
+            heldExports.append(held);
+            return;
+        }
+
+        finishExport(fileId, localPath, exportPayload, exportShouldFail, exportErrorMessage,
+                     exportErrorStatus);
+    }
+
+    void completeNextHeldExport() {
+        if (heldExports.isEmpty()) {
+            return;
+        }
+
+        const HeldExport held = heldExports.takeFirst();
+        finishExport(held.fileId, held.localPath, held.payload, held.shouldFail, held.errorMessage,
+                     held.errorStatus);
+    }
+
+    int heldExportCount() const { return heldExports.size(); }
+
+   private:
+    void finishExport(const QString& fileId, const QString& localPath, const QByteArray& payload,
+                      bool shouldFail, const QString& errorMessage, int errorStatus) {
+        if (shouldFail) {
+            emit errorDetailed(QStringLiteral("exportFile:%1").arg(fileId), errorMessage,
+                               errorStatus, fileId, localPath);
             return;
         }
 
@@ -82,7 +126,7 @@ class FakeDriveClientFC : public GoogleDriveClient {
             return;
         }
 
-        if (file.write(exportPayload) != exportPayload.size()) {
+        if (file.write(payload) != payload.size()) {
             const QString message =
                 QStringLiteral("Failed to write exported file: %1").arg(localPath);
             file.close();
@@ -156,6 +200,9 @@ class TestFileCache : public QObject {
     void testGetExportedPath_DifferentMimeTypesStayDistinct();
     void testGetExportedPath_ZeroBytePayloadFails();
     void testGetExportedPath_ZeroByteRemnantReexports();
+    void testQueueExportedPath_BoundedConcurrency();
+    void testQueueExportedPath_DeduplicatesRepeatedRequests();
+    void testGetExportedPath_JoinsBackgroundExport();
 
    private:
     void createTestDatabase();
@@ -697,11 +744,14 @@ void TestFileCache::testGetExportedPath_FailurePreservesDetailedMessage() {
 
     QSignalSpy failedSpy(m_cache, &FileCache::downloadFailed);
     QVERIFY(failedSpy.isValid());
+    QSignalSpy failedDetailedSpy(m_cache, &FileCache::downloadFailedDetailed);
+    QVERIFY(failedDetailedSpy.isValid());
 
     QString result;
     JoiningThread worker([&]() { result = m_cache->getExportedPath(fileId, exportMimeType); });
 
     QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(failedDetailedSpy.count(), 1, 2000);
     worker.join();
 
     QVERIFY(result.isEmpty());
@@ -712,6 +762,10 @@ void TestFileCache::testGetExportedPath_FailurePreservesDetailedMessage() {
     const QList<QVariant> args = failedSpy.takeFirst();
     QCOMPARE(args.at(0).toString(), fileId);
     QVERIFY(args.at(1).toString().contains(QStringLiteral("too large to be exported")));
+
+    const QList<QVariant> detailedArgs = failedDetailedSpy.takeFirst();
+    QCOMPARE(detailedArgs.at(0).toString(), fileId);
+    QCOMPARE(detailedArgs.at(2).toInt(), 403);
 }
 
 void TestFileCache::testGetExportedPath_SuccessCachesBufferedExport() {
@@ -861,6 +915,76 @@ void TestFileCache::testGetExportedPath_ZeroByteRemnantReexports() {
 
     QVERIFY(!result.isEmpty());
     QCOMPARE(result, remnantPath);
+    QCOMPARE(m_driveClient->exportCallCount, 1);
+
+    QFile exportedFile(result);
+    QVERIFY(exportedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(exportedFile.readAll(), payload);
+    exportedFile.close();
+}
+
+void TestFileCache::testQueueExportedPath_BoundedConcurrency() {
+    const QString exportMimeType = QStringLiteral("text/markdown");
+
+    m_driveClient->holdExports = true;
+
+    m_cache->queueExportedPath(QStringLiteral("native-doc-queue-a"), exportMimeType);
+    m_cache->queueExportedPath(QStringLiteral("native-doc-queue-b"), exportMimeType);
+    m_cache->queueExportedPath(QStringLiteral("native-doc-queue-c"), exportMimeType);
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->exportCallCount, 2, 2000);
+    QCOMPARE(m_driveClient->heldExportCount(), 2);
+
+    m_driveClient->completeNextHeldExport();
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->exportCallCount, 3, 2000);
+    QCOMPARE(m_driveClient->heldExportCount(), 2);
+
+    m_driveClient->completeNextHeldExport();
+    m_driveClient->completeNextHeldExport();
+}
+
+void TestFileCache::testQueueExportedPath_DeduplicatesRepeatedRequests() {
+    const QString fileId = QStringLiteral("native-doc-deduped");
+    const QString exportMimeType = QStringLiteral("text/markdown");
+
+    m_driveClient->holdExports = true;
+
+    m_cache->queueExportedPath(fileId, exportMimeType);
+    m_cache->queueExportedPath(fileId, exportMimeType);
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->exportCallCount, 1, 2000);
+    QCOMPARE(m_driveClient->heldExportCount(), 1);
+
+    m_driveClient->completeNextHeldExport();
+    QTRY_VERIFY_WITH_TIMEOUT(m_cache->isCached(fileId, exportMimeType), 2000);
+    QCOMPARE(m_driveClient->exportCallCount, 1);
+}
+
+void TestFileCache::testGetExportedPath_JoinsBackgroundExport() {
+    const QString fileId = QStringLiteral("native-doc-background-join");
+    const QString exportMimeType = QStringLiteral("text/markdown");
+    const QByteArray payload("joined export payload");
+
+    m_driveClient->holdExports = true;
+    m_driveClient->exportPayload = payload;
+
+    QSignalSpy completedSpy(m_cache, &FileCache::downloadCompleted);
+    QVERIFY(completedSpy.isValid());
+
+    m_cache->queueExportedPath(fileId, exportMimeType);
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->exportCallCount, 1, 2000);
+    QCOMPARE(m_driveClient->heldExportCount(), 1);
+
+    QString result;
+    JoiningThread worker([&]() { result = m_cache->getExportedPath(fileId, exportMimeType); });
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->exportCallCount, 1, 200);
+
+    m_driveClient->completeNextHeldExport();
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 2000);
+    worker.join();
+
+    QVERIFY(!result.isEmpty());
     QCOMPARE(m_driveClient->exportCallCount, 1);
 
     QFile exportedFile(result);

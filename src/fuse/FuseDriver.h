@@ -715,9 +715,9 @@ class FuseDriver : public QObject {
     /**
      * @brief Resolve the size that FUSE should report for a native doc
      *
-     * For export-backed modes, this may synchronously materialize the exported
-     * representation on first stat so file managers do not cache a stale 0-byte
-     * size before the first open.
+     * For export-backed modes, this reports the cached export size when one is
+     * already available and otherwise returns 0 without materializing a new
+     * export from the getattr path.
      *
      * @param meta Native-doc metadata entry
      * @param mode Current native-doc serving mode

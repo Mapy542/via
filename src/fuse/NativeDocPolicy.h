@@ -63,6 +63,10 @@ inline QString nativeDocModeToString(NativeDocMode m) {
     }
 }
 
+inline NativeDocMode effectiveNativeDocMode(const QString& overrideMode, NativeDocMode globalMode) {
+    return overrideMode.isEmpty() ? globalMode : nativeDocModeFromString(overrideMode);
+}
+
 /**
  * @brief Determine how a native doc should be represented in FUSE
  * @param remoteMimeType The Google-native MIME type (e.g. "application/vnd.google-apps.document")
@@ -172,6 +176,13 @@ inline NativeDocRepresentation nativeDocRepresentation(const QString& remoteMime
     }
 
     return r;
+}
+
+inline NativeDocRepresentation effectiveNativeDocRepresentation(const QString& remoteMimeType,
+                                                                const QString& overrideMode,
+                                                                NativeDocMode globalMode) {
+    return nativeDocRepresentation(remoteMimeType,
+                                   effectiveNativeDocMode(overrideMode, globalMode));
 }
 
 #endif  // NATIVEDOCPOLICY_H
