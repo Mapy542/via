@@ -105,6 +105,14 @@ class MainWindow : public QMainWindow {
     void logoutRequested();
 
     /**
+     * @brief Emitted when the user requests a restart-gated cache purge
+     *
+     * Connected in main.cpp so the app can queue the purge, unmount FUSE,
+     * relaunch, and quit.
+     */
+    void clearCacheRequested();
+
+    /**
      * @brief Emitted when the user accepts a settings-driven restart
      *
      * Connected in main.cpp to orchestrate safe FUSE unmount,

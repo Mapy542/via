@@ -68,6 +68,7 @@ set(SOURCES
     src/fuse/MetadataRefreshWorker.cpp
     src/utils/NotificationManager.cpp
     src/utils/LogManager.cpp
+    src/utils/CacheMaintenance.cpp
     src/utils/FileInUseChecker.cpp
     src/utils/SuspendMonitor.cpp
 )
@@ -103,6 +104,7 @@ set(HEADERS
     src/fuse/MetadataRefreshWorker.h
     src/utils/NotificationManager.h
     src/utils/LogManager.h
+    src/utils/CacheMaintenance.h
     src/utils/FileInUseChecker.h
     src/utils/AutostartManager.h
     src/utils/NativeDocShortcutHandler.h
@@ -225,6 +227,7 @@ if(BUILD_TESTS)
 
     # FUSE subsystem tests
     add_qt_test(test_FileCache tests/fuse/TestFileCache.cpp)
+    add_qt_test(test_CacheMaintenance tests/fuse/TestCacheMaintenance.cpp)
     add_qt_test(test_DirtySyncWorker tests/fuse/TestDirtySyncWorker.cpp)
     add_qt_test(test_FuseDriverLifecycle tests/fuse/TestFuseDriverLifecycle.cpp)
     add_qt_test(test_MetadataCache tests/fuse/TestMetadataCache.cpp)

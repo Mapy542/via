@@ -178,6 +178,12 @@ class TestFileCache : public QObject {
     // markUploadFailed
     void testMarkUploadFailed_SetsFlag();
 
+    // Cache limit behavior
+    void testCacheLimit_SizeAccountingTracksEntries();
+    void testCacheLimit_EvictsLeastRecentlyUsedEntry();
+    void testCacheLimit_ProtectedEntriesSurviveEvictionPressure();
+    void testCacheLimit_OversizeFileReentersPressureAfterRelease();
+
     // Dirty guard in getCachedPath
     void testGetCachedPath_DirtyFileSkipsDownload();
 
@@ -383,6 +389,81 @@ void TestFileCache::testMarkUploadFailed_SetsFlag() {
     QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
     QCOMPARE(dirty.size(), 1);
     QVERIFY(dirty.first().uploadFailed);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — cache limit behavior
+// ---------------------------------------------------------------------------
+void TestFileCache::testCacheLimit_SizeAccountingTracksEntries() {
+    QString cacheDir = m_cache->cacheDirectory();
+
+    m_cache->setMaxCacheSize(1024);
+    seedCacheFile(m_cache, cacheDir, "size_a", 100);
+    seedCacheFile(m_cache, cacheDir, "size_b", 75);
+
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(175));
+
+    m_cache->removeFromCache("size_a");
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(75));
+
+    m_cache->removeFromCache("size_b");
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(0));
+}
+
+void TestFileCache::testCacheLimit_EvictsLeastRecentlyUsedEntry() {
+    QString cacheDir = m_cache->cacheDirectory();
+
+    m_cache->setMaxCacheSize(250);
+    seedCacheFile(m_cache, cacheDir, "lru_first", 100);
+    QTest::qWait(10);
+    seedCacheFile(m_cache, cacheDir, "lru_second", 100);
+    QTest::qWait(10);
+    seedCacheFile(m_cache, cacheDir, "lru_third", 100);
+
+    QVERIFY(!m_cache->isCached("lru_first"));
+    QVERIFY(m_cache->isCached("lru_second"));
+    QVERIFY(m_cache->isCached("lru_third"));
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(200));
+}
+
+void TestFileCache::testCacheLimit_ProtectedEntriesSurviveEvictionPressure() {
+    QString cacheDir = m_cache->cacheDirectory();
+
+    m_cache->setMaxCacheSize(180);
+    seedCacheFile(m_cache, cacheDir, "protected_entry", 100);
+    m_cache->markDirty("protected_entry", "/protected_entry.txt");
+    QTest::qWait(10);
+    seedCacheFile(m_cache, cacheDir, "eviction_victim", 70);
+    QTest::qWait(10);
+    seedCacheFile(m_cache, cacheDir, "new_entry", 80);
+
+    QVERIFY(m_cache->isCached("protected_entry"));
+    QVERIFY(m_cache->isDirty("protected_entry"));
+    QVERIFY(!m_cache->isCached("eviction_victim"));
+    QVERIFY(m_cache->isCached("new_entry"));
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(180));
+}
+
+void TestFileCache::testCacheLimit_OversizeFileReentersPressureAfterRelease() {
+    QString cacheDir = m_cache->cacheDirectory();
+
+    m_cache->setMaxCacheSize(100);
+    seedCacheFile(m_cache, cacheDir, "oversize_open", 180);
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(180));
+
+    m_cache->addOpenHandle("oversize_open");
+    QTest::qWait(10);
+    seedCacheFile(m_cache, cacheDir, "small_after_oversize", 20);
+
+    QVERIFY(m_cache->isCached("oversize_open"));
+    QVERIFY(m_cache->isCached("small_after_oversize"));
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(200));
+
+    m_cache->removeOpenHandle("oversize_open");
+
+    QVERIFY(!m_cache->isCached("oversize_open"));
+    QVERIFY(m_cache->isCached("small_after_oversize"));
+    QCOMPARE(m_cache->currentCacheSize(), static_cast<qint64>(20));
 }
 
 // ---------------------------------------------------------------------------

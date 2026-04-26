@@ -47,6 +47,7 @@
 #include "ui/SystemTrayManager.h"
 #include "ui/UiStatusCoordinator.h"
 #include "utils/AutostartManager.h"
+#include "utils/CacheMaintenance.h"
 #include "utils/LogManager.h"
 #include "utils/NativeDocShortcutHandler.h"
 #include "utils/NotificationManager.h"
@@ -327,57 +328,45 @@ int main(int argc, char* argv[]) {
     }
     fuseDriver.setMaxCacheSizeBytes(cacheSizeMb * 1024LL * 1024LL);
 
-    // ── Startup-authoritative native-doc representation reset ────────
-    // Detect mode changes regardless of how the app was restarted (in-app
-    // Restart Now, manual quit/relaunch, crash, etc.).  The in-app
-    // restartRequested handler may also set pendingFuseRepresentationReset
-    // as a convenience hint, but this startup comparison is the primary
-    // trigger.
-    if (fuseEnabled) {
+    // ── Startup-authoritative FUSE cache maintenance ────────────────
+    // Detect mode changes regardless of how the app was restarted
+    // (in-app Restart Now, manual quit/relaunch, crash, etc.). Settings-
+    // initiated requests may also set pending flags, but startup remains
+    // authoritative and retries until a purge succeeds.
+    {
         const QString currentMode = settings.value("advanced/nativeDocMode", "hide").toString();
         const QString previousMode =
             settings.value("advanced/previousNativeDocMode", "hide").toString();
-        const bool pendingFlag =
+        const bool pendingRepresentationReset =
             settings.value("advanced/pendingFuseRepresentationReset", false).toBool();
+        const bool pendingCachePurge = settings.value("advanced/pendingCachePurge", false).toBool();
         const bool modeChanged = (currentMode != previousMode);
 
-        if (modeChanged || pendingFlag) {
+        if (modeChanged || pendingRepresentationReset || pendingCachePurge) {
             if (modeChanged) {
                 qInfo() << "Native-doc mode changed from" << previousMode << "to" << currentMode
-                        << "— purging FUSE representation caches";
+                        << "- purging FUSE representation caches";
+            } else if (pendingCachePurge) {
+                qInfo() << "Pending cache purge flag detected - purging FUSE caches";
             } else {
-                qInfo() << "Pending FUSE representation reset flag detected — purging caches";
+                qInfo() << "Pending FUSE representation reset flag detected - purging caches";
             }
 
-            const bool purgeOk = syncDatabase.clearFuseRepresentationState();
+            const QString cachePath =
+                QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            const bool purgeOk =
+                CacheMaintenance::purgeFuseRepresentationCache(cachePath, syncDatabase);
 
-            // Purge on-disk FUSE cache directory
-            QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-            QDir cacheDir(cachePath);
-            if (cacheDir.exists()) {
-                for (const QString& entry :
-                     cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
-                    QString fullPath = cacheDir.filePath(entry);
-                    QFileInfo fi(fullPath);
-                    if (fi.isDir()) {
-                        QDir(fullPath).removeRecursively();
-                    } else {
-                        QFile::remove(fullPath);
-                    }
-                }
-                qInfo() << "On-disk FUSE cache purged:" << cachePath;
-            }
-
-            // Only advance the previous-mode marker and clear the pending
-            // flag when the database purge succeeded.  If it failed, the
-            // mismatch (or pending flag) will persist and trigger a retry
-            // on the next launch.
+            // Only advance the previous-mode marker and clear pending flags
+            // when the full purge succeeded. If it failed, the mismatch or
+            // pending flag will trigger a retry on the next launch.
             if (purgeOk) {
                 settings.setValue("advanced/previousNativeDocMode", currentMode);
                 settings.remove("advanced/pendingFuseRepresentationReset");
+                settings.remove("advanced/pendingCachePurge");
                 settings.sync();
             } else {
-                qWarning() << "FUSE representation purge failed — will retry on next launch";
+                qWarning() << "FUSE cache purge failed - will retry on next launch";
             }
         }
     }
@@ -704,6 +693,20 @@ int main(int argc, char* argv[]) {
                 authManager.logout();
             }
         });
+
+    QObject::connect(&mainWindow, &MainWindow::clearCacheRequested, &app,
+                     [&fuseDriver, fuseEnabled, &settings]() {
+                         settings.setValue("advanced/pendingCachePurge", true);
+                         settings.sync();
+
+                         if (fuseEnabled && fuseDriver.isMounted()) {
+                             fuseDriver.unmount();
+                         }
+
+                         QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                                 QCoreApplication::arguments());
+                         QCoreApplication::quit();
+                     });
 
     // Handle restart requests from the settings dialog.  Set a pending
     // flag as a convenience hint so the next startup can fast-path the

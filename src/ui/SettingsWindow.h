@@ -3,7 +3,7 @@
  * @brief Settings/Preferences window
  *
  * Allows users to configure the application settings including
- * account management, bandwidth limits, sync options, and startup behavior.
+ * login, mirror sync, FUSE, and miscellaneous behavior.
  */
 
 #ifndef SETTINGSWINDOW_H
@@ -33,10 +33,8 @@ class ChangeProcessor;
  * @class SettingsWindow
  * @brief Settings and preferences dialog
  *
- * Provides UI for configuring:
- * - Account settings (login/logout)
- * - Bandwidth limits for uploads/downloads
- * - Startup behavior
+ * Provides UI for configuring login, mirror sync, FUSE, and
+ * miscellaneous application behavior.
  */
 class SettingsWindow : public QDialog {
     Q_OBJECT
@@ -68,8 +66,8 @@ class SettingsWindow : public QDialog {
     /**
      * @brief Emitted when the user clicks "Clear Cache"
      *
-     * Owner should disconnect/stop FileCache before this signal fires
-     * and reinitialise afterwards.
+     * The owner should queue a restart-gated purge so the next launch can
+     * safely clear evictable cache files and representation metadata.
      */
     void clearCacheRequested();
 
@@ -103,10 +101,13 @@ class SettingsWindow : public QDialog {
 
    private:
     void setupUi();
-    void setupAccountTab();
-    void setupSyncTab();
-    void setupAdvancedTab();
+    void setupLoginTab();
+    void setupMirrorTab();
+    void setupFuseTab();
+    void setupMiscTab();
     void updateStorageInfo();
+    void refreshCacheUsageTracker();
+    qint64 scanFuseCacheUsageBytes() const;
 
     GoogleAuthManager* m_authManager;
     SyncActionQueue* m_syncActionQueue;
@@ -117,8 +118,8 @@ class SettingsWindow : public QDialog {
     // Tab widget
     QTabWidget* m_tabWidget;
 
-    // Account tab widgets
-    QWidget* m_accountTab;
+    // Login tab widgets
+    QWidget* m_loginTab;
     QLabel* m_accountStatus;
     QPushButton* m_loginButton;
     QPushButton* m_logoutButton;
@@ -127,23 +128,28 @@ class SettingsWindow : public QDialog {
     QPushButton* m_saveCredentialsButton;
     QLabel* m_storageLabel;
 
-    // Sync tab widgets
-    QWidget* m_syncTab;
+    // Mirror tab widgets
+    QWidget* m_mirrorTab;
     QLineEdit* m_syncFolderEdit;
     QPushButton* m_browseFolderButton;
     QComboBox* m_syncModeCombo;
     QComboBox* m_duplicateNameCombo;
     QComboBox* m_conflictResolutionCombo;
 
-    // Advanced tab widgets
-    QWidget* m_advancedTab;
-    QCheckBox* m_startOnLoginCheck;
-    QCheckBox* m_showNotificationsCheck;
-    QComboBox* m_themeOverrideCombo;
+    // Fuse tab widgets
+    QWidget* m_fuseTab;
     QComboBox* m_syncSystemCombo;
     QLineEdit* m_fuseMountPointEdit;
     QSpinBox* m_cacheSize;
+    QLabel* m_cacheUsageLabel;
     QComboBox* m_nativeDocModeCombo;
+    QPushButton* m_clearCacheButton;
+
+    // Misc tab widgets
+    QWidget* m_miscTab;
+    QCheckBox* m_startOnLoginCheck;
+    QCheckBox* m_showNotificationsCheck;
+    QComboBox* m_themeOverrideCombo;
     QCheckBox* m_debugModeCheck;
 
     // Dialog buttons

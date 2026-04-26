@@ -136,16 +136,20 @@ qint64 FileCache::maxCacheSize() const {
 }
 
 void FileCache::setMaxCacheSize(qint64 bytes) {
-    QMutexLocker locker(&m_mutex);
-    m_maxCacheSize = bytes;
+    qint64 cacheSizeAfter = 0;
+    bool emitCacheSize = false;
 
-    // Trigger eviction if current size exceeds new max
-    while (m_currentSize > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
-        qint64 sizeBefore = m_currentSize;
-        evictLRU();
-        if (m_currentSize == sizeBefore) {
-            break;
-        }
+    {
+        QMutexLocker locker(&m_mutex);
+        const qint64 sizeBefore = m_currentSize;
+        m_maxCacheSize = bytes;
+        enforceSoftCacheLimitLocked();
+        cacheSizeAfter = m_currentSize;
+        emitCacheSize = cacheSizeAfter != sizeBefore;
+    }
+
+    if (emitCacheSize) {
+        emit cacheSizeChanged(cacheSizeAfter);
     }
 }
 
@@ -242,18 +246,12 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
     // Not cached - need to download
     qDebug() << "FileCache: Cache miss for" << fileId << ", downloading...";
 
-    // Ensure we have space for the file
+    // Best-effort pre-eviction before downloading. A later pass keeps the
+    // requested file and evicts everything else that is safe.
     if (expectedSize > 0) {
         QMutexLocker locker(&m_mutex);
         if (m_currentSize + expectedSize > m_maxCacheSize) {
-            // Need to evict to make space
-            while (m_currentSize + expectedSize > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
-                qint64 sizeBefore = m_currentSize;
-                evictLRU();
-                if (m_currentSize == sizeBefore) {
-                    break;
-                }
-            }
+            evictToFreeSpaceLocked(expectedSize);
         }
     }
 
@@ -330,29 +328,25 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
 
     // Record cache entry
     QFileInfo downloadedFile(cachePath);
-    CacheEntry entry;
-    entry.fileId = fileId;
-    entry.cacheKey = cacheKey;
-    entry.cachePath = cachePath;
-    entry.size = downloadedFile.size();
-    entry.lastAccessed = QDateTime::currentDateTime();
-    entry.downloadCompleted = QDateTime::currentDateTime();
-
+    qint64 cacheSizeAfter = 0;
+    bool emitCacheSize = false;
     {
         QMutexLocker locker(&m_mutex);
-        m_cacheEntries[cacheKey] = entry;
-        m_currentSize += entry.size;
-    }
-
-    // Save to database
-    if (m_database) {
-        m_database->recordFuseCacheEntry(cacheKey, cachePath, entry.size);
+        const qint64 sizeBefore = m_currentSize;
+        recordCacheEntryLocked(cacheKey, fileId, cachePath, downloadedFile.size(),
+                               QDateTime::currentDateTime());
+        enforceSoftCacheLimitLocked(cacheKey);
+        cacheSizeAfter = m_currentSize;
+        emitCacheSize = cacheSizeAfter != sizeBefore;
     }
 
     emit downloadCompleted(fileId, cachePath);
-    emit cacheSizeChanged(m_currentSize);
+    if (emitCacheSize) {
+        emit cacheSizeChanged(cacheSizeAfter);
+    }
 
-    qInfo() << "FileCache: Downloaded and cached" << fileId << "(" << entry.size << "bytes)";
+    qInfo() << "FileCache: Downloaded and cached" << fileId << "(" << downloadedFile.size()
+            << "bytes)";
 
     return cachePath;
 }
@@ -378,7 +372,7 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
     QList<PendingExportRequest> toStart;
     {
         QMutexLocker locker(&m_mutex);
-        const QString readyPath = getReadyExportPathLocked(fileId, cacheKey, cachePath);
+        const QString readyPath = getReadyExportPathLocked(fileId, cacheKey, cachePath, true);
         if (!readyPath.isEmpty()) {
             qDebug() << "FileCache: Cache hit (export) for" << fileId;
             return readyPath;
@@ -397,6 +391,7 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
             request.exportMimeType = exportMimeType;
             request.cacheKey = cacheKey;
             request.cachePath = cachePath;
+            request.retainOnCompletion = true;
 
             qDebug() << "FileCache: Cache miss (export) for" << fileId << ", exporting as"
                      << exportMimeType;
@@ -450,7 +445,7 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
 
     {
         QMutexLocker locker(&m_mutex);
-        return getReadyExportPathLocked(fileId, cacheKey, cachePath);
+        return getReadyExportPathLocked(fileId, cacheKey, cachePath, true);
     }
 }
 
@@ -682,9 +677,23 @@ void FileCache::markDirty(const QString& fileId, const QString& path) {
 }
 
 bool FileCache::clearDirty(const QString& fileId, quint64 expectedGeneration) {
-    QMutexLocker locker(&m_mutex);
+    qint64 cacheSizeAfter = 0;
+    bool emitCacheSize = false;
+    bool cleared = false;
 
-    return clearDirtyLocked(fileId, expectedGeneration);
+    {
+        QMutexLocker locker(&m_mutex);
+        const qint64 sizeBefore = m_currentSize;
+        cleared = clearDirtyLocked(fileId, expectedGeneration);
+        cacheSizeAfter = m_currentSize;
+        emitCacheSize = cacheSizeAfter != sizeBefore;
+    }
+
+    if (emitCacheSize) {
+        emit cacheSizeChanged(cacheSizeAfter);
+    }
+
+    return cleared;
 }
 
 UploadSnapshotResult FileCache::createUploadSnapshot(const QString& fileId,
@@ -807,55 +816,55 @@ QList<DirtyFileEntry> FileCache::getDirtyFiles() const {
 }
 
 bool FileCache::evictToFreeSpace(qint64 bytesNeeded) {
-    QMutexLocker locker(&m_mutex);
+    qint64 cacheSizeAfter = 0;
+    bool emitCacheSize = false;
+    bool enoughSpace = false;
 
-    qint64 available = m_maxCacheSize - m_currentSize;
-
-    while (available < bytesNeeded && !m_cacheEntries.isEmpty()) {
-        qint64 sizeBefore = m_currentSize;
-        evictLRU();
-        // If evictLRU could not evict anything (all remaining entries are
-        // dirty or have open handles), break to avoid an infinite loop.
-        if (m_currentSize == sizeBefore) {
-            break;
-        }
-        available = m_maxCacheSize - m_currentSize;
+    {
+        QMutexLocker locker(&m_mutex);
+        const qint64 sizeBefore = m_currentSize;
+        enoughSpace = evictToFreeSpaceLocked(bytesNeeded);
+        cacheSizeAfter = m_currentSize;
+        emitCacheSize = cacheSizeAfter != sizeBefore;
     }
 
-    return available >= bytesNeeded;
+    if (emitCacheSize) {
+        emit cacheSizeChanged(cacheSizeAfter);
+    }
+
+    return enoughSpace;
 }
 
 bool FileCache::recordCacheEntry(const QString& fileId, const QString& localPath, qint64 size) {
-    QMutexLocker locker(&m_mutex);
+    qint64 cacheSizeAfter = 0;
 
-    // Check if we need to evict first
-    if (m_currentSize + size > m_maxCacheSize) {
-        while (m_currentSize + size > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
-            qint64 sizeBefore = m_currentSize;
-            evictLRU();
-            if (m_currentSize == sizeBefore) {
-                break;
-            }
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_currentSize + size > m_maxCacheSize) {
+            evictToFreeSpaceLocked(size);
         }
+
+        CacheEntry entry;
+        entry.fileId = fileId;
+        entry.cacheKey = fileId;
+        entry.cachePath = localPath;
+        entry.size = size;
+        entry.lastAccessed = QDateTime::currentDateTime();
+        entry.downloadCompleted = QDateTime::currentDateTime();
+
+        m_cacheEntries[fileId] = entry;
+        m_currentSize += size;
+
+        // Save to database
+        if (m_database) {
+            m_database->recordFuseCacheEntry(fileId, localPath, size);
+        }
+
+        enforceSoftCacheLimitLocked(fileId);
+        cacheSizeAfter = m_currentSize;
     }
 
-    CacheEntry entry;
-    entry.fileId = fileId;
-    entry.cacheKey = fileId;
-    entry.cachePath = localPath;
-    entry.size = size;
-    entry.lastAccessed = QDateTime::currentDateTime();
-    entry.downloadCompleted = QDateTime::currentDateTime();
-
-    m_cacheEntries[fileId] = entry;
-    m_currentSize += size;
-
-    // Save to database
-    if (m_database) {
-        m_database->recordFuseCacheEntry(fileId, localPath, size);
-    }
-
-    emit cacheSizeChanged(m_currentSize);
+    emit cacheSizeChanged(cacheSizeAfter);
     return true;
 }
 
@@ -886,24 +895,37 @@ void FileCache::addOpenHandle(const QString& fileId, bool writable) {
 }
 
 void FileCache::removeOpenHandle(const QString& fileId, bool writable) {
-    QMutexLocker locker(&m_mutex);
-    auto it = m_openHandleCounts.find(fileId);
-    if (it != m_openHandleCounts.end()) {
-        if (--(*it) <= 0) {
-            m_openHandleCounts.erase(it);
-        }
-    }
+    qint64 cacheSizeAfter = 0;
+    bool emitCacheSize = false;
 
-    if (writable) {
-        auto writableIt = m_openWritableHandleCounts.find(fileId);
-        if (writableIt != m_openWritableHandleCounts.end()) {
-            if (--(*writableIt) <= 0) {
-                m_openWritableHandleCounts.erase(writableIt);
+    {
+        QMutexLocker locker(&m_mutex);
+        const qint64 sizeBefore = m_currentSize;
+        auto it = m_openHandleCounts.find(fileId);
+        if (it != m_openHandleCounts.end()) {
+            if (--(*it) <= 0) {
+                m_openHandleCounts.erase(it);
             }
         }
+
+        if (writable) {
+            auto writableIt = m_openWritableHandleCounts.find(fileId);
+            if (writableIt != m_openWritableHandleCounts.end()) {
+                if (--(*writableIt) <= 0) {
+                    m_openWritableHandleCounts.erase(writableIt);
+                }
+            }
+        }
+
+        maybeFinalizeUploadedGenerationLocked(fileId);
+        enforceSoftCacheLimitLocked();
+        cacheSizeAfter = m_currentSize;
+        emitCacheSize = cacheSizeAfter != sizeBefore;
     }
 
-    maybeFinalizeUploadedGenerationLocked(fileId);
+    if (emitCacheSize) {
+        emit cacheSizeChanged(cacheSizeAfter);
+    }
 }
 
 bool FileCache::hasOpenHandles(const QString& fileId) const {
@@ -970,12 +992,15 @@ void FileCache::onFileDownloaded(const QString& fileId, const QString& localPath
                 QFile::remove(localPath);
                 error = QStringLiteral("Export produced an empty file");
             } else {
+                const qint64 sizeBefore = m_currentSize;
                 emitCacheSize =
                     recordCacheEntryLocked(cacheKey, request.fileId, localPath, exportedFile.size(),
                                            QDateTime::currentDateTime());
+                enforceSoftCacheLimitLocked(request.retainOnCompletion ? cacheKey : QString());
                 completedPath = localPath;
                 cacheSizeAfter = m_currentSize;
-                emitCompleted = true;
+                emitCompleted = m_cacheEntries.contains(cacheKey);
+                emitCacheSize = emitCacheSize || cacheSizeAfter != sizeBefore;
             }
 
             if (!error.isEmpty()) {
@@ -1132,7 +1157,7 @@ QString FileCache::generateUploadSnapshotPath(const QString& fileId, quint64 gen
 }
 
 QString FileCache::getReadyExportPathLocked(const QString& fileId, const QString& cacheKey,
-                                            const QString& cachePath) {
+                                            const QString& cachePath, bool retainOnCompletion) {
     if (m_cacheEntries.contains(cacheKey)) {
         const CacheEntry entry = m_cacheEntries.value(cacheKey);
         if (hasUsableExportBytes(entry.cachePath)) {
@@ -1158,7 +1183,8 @@ QString FileCache::getReadyExportPathLocked(const QString& fileId, const QString
     QFileInfo exportedFile(cachePath);
     recordCacheEntryLocked(cacheKey, fileId, cachePath, exportedFile.size(),
                            exportedFile.lastModified());
-    return cachePath;
+    enforceSoftCacheLimitLocked(retainOnCompletion ? cacheKey : QString());
+    return m_cacheEntries.contains(cacheKey) ? cachePath : QString();
 }
 
 bool FileCache::recordCacheEntryLocked(const QString& cacheKey, const QString& fileId,
@@ -1185,6 +1211,50 @@ bool FileCache::recordCacheEntryLocked(const QString& cacheKey, const QString& f
     }
 
     return !hadEntry || oldSize != size;
+}
+
+bool FileCache::isEntryProtectedLocked(const CacheEntry& entry,
+                                       const QString& retainedCacheKey) const {
+    if (!retainedCacheKey.isEmpty() && entry.cacheKey == retainedCacheKey) {
+        return true;
+    }
+
+    if (m_dirtyFiles.contains(entry.fileId)) {
+        return true;
+    }
+
+    return m_openHandleCounts.value(entry.fileId, 0) > 0;
+}
+
+bool FileCache::evictToFreeSpaceLocked(qint64 bytesNeeded, const QString& retainedCacheKey) {
+    qint64 available = m_maxCacheSize - m_currentSize;
+
+    while (available < bytesNeeded && !m_cacheEntries.isEmpty()) {
+        if (!evictLRU(retainedCacheKey)) {
+            break;
+        }
+        available = m_maxCacheSize - m_currentSize;
+    }
+
+    return available >= bytesNeeded;
+}
+
+void FileCache::enforceSoftCacheLimitLocked(const QString& retainedCacheKey) {
+    while (m_currentSize > m_maxCacheSize && !m_cacheEntries.isEmpty()) {
+        if (!evictLRU(retainedCacheKey)) {
+            if (!retainedCacheKey.isEmpty() && m_cacheEntries.contains(retainedCacheKey)) {
+                qInfo() << "FileCache: Cache remains above target while retaining required local "
+                           "backing file"
+                        << retainedCacheKey << "(" << m_currentSize << "/" << m_maxCacheSize
+                        << "bytes)";
+            } else {
+                qInfo() << "FileCache: Cache remains above target because remaining entries are "
+                           "protected"
+                        << "(" << m_currentSize << "/" << m_maxCacheSize << "bytes)";
+            }
+            return;
+        }
+    }
 }
 
 QList<PendingExportRequest> FileCache::collectQueuedExportsToStartLocked() {
@@ -1333,6 +1403,8 @@ bool FileCache::clearDirtyLocked(const QString& fileId, quint64 expectedGenerati
     if (m_database) {
         m_database->clearFuseDirty(fileId);
     }
+
+    enforceSoftCacheLimitLocked();
 
     return true;
 }
@@ -1483,19 +1555,13 @@ void FileCache::loadCacheFromDatabase() {
     qDebug() << "FileCache: Loaded" << m_dirtyFiles.size() << "dirty file entries from database";
 }
 
-void FileCache::evictLRU() {
-    // Find least recently used entry that is NOT dirty
+bool FileCache::evictLRU(const QString& retainedCacheKey) {
+    // Find least recently used entry that is safe to evict.
     QString lruFileId;
     QDateTime lruTime;
 
     for (auto it = m_cacheEntries.constBegin(); it != m_cacheEntries.constEnd(); ++it) {
-        // Skip dirty files - they must not be evicted
-        if (m_dirtyFiles.contains(it.value().fileId)) {
-            continue;
-        }
-
-        // Fix 2: Skip files with open FUSE handles
-        if (m_openHandleCounts.value(it.value().fileId, 0) > 0) {
+        if (isEntryProtectedLocked(it.value(), retainedCacheKey)) {
             continue;
         }
 
@@ -1506,8 +1572,7 @@ void FileCache::evictLRU() {
     }
 
     if (lruFileId.isEmpty()) {
-        qWarning() << "FileCache: Cannot evict - all cached files are dirty or have open handles";
-        return;
+        return false;
     }
 
     // Evict the LRU entry
@@ -1535,6 +1600,8 @@ void FileCache::evictLRU() {
     // The caller (evictToFreeSpace, setMaxCacheSize, etc.) should emit signals
     // after releasing the lock if needed. For internal LRU eviction, we log
     // but don't emit per-file signals to avoid excessive signaling during bulk eviction.
+
+    return true;
 }
 
 void FileCache::updateCacheSizeFromDisk() {

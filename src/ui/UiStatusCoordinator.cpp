@@ -296,7 +296,8 @@ void UiStatusCoordinator::onDirtyFilesFlushed(int count) {
     }
 }
 
-void UiStatusCoordinator::onMetadataRefreshed() {
+void UiStatusCoordinator::onMetadataRefreshed() {  // TODO: fix when this renders. Stuck on
+                                                   // post-wake-from-sleep
     updateFuseStatus(QStringLiteral("Refreshing metadata"));
 }
 

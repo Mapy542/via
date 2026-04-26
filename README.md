@@ -40,7 +40,7 @@ Not affiliated with Google or Google Drive.
 ```bash
 sudo apt-get install build-essential cmake pkg-config \
     qt6-base-dev qt6-networkauth-dev libqt6sql6-sqlite \
-    libfuse3-dev libsecret-1-dev libdbus-1-dev
+    libfuse3-dev libsecret-1-dev libdbus-1-dev qtkeychain-qt6-dev
 ```
 
 #### Building

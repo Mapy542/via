@@ -7,6 +7,7 @@
 
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
@@ -20,6 +21,21 @@
 #include "sync/ChangeProcessor.h"
 #include "sync/SyncActionQueue.h"
 #include "utils/AutostartManager.h"
+
+namespace {
+constexpr qint64 BYTES_PER_MEGABYTE = 1024LL * 1024LL;
+
+QString formatMegabytes(qint64 bytes) {
+    const double megabytes = static_cast<double>(bytes) / static_cast<double>(BYTES_PER_MEGABYTE);
+    return QString::number(megabytes, 'f', megabytes >= 100.0 ? 0 : 1);
+}
+
+QString fuseCacheTooltip() {
+    return QStringLiteral(
+        "Target size for evictable FUSE cache files. Pending uploads are stored separately and "
+        "excluded from this tracker.");
+}
+}  // namespace
 
 SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
                                ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
@@ -46,13 +62,15 @@ void SettingsWindow::setupUi() {
     // Create tab widget
     m_tabWidget = new QTabWidget(this);
 
-    setupAccountTab();
-    setupSyncTab();
-    setupAdvancedTab();
+    setupLoginTab();
+    setupMirrorTab();
+    setupFuseTab();
+    setupMiscTab();
 
-    m_tabWidget->addTab(m_accountTab, "Account");
-    m_tabWidget->addTab(m_syncTab, "Sync");
-    m_tabWidget->addTab(m_advancedTab, "Advanced");
+    m_tabWidget->addTab(m_loginTab, "Login");
+    m_tabWidget->addTab(m_mirrorTab, "Mirror");
+    m_tabWidget->addTab(m_fuseTab, "Fuse");
+    m_tabWidget->addTab(m_miscTab, "Misc");
 
     mainLayout->addWidget(m_tabWidget);
 
@@ -84,31 +102,31 @@ void SettingsWindow::setupUi() {
     });
 }
 
-void SettingsWindow::setupAccountTab() {
-    m_accountTab = new QWidget();
-    QVBoxLayout* layout = new QVBoxLayout(m_accountTab);
+void SettingsWindow::setupLoginTab() {
+    m_loginTab = new QWidget();
+    QVBoxLayout* layout = new QVBoxLayout(m_loginTab);
 
     // API Credentials group - MUST be configured first
-    QGroupBox* apiGroup = new QGroupBox("Google API Credentials", m_accountTab);
+    QGroupBox* apiGroup = new QGroupBox("Google API Credentials", m_loginTab);
     QVBoxLayout* apiLayout = new QVBoxLayout(apiGroup);
 
     QLabel* apiInfoLabel = new QLabel(
         "To use Via, you need to create OAuth 2.0 credentials in the "
         "<a href='https://console.cloud.google.com/apis/credentials'>Google Cloud Console</a>.\n"
         "Enable the Google Drive API and create OAuth Client ID credentials (Desktop app type).",
-        m_accountTab);
+        m_loginTab);
     apiInfoLabel->setWordWrap(true);
     apiInfoLabel->setOpenExternalLinks(true);
     apiInfoLabel->setTextFormat(Qt::RichText);
     apiLayout->addWidget(apiInfoLabel);
 
     QFormLayout* credentialsForm = new QFormLayout();
-    m_clientIdEdit = new QLineEdit(m_accountTab);
+    m_clientIdEdit = new QLineEdit(m_loginTab);
     m_clientIdEdit->setPlaceholderText("Enter your OAuth Client ID");
     m_clientIdEdit->setEchoMode(QLineEdit::Normal);
     credentialsForm->addRow("Client ID:", m_clientIdEdit);
 
-    m_clientSecretEdit = new QLineEdit(m_accountTab);
+    m_clientSecretEdit = new QLineEdit(m_loginTab);
     m_clientSecretEdit->setPlaceholderText(
         "Enter your OAuth Client Secret");  // TODO: Shows empty instead of password-mode key
                                             // (••••••) on subsequent opens after saving
@@ -117,7 +135,7 @@ void SettingsWindow::setupAccountTab() {
     apiLayout->addLayout(credentialsForm);
 
     QHBoxLayout* saveCredentialsLayout = new QHBoxLayout();
-    m_saveCredentialsButton = new QPushButton("Save API Credentials", m_accountTab);
+    m_saveCredentialsButton = new QPushButton("Save API Credentials", m_loginTab);
     saveCredentialsLayout->addWidget(m_saveCredentialsButton);
     saveCredentialsLayout->addStretch();
     apiLayout->addLayout(saveCredentialsLayout);
@@ -125,16 +143,16 @@ void SettingsWindow::setupAccountTab() {
     layout->addWidget(apiGroup);
 
     // Account info group
-    QGroupBox* accountGroup = new QGroupBox("Google Account", m_accountTab);
+    QGroupBox* accountGroup = new QGroupBox("Google Account", m_loginTab);
     QVBoxLayout* accountLayout = new QVBoxLayout(accountGroup);
 
-    m_accountStatus = new QLabel("Not signed in", m_accountTab);
+    m_accountStatus = new QLabel("Not signed in", m_loginTab);
     m_accountStatus->setStyleSheet("QLabel { font-size: 14px; }");
     accountLayout->addWidget(m_accountStatus);
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
-    m_loginButton = new QPushButton("Sign In with Google", m_accountTab);
-    m_logoutButton = new QPushButton("Sign Out", m_accountTab);
+    m_loginButton = new QPushButton("Sign In with Google", m_loginTab);
+    m_logoutButton = new QPushButton("Sign Out", m_loginTab);
 
     buttonLayout->addWidget(m_loginButton);
     buttonLayout->addWidget(m_logoutButton);
@@ -144,10 +162,10 @@ void SettingsWindow::setupAccountTab() {
     layout->addWidget(accountGroup);
 
     // Storage info group
-    QGroupBox* storageGroup = new QGroupBox("Storage", m_accountTab);
+    QGroupBox* storageGroup = new QGroupBox("Storage", m_loginTab);
     QVBoxLayout* storageLayout = new QVBoxLayout(storageGroup);
 
-    m_storageLabel = new QLabel("Retrieving storage info...", m_accountTab);
+    m_storageLabel = new QLabel("Retrieving storage info...", m_loginTab);
     storageLayout->addWidget(m_storageLabel);
 
     layout->addWidget(storageGroup);
@@ -235,24 +253,54 @@ void SettingsWindow::showEvent(QShowEvent* event) {
     if (m_authManager && m_authManager->isAuthenticated()) {
         updateStorageInfo();
     }
+
+    refreshCacheUsageTracker();
 }
 
-void SettingsWindow::setupSyncTab() {
-    m_syncTab = new QWidget();
-    QVBoxLayout* layout = new QVBoxLayout(m_syncTab);
+void SettingsWindow::refreshCacheUsageTracker() {
+    if (!m_cacheUsageLabel || !m_cacheSize) {
+        return;
+    }
+
+    const qint64 currentBytes = scanFuseCacheUsageBytes();
+    m_cacheUsageLabel->setText(QString("Current: %1 / %2 MB")
+                                   .arg(formatMegabytes(currentBytes))
+                                   .arg(m_cacheSize->value()));
+}
+
+qint64 SettingsWindow::scanFuseCacheUsageBytes() const {
+    const QString cacheRoot =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/Via/files";
+    QDir cacheDir(cacheRoot);
+    if (!cacheDir.exists()) {
+        return 0;
+    }
+
+    qint64 totalBytes = 0;
+    QDirIterator it(cacheRoot, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        totalBytes += it.fileInfo().size();
+    }
+
+    return totalBytes;
+}
+
+void SettingsWindow::setupMirrorTab() {
+    m_mirrorTab = new QWidget();
+    QVBoxLayout* layout = new QVBoxLayout(m_mirrorTab);
 
     // Sync folder group
-    // TODO: Advanced and sync settings are all mixed up. Add Mirror sync page, Fuse page, adv page.
-    QGroupBox* folderGroup = new QGroupBox("Sync Folder", m_syncTab);
+    QGroupBox* folderGroup = new QGroupBox("Sync Folder", m_mirrorTab);
     QVBoxLayout* folderLayout = new QVBoxLayout(folderGroup);
 
-    QLabel* folderLabel = new QLabel("Local folder for Google Drive files:", m_syncTab);
+    QLabel* folderLabel = new QLabel("Local folder for Google Drive files:", m_mirrorTab);
     folderLayout->addWidget(folderLabel);
 
     QHBoxLayout* folderPathLayout = new QHBoxLayout();
-    m_syncFolderEdit = new QLineEdit(m_syncTab);
+    m_syncFolderEdit = new QLineEdit(m_mirrorTab);
     m_syncFolderEdit->setPlaceholderText(QDir::homePath() + "/GoogleDrive");
-    m_browseFolderButton = new QPushButton("Browse...", m_syncTab);
+    m_browseFolderButton = new QPushButton("Browse...", m_mirrorTab);
 
     folderPathLayout->addWidget(m_syncFolderEdit, 1);
     folderPathLayout->addWidget(m_browseFolderButton);
@@ -261,14 +309,14 @@ void SettingsWindow::setupSyncTab() {
     layout->addWidget(folderGroup);
 
     // Sync mode group
-    QGroupBox* syncModeGroup = new QGroupBox("Sync Mode", m_syncTab);
+    QGroupBox* syncModeGroup = new QGroupBox("Sync Mode", m_mirrorTab);
     QVBoxLayout* syncModeLayout = new QVBoxLayout(syncModeGroup);
 
-    QLabel* syncModeLabel = new QLabel("Choose how files are synchronized:", m_syncTab);
+    QLabel* syncModeLabel = new QLabel("Choose how files are synchronized:", m_mirrorTab);
     syncModeLayout->addWidget(syncModeLabel);
 
     QHBoxLayout* syncModeComboLayout = new QHBoxLayout();
-    m_syncModeCombo = new QComboBox(m_syncTab);
+    m_syncModeCombo = new QComboBox(m_mirrorTab);
     m_syncModeCombo->addItem("Keep Newest (bidirectional sync)", "keep-newest");
     m_syncModeCombo->addItem("Remote Read-Only (download only, never upload)", "remote-read-only");
     m_syncModeCombo->addItem("Remote No Delete (sync but don't delete remote files)",
@@ -283,22 +331,22 @@ void SettingsWindow::setupSyncTab() {
         "<b>Remote Read-Only:</b> Only downloads from remote, local changes are never uploaded.<br>"
         "<b>Remote No Delete:</b> Bidirectional sync but local file deletions won't delete remote "
         "files.</i>",
-        m_syncTab);
+        m_mirrorTab);
     syncModeInfoLabel->setWordWrap(true);
     syncModeInfoLabel->setTextFormat(Qt::RichText);
     syncModeLayout->addWidget(syncModeInfoLabel);
 
     layout->addWidget(syncModeGroup);
 
-    QGroupBox* duplicateNamesGroup = new QGroupBox("Duplicate Remote Names", m_syncTab);
+    QGroupBox* duplicateNamesGroup = new QGroupBox("Duplicate Remote Names", m_mirrorTab);
     QVBoxLayout* duplicateNamesLayout = new QVBoxLayout(duplicateNamesGroup);
 
     QLabel* duplicateNamesLabel =
-        new QLabel("Choose how Via names duplicate Drive files within one folder:", m_syncTab);
+        new QLabel("Choose how Via names duplicate Drive files within one folder:", m_mirrorTab);
     duplicateNamesLayout->addWidget(duplicateNamesLabel);
 
     QHBoxLayout* duplicateComboLayout = new QHBoxLayout();
-    m_duplicateNameCombo = new QComboBox(m_syncTab);
+    m_duplicateNameCombo = new QComboBox(m_mirrorTab);
     m_duplicateNameCombo->addItem("Append Drive file ID (example: report_abcd1234.txt)",
                                   "file-id-suffix");
     m_duplicateNameCombo->addItem("Append numbered suffix (example: report (1).txt)",
@@ -310,7 +358,7 @@ void SettingsWindow::setupSyncTab() {
     QLabel* duplicateInfoLabel = new QLabel(
         "<i>The first file to claim a name keeps the original path. Additional duplicates are "
         "given a unique local name when they are written locally.</i>",
-        m_syncTab);
+        m_mirrorTab);
     duplicateInfoLabel->setWordWrap(true);
     duplicateInfoLabel->setTextFormat(Qt::RichText);
     duplicateNamesLayout->addWidget(duplicateInfoLabel);
@@ -318,15 +366,15 @@ void SettingsWindow::setupSyncTab() {
     layout->addWidget(duplicateNamesGroup);
 
     // Conflict resolution group
-    QGroupBox* conflictGroup = new QGroupBox("Conflict Resolution", m_syncTab);
+    QGroupBox* conflictGroup = new QGroupBox("Conflict Resolution", m_mirrorTab);
     QVBoxLayout* conflictLayout = new QVBoxLayout(conflictGroup);
 
     QLabel* conflictLabel =
-        new QLabel("When a file is modified both locally and remotely:", m_syncTab);
+        new QLabel("When a file is modified both locally and remotely:", m_mirrorTab);
     conflictLayout->addWidget(conflictLabel);
 
     QHBoxLayout* conflictComboLayout = new QHBoxLayout();
-    m_conflictResolutionCombo = new QComboBox(m_syncTab);
+    m_conflictResolutionCombo = new QComboBox(m_mirrorTab);
     m_conflictResolutionCombo->addItem("Keep both versions (creates conflict copy)", "keep-both");
     m_conflictResolutionCombo->addItem("Always keep local version", "keep-local");
     m_conflictResolutionCombo->addItem("Always keep remote version", "keep-remote");
@@ -341,7 +389,7 @@ void SettingsWindow::setupSyncTab() {
         "'(local conflict DATE)' and the remote version is downloaded.<br>"
         "When 'Keep newest' is selected, the file with the most recent modification "
         "time wins. If both were modified since last sync, both versions are kept.</i>",
-        m_syncTab);
+        m_mirrorTab);
     conflictInfoLabel->setWordWrap(true);
     conflictInfoLabel->setTextFormat(Qt::RichText);
     conflictLayout->addWidget(conflictInfoLabel);
@@ -353,26 +401,130 @@ void SettingsWindow::setupSyncTab() {
             &SettingsWindow::onBrowseFolderClicked);
 }
 
-void SettingsWindow::setupAdvancedTab() {
-    m_advancedTab = new QWidget();
-    QVBoxLayout* layout = new QVBoxLayout(m_advancedTab);
+void SettingsWindow::setupFuseTab() {
+    m_fuseTab = new QWidget();
+    QVBoxLayout* layout = new QVBoxLayout(m_fuseTab);
+
+    QGroupBox* fuseGroup = new QGroupBox("Virtual File System (FUSE)", m_fuseTab);
+    QVBoxLayout* fuseLayout = new QVBoxLayout(fuseGroup);
+
+    QHBoxLayout* syncSystemLayout = new QHBoxLayout();
+    syncSystemLayout->addWidget(new QLabel("Sync system:", m_fuseTab));
+    m_syncSystemCombo = new QComboBox(m_fuseTab);
+    m_syncSystemCombo->addItem("Mirror Only", "mirror-only");
+    m_syncSystemCombo->addItem("FUSE Only", "fuse-only");
+    m_syncSystemCombo->addItem("Both", "both");
+    syncSystemLayout->addWidget(m_syncSystemCombo);
+    syncSystemLayout->addStretch();
+    fuseLayout->addLayout(syncSystemLayout);
+
+    QHBoxLayout* mountLayout = new QHBoxLayout();
+    mountLayout->addWidget(new QLabel("Mount point:", m_fuseTab));
+    m_fuseMountPointEdit = new QLineEdit(m_fuseTab);
+    m_fuseMountPointEdit->setPlaceholderText(QDir::homePath() + "/GoogleDriveFuse");
+    m_fuseMountPointEdit->setEnabled(false);
+    mountLayout->addWidget(m_fuseMountPointEdit);
+    fuseLayout->addLayout(mountLayout);
+
+    QHBoxLayout* cacheSizeLayout = new QHBoxLayout();
+    QLabel* cacheSizeLabel = new QLabel("Evictable FUSE cache target:", m_fuseTab);
+    cacheSizeLabel->setToolTip(fuseCacheTooltip());
+    cacheSizeLayout->addWidget(cacheSizeLabel);
+    m_cacheSize = new QSpinBox(m_fuseTab);
+    m_cacheSize->setRange(100, 100000);
+    m_cacheSize->setValue(5000);
+    m_cacheSize->setSuffix(" MB");
+    m_cacheSize->setEnabled(false);
+    m_cacheSize->setToolTip(fuseCacheTooltip());
+    cacheSizeLayout->addWidget(m_cacheSize);
+
+    m_cacheUsageLabel = new QLabel("Current: 0 / 5000 MB", m_fuseTab);
+    m_cacheUsageLabel->setToolTip(fuseCacheTooltip());
+    cacheSizeLayout->addWidget(m_cacheUsageLabel);
+    cacheSizeLayout->addStretch();
+    fuseLayout->addLayout(cacheSizeLayout);
+
+    QLabel* cacheInfoLabel = new QLabel(
+        "<i>This target applies only to evictable cached files. Pending uploads are stored "
+        "separately and are not counted here. Very large single files may temporarily exceed "
+        "the target while Via keeps a required local backing file.</i>",
+        m_fuseTab);
+    cacheInfoLabel->setWordWrap(true);
+    cacheInfoLabel->setTextFormat(Qt::RichText);
+    fuseLayout->addWidget(cacheInfoLabel);
+
+    QHBoxLayout* nativeDocLayout = new QHBoxLayout();
+    nativeDocLayout->addWidget(new QLabel("Google-native docs:", m_fuseTab));
+    m_nativeDocModeCombo = new QComboBox(m_fuseTab);
+    m_nativeDocModeCombo->addItem("Hide (don't show in mount)", "hide");
+    m_nativeDocModeCombo->addItem(
+        "Browser shortcuts (.gdoc, ...)",
+        "browser-shortcut");  // TODO: Implement custom icons for these shortcuts
+    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, ...)", "open-document");
+    m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
+    m_nativeDocModeCombo->setEnabled(false);
+    nativeDocLayout->addWidget(m_nativeDocModeCombo);
+    nativeDocLayout->addStretch();
+    fuseLayout->addLayout(nativeDocLayout);
+
+    m_clearCacheButton = new QPushButton("Restart and Clear Cache", m_fuseTab);
+    m_clearCacheButton->setEnabled(false);
+    QHBoxLayout* clearLayout = new QHBoxLayout();
+    clearLayout->addWidget(m_clearCacheButton);
+    clearLayout->addStretch();
+    fuseLayout->addLayout(clearLayout);
+
+    layout->addWidget(fuseGroup);
+    layout->addStretch();
+
+    // Enable/disable FUSE-related widgets based on sync system selection
+    auto updateFuseWidgets = [this]() {
+        bool fuseEnabled = (m_syncSystemCombo->currentData().toString() != "mirror-only");
+        m_fuseMountPointEdit->setEnabled(fuseEnabled);
+        m_cacheSize->setEnabled(fuseEnabled);
+        m_nativeDocModeCombo->setEnabled(fuseEnabled);
+        m_clearCacheButton->setEnabled(fuseEnabled);
+    };
+    connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            updateFuseWidgets);
+    connect(m_cacheSize, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            [this](int) { refreshCacheUsageTracker(); });
+    updateFuseWidgets();
+    refreshCacheUsageTracker();
+
+    connect(m_clearCacheButton, &QPushButton::clicked, this, [this]() {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, "Restart and Clear Cache",
+            "Via needs to restart to clear cached FUSE files and metadata safely.\n\n"
+            "Pending uploads will be preserved.\n\n"
+            "Restart now and clear the cache on next launch?",
+            QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::Yes) {
+            emit clearCacheRequested();
+        }
+    });
+}
+
+void SettingsWindow::setupMiscTab() {
+    m_miscTab = new QWidget();
+    QVBoxLayout* layout = new QVBoxLayout(m_miscTab);
 
     // Startup group
-    QGroupBox* startupGroup = new QGroupBox("Startup", m_advancedTab);
+    QGroupBox* startupGroup = new QGroupBox("Startup", m_miscTab);
     QVBoxLayout* startupLayout = new QVBoxLayout(startupGroup);
 
-    m_startOnLoginCheck = new QCheckBox("Start Via on system login", m_advancedTab);
+    m_startOnLoginCheck = new QCheckBox("Start Via on system login", m_miscTab);
     startupLayout->addWidget(m_startOnLoginCheck);
 
     layout->addWidget(startupGroup);
 
     // Appearance group
-    QGroupBox* appearanceGroup = new QGroupBox("Appearance", m_advancedTab);
+    QGroupBox* appearanceGroup = new QGroupBox("Appearance", m_miscTab);
     QVBoxLayout* appearanceLayout = new QVBoxLayout(appearanceGroup);
 
     QHBoxLayout* themeLayout = new QHBoxLayout();
-    themeLayout->addWidget(new QLabel("Icon theme:", m_advancedTab));
-    m_themeOverrideCombo = new QComboBox(m_advancedTab);
+    themeLayout->addWidget(new QLabel("Icon theme:", m_miscTab));
+    m_themeOverrideCombo = new QComboBox(m_miscTab);
     m_themeOverrideCombo->addItem("Auto (follow system)", 0);
     m_themeOverrideCombo->addItem("Light icons (for light backgrounds)", 1);
     m_themeOverrideCombo->addItem("Dark icons (for dark backgrounds)", 2);
@@ -383,128 +535,24 @@ void SettingsWindow::setupAdvancedTab() {
     layout->addWidget(appearanceGroup);
 
     // Notifications group
-    QGroupBox* notifyGroup = new QGroupBox("Notifications", m_advancedTab);
+    QGroupBox* notifyGroup = new QGroupBox("Notifications", m_miscTab);
     QVBoxLayout* notifyLayout = new QVBoxLayout(notifyGroup);
 
-    m_showNotificationsCheck = new QCheckBox("Show desktop notifications", m_advancedTab);
+    m_showNotificationsCheck = new QCheckBox("Show desktop notifications", m_miscTab);
     m_showNotificationsCheck->setChecked(true);
     notifyLayout->addWidget(m_showNotificationsCheck);
 
     layout->addWidget(notifyGroup);
 
-    // FUSE / Sync System group
-    QGroupBox* fuseGroup = new QGroupBox("Virtual File System (FUSE)", m_advancedTab);
-    QVBoxLayout* fuseLayout = new QVBoxLayout(fuseGroup);
-
-    QHBoxLayout* syncSystemLayout = new QHBoxLayout();
-    syncSystemLayout->addWidget(new QLabel("Sync system:", m_advancedTab));
-    m_syncSystemCombo = new QComboBox(m_advancedTab);
-    m_syncSystemCombo->addItem("Mirror Only", "mirror-only");
-    m_syncSystemCombo->addItem("FUSE Only", "fuse-only");
-    m_syncSystemCombo->addItem("Both", "both");
-    syncSystemLayout->addWidget(m_syncSystemCombo);
-    syncSystemLayout->addStretch();
-    fuseLayout->addLayout(syncSystemLayout);
-
-    QHBoxLayout* mountLayout = new QHBoxLayout();
-    mountLayout->addWidget(new QLabel("Mount point:", m_advancedTab));
-    m_fuseMountPointEdit = new QLineEdit(m_advancedTab);
-    m_fuseMountPointEdit->setPlaceholderText(QDir::homePath() + "/GoogleDriveFuse");
-    m_fuseMountPointEdit->setEnabled(false);
-    mountLayout->addWidget(m_fuseMountPointEdit);
-    fuseLayout->addLayout(mountLayout);
-
-    QHBoxLayout* cacheSizeLayout = new QHBoxLayout();
-    cacheSizeLayout->addWidget(
-        new QLabel("Maximum FUSE cache size:",
-                   m_advancedTab));  // TODO: Validate this actually limits cache size
-    m_cacheSize = new QSpinBox(m_advancedTab);
-    m_cacheSize->setRange(100, 100000);
-    m_cacheSize->setValue(5000);
-    m_cacheSize->setSuffix(" MB");
-    m_cacheSize->setEnabled(false);
-    cacheSizeLayout->addWidget(m_cacheSize);
-    cacheSizeLayout->addStretch();
-    fuseLayout->addLayout(cacheSizeLayout);
-
-    QHBoxLayout* nativeDocLayout = new QHBoxLayout();
-    nativeDocLayout->addWidget(new QLabel("Google-native docs:", m_advancedTab));
-    m_nativeDocModeCombo = new QComboBox(m_advancedTab);
-    m_nativeDocModeCombo->addItem("Hide (don't show in mount)", "hide");
-    m_nativeDocModeCombo->addItem(
-        "Browser shortcuts (.gdoc, …)",
-        "browser-shortcut");  // TODO: Implement custom icons for these shortcuts
-    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, …)", "open-document");
-    m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, …)", "text");
-    m_nativeDocModeCombo->setEnabled(false);
-    nativeDocLayout->addWidget(m_nativeDocModeCombo);
-    nativeDocLayout->addStretch();
-    fuseLayout->addLayout(nativeDocLayout);
-
-    QPushButton* clearCacheButton = new QPushButton(
-        "Clear Cache",
-        m_advancedTab);  // TODO: this button does not appear to have any functionality.
-    clearCacheButton->setEnabled(false);
-    QHBoxLayout* clearLayout = new QHBoxLayout();
-    clearLayout->addWidget(clearCacheButton);
-    clearLayout->addStretch();
-    fuseLayout->addLayout(clearLayout);
-
-    layout->addWidget(fuseGroup);
-
     // Debug group
-    QGroupBox* debugGroup = new QGroupBox("Debug", m_advancedTab);
+    QGroupBox* debugGroup = new QGroupBox("Debug", m_miscTab);
     QVBoxLayout* debugLayout = new QVBoxLayout(debugGroup);
 
-    m_debugModeCheck = new QCheckBox("Enable debug logging", m_advancedTab);
+    m_debugModeCheck = new QCheckBox("Enable debug logging", m_miscTab);
     debugLayout->addWidget(m_debugModeCheck);
 
     layout->addWidget(debugGroup);
     layout->addStretch();
-
-    // Enable/disable FUSE-related widgets based on sync system selection
-    auto updateFuseWidgets = [this, clearCacheButton]() {
-        bool fuseEnabled = (m_syncSystemCombo->currentData().toString() != "mirror-only");
-        m_fuseMountPointEdit->setEnabled(fuseEnabled);
-        m_cacheSize->setEnabled(fuseEnabled);
-        m_nativeDocModeCombo->setEnabled(fuseEnabled);
-        clearCacheButton->setEnabled(fuseEnabled);
-    };
-    connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            updateFuseWidgets);
-    updateFuseWidgets();
-
-    // Connect clear cache button
-    connect(clearCacheButton, &QPushButton::clicked, this, [this]() {
-        QMessageBox::StandardButton reply = QMessageBox::question(
-            this, "Clear Cache",
-            "Are you sure you want to clear the cache?\n\n"
-            "This will remove all cached file data but won't affect your files.",
-            QMessageBox::Yes | QMessageBox::No);
-        if (reply == QMessageBox::Yes) {
-            // GPT5.3 #12: actually remove cached files
-            QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-            QDir cacheDir(cachePath);
-            if (cacheDir.exists()) {
-                // Remove all files / sub-dirs inside the cache dir
-                for (const QString& entry :
-                     cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries)) {
-                    QString fullPath = cacheDir.filePath(entry);
-                    QFileInfo fi(fullPath);
-                    if (fi.isDir()) {
-                        QDir(fullPath).removeRecursively();
-                    } else {
-                        QFile::remove(fullPath);
-                    }
-                }
-            }
-
-            emit clearCacheRequested();
-
-            QMessageBox::information(this, "Cache Cleared",
-                                     "The cache has been cleared successfully.");
-        }
-    });
 }
 
 void SettingsWindow::loadSettings() {
@@ -593,7 +641,7 @@ void SettingsWindow::loadSettings() {
         setComboById(m_conflictResolutionCombo, "keep-both");
     }
 
-    // Advanced settings
+    // Misc settings
     m_startOnLoginCheck->setChecked(m_settings.value("advanced/startOnLogin", false).toBool());
     m_showNotificationsCheck->setChecked(
         m_settings.value("advanced/showNotifications", true).toBool());
@@ -607,7 +655,7 @@ void SettingsWindow::loadSettings() {
         }
     }
 
-    // Sync system dropdown (migrate legacy enableFuse boolean)
+    // Fuse settings
     QString syncSystem = m_settings.value("advanced/syncSystem", "").toString();
     if (syncSystem.isEmpty()) {
         // Migrate from old enableFuse boolean
@@ -643,10 +691,12 @@ void SettingsWindow::loadSettings() {
     m_originalFuseMountPoint = m_fuseMountPointEdit->text();
     m_originalCacheSize = m_cacheSize->value();
     m_originalNativeDocMode = m_nativeDocModeCombo->currentData().toString();
+
+    refreshCacheUsageTracker();
 }
 
 void SettingsWindow::saveSettings() {
-    // Sync settings
+    // Mirror settings
     m_settings.setValue("sync/folder", m_syncFolderEdit->text());
     m_settings.setValue("sync/syncMode", m_syncModeCombo->currentData().toString());
     m_settings.setValue("sync/duplicateNameStrategy",
@@ -654,11 +704,13 @@ void SettingsWindow::saveSettings() {
     m_settings.setValue("sync/conflictStrategy",
                         m_conflictResolutionCombo->currentData().toString());
 
-    // Advanced settings
+    // Misc settings
     m_settings.setValue("advanced/startOnLogin", m_startOnLoginCheck->isChecked());
     AutostartManager::setAutostart(m_startOnLoginCheck->isChecked());
     m_settings.setValue("advanced/showNotifications", m_showNotificationsCheck->isChecked());
     m_settings.setValue("advanced/themeOverride", m_themeOverrideCombo->currentData().toInt());
+
+    // Fuse settings
     m_settings.setValue("advanced/syncSystem", m_syncSystemCombo->currentData().toString());
     m_settings.setValue("advanced/fuseMountPoint", m_fuseMountPointEdit->text());
     m_settings.setValue("advanced/cacheSize", m_cacheSize->value());

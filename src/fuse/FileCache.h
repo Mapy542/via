@@ -92,6 +92,7 @@ struct PendingExportRequest {
     QString exportMimeType;
     QString cacheKey;
     QString cachePath;
+    bool retainOnCompletion = false;
 };
 
 Q_DECLARE_METATYPE(CacheEntry)
@@ -627,10 +628,14 @@ class FileCache : public QObject {
     QString getContentPathLocked(const QString& fileId,
                                  const QString& exportMimeType = QString()) const;
     QString getReadyExportPathLocked(const QString& fileId, const QString& cacheKey,
-                                     const QString& cachePath);
+                                     const QString& cachePath, bool retainOnCompletion = false);
     bool recordCacheEntryLocked(const QString& cacheKey, const QString& fileId,
                                 const QString& cachePath, qint64 size,
                                 const QDateTime& completedAt);
+    bool isEntryProtectedLocked(const CacheEntry& entry,
+                                const QString& retainedCacheKey = QString()) const;
+    bool evictToFreeSpaceLocked(qint64 bytesNeeded, const QString& retainedCacheKey = QString());
+    void enforceSoftCacheLimitLocked(const QString& retainedCacheKey = QString());
     QList<PendingExportRequest> collectQueuedExportsToStartLocked();
     void startExportRequests(const QList<PendingExportRequest>& requests);
     bool clearDirtyLocked(const QString& fileId, quint64 expectedGeneration);
@@ -638,7 +643,7 @@ class FileCache : public QObject {
     bool recycleAuthoritativeCopyToCacheLocked(const QString& fileId);
     bool resetSnapshotDirectoryLocked();
     void loadCacheFromDatabase();
-    void evictLRU();
+    bool evictLRU(const QString& retainedCacheKey = QString());
     void updateCacheSizeFromDisk();
 
     // Dependencies
