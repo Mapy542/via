@@ -119,7 +119,10 @@ UiStatusPriority UiStatusCoordinator::priorityFromStatusText(const QString& stat
         return UiStatusPriority::Error;
     }
     if (status.contains(QStringLiteral("Not connected"), Qt::CaseInsensitive) ||
-        status.contains(QStringLiteral("Offline"), Qt::CaseInsensitive)) {
+        status.contains(
+            QStringLiteral("Offline"),
+            Qt::CaseInsensitive)) {  // TODO: bug, isOffline stuck after reconnect becuase mirror is
+                                     // disabled, and so never resumed.
         return UiStatusPriority::Offline;
     }
     if (status.contains(QStringLiteral("Warning"), Qt::CaseInsensitive) ||
