@@ -1,36 +1,77 @@
-<?xml version="1.0" encoding="UTF-8" ?>
-<svg xmlns="http://www.w3.org/2000/svg"
-     viewBox="0 0 128 128">
-    <rect x="22"
-          y="12"
-          width="84"
-          height="104"
-          rx="16"
-          fill="#ffffff"
-          stroke="#1a73e8"
-          stroke-width="8" />
-    <path d="M78 12v26a10 10 0 0 0 10 10h18"
-          fill="#d2e3fc" />
-    <path d="M78 12l28 36H88a10 10 0 0 1-10-10V12Z"
-          fill="#8ab4f8" />
-    <rect x="38"
-          y="56"
-          width="40"
-          height="8"
-          rx="4"
-          fill="#1a73e8" />
-    <rect x="38"
-          y="72"
-          width="52"
-          height="8"
-          rx="4"
-          fill="#1a73e8"
-          opacity="0.9" />
-    <rect x="38"
-          y="88"
-          width="44"
-          height="8"
-          rx="4"
-          fill="#1a73e8"
-          opacity="0.7" />
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64"
+     xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 64 64"
+     height="64"
+     xmlns:xlink="http://www.w3.org/1999/xlink">
+    <defs>
+        <linearGradient id="a"
+                        y1="10"
+                        x1="40"
+                        y2="31"
+                        gradientUnits="userSpaceOnUse"
+                        x2="54"
+                        gradientTransform="translate(46 296.36)">
+            <stop stop-color="#060606" />
+            <stop offset="1"
+                  stop-opacity="0" />
+        </linearGradient>
+        <linearGradient id="b"
+                        y1="392.36"
+                        y2="336.36"
+                        gradientUnits="userSpaceOnUse"
+                        x2="0"
+                        gradientTransform="translate(-2-36)">
+            <stop stop-color="#ffffff"
+                  stop-opacity="0" />
+            <stop offset="1"
+                  stop-color="#ffffff"
+                  stop-opacity=".2" />
+        </linearGradient>
+        <path id="c"
+              d="m56 357.36v-58h30l14 14v44h-14z" />
+        <clipPath id="clip-page">
+            <path d="M56 307.36 A8 8 0 0 1 64 299.36 H86 L100 313.36 V349.36 A8 8 0 0 1 92 357.36 H64 A8 8 0 0 1 56 349.36 Z" />
+        </clipPath>
+    </defs>
+    <g transform="translate(-46-296.36)">
+        <use fill="#1bb2fb"
+             xlink:href="#c"
+             clip-path="url(#clip-page)" />
+        <g color-rendering="auto"
+           color-interpolation-filters="linearRGB"
+           shape-rendering="auto"
+           image-rendering="auto"
+           text-rendering="auto"
+           color-interpolation="sRGB"
+           color="#000000"
+           transform="scale(1-1)">
+            <rect opacity=".25"
+                  x="56"
+                  y="-357.36"
+                  width="44"
+                  height="1" />
+        </g>
+        <g fill-rule="evenodd">
+            <path opacity=".5"
+                  fill="#ffffff"
+                  d="m100 313.36l-14-14v14z" />
+            <path opacity=".2"
+                  fill="url(#a)"
+                  d="m86 313.36l14 14v-14z" />
+        </g>
+        <path opacity=".9"
+              color-interpolation-filters="linearRGB"
+              color="#000000"
+              image-rendering="auto"
+              color-rendering="auto"
+              d="m67 318.36v1h22v-1zm0 3v1h22v-1zm0 3v1h11v-1zm0 4v1h22v-1zm0 3v1h9v-1zm13 0v9h9v-9zm1 1h7v7h-7zm-14 1v1h5v-1zm0 3v1h10v-1zm0 3v1h6v-1z"
+              color-interpolation="sRGB"
+              text-rendering="auto"
+              fill="#ffffff"
+              shape-rendering="auto" />
+        <use fill="url(#b)"
+             xlink:href="#c"
+             clip-path="url(#clip-page)" />
+    </g>
 </svg>

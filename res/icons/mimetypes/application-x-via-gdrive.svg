@@ -1,8 +1,75 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <rect x="22" y="12" width="84" height="104" rx="16" fill="#ffffff" stroke="#3c4043" stroke-width="8"/>
-  <path d="M78 12v26a10 10 0 0 0 10 10h18" fill="#e8eaed"/>
-  <path d="M78 12l28 36H88a10 10 0 0 1-10-10V12Z" fill="#cfd8dc"/>
-  <path d="M46 90l18-32h20L66 90z" fill="#0f9d58"/>
-  <path d="M54 44h20l20 34H74z" fill="#f4b400"/>
-  <path d="M34 78l20-34 10 14-20 32z" fill="#4285f4"/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64"
+     xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 64 64"
+     height="64"
+     xmlns:xlink="http://www.w3.org/1999/xlink">
+    <defs>
+        <linearGradient id="a"
+                        y1="17"
+                        x1="40"
+                        y2="31"
+                        gradientUnits="userSpaceOnUse"
+                        x2="54"
+                        gradientTransform="translate(110 296.36)">
+            <stop stop-color="#060606" />
+            <stop offset="1"
+                  stop-opacity="0" />
+        </linearGradient>
+        <linearGradient id="b"
+                        y1="392.36"
+                        y2="336.36"
+                        gradientUnits="userSpaceOnUse"
+                        x2="0"
+                        gradientTransform="translate(62-36)">
+            <stop stop-color="#ffffff"
+                  stop-opacity="0" />
+            <stop offset="1"
+                  stop-color="#ffffff"
+                  stop-opacity=".2" />
+        </linearGradient>
+        <path id="c"
+              d="m120 357.36v-58h30l14 14v44h-14z" />
+        <clipPath id="clip-page">
+            <path d="M120 307.36 A8 8 0 0 1 128 299.36 H150 L164 313.36 V349.36 A8 8 0 0 1 156 357.36 H128 A8 8 0 0 1 120 349.36 Z" />
+        </clipPath>
+    </defs>
+    <g transform="translate(-110-296.36)">
+        <use fill="#5142c3"
+             xlink:href="#c"
+             clip-path="url(#clip-page)" />
+        <g color-rendering="auto"
+           color-interpolation-filters="linearRGB"
+           shape-rendering="auto"
+           image-rendering="auto"
+           text-rendering="auto"
+           color-interpolation="sRGB"
+           color="#000000"
+           transform="scale(1-1)">
+            <rect opacity=".25"
+                  x="120"
+                  y="-357.36"
+                  width="44"
+                  height="1" />
+        </g>
+        <g fill-rule="evenodd">
+            <path opacity=".5"
+                  fill="#ffffff"
+                  d="m164 313.36l-14-14v14z" />
+            <path opacity=".2"
+                  fill="url(#a)"
+                  d="m150 313.36l14 14v-14z" />
+        </g>
+        <g transform="translate(126.5 315.36) scale(1.3)">
+            <path d="M 12 5 A 6 6 0 0 0 6 11 A 6 6 0 0 0 6 11.099609 A 4 4 0 0 0 3 15 A 4 4 0 0 0 7 19 L 9.5019531 19 L 9.5019531 18 L 7 18 A 3 3 0 0 1 4 15 A 3 3 0 0 1 7 12 A 3 3 0 0 1 7.0996094 12 A 5 5 0 0 1 7 11 A 5 5 0 0 1 12 6 A 5 5 0 0 1 16.121094 8.1933594 L 17.349609 8.1933594 A 6 6 0 0 0 12 5 z"
+                  fill="#ffffff" />
+            <g transform="matrix(0.625,0,0,0.625,8.1270193,7.125)">
+                <path d="M 11,3 A 8,8 0 0 0 3.0722656,10 H 4.078125 A 7,7 0 0 1 11,4 7,7 0 0 1 17.320312,8 H 14 v 1 h 5 V 8 4 H 18 V 7.1679688 A 8,8 0 0 0 11,3 Z m 6.921875,9 A 7,7 0 0 1 11,18 7,7 0 0 1 4.6894531,14 H 8 V 13 H 3 v 1 4 H 4 V 14.804688 A 8,8 0 0 0 11,19 8,8 0 0 0 18.927734,12 Z"
+                      fill="#ffffff" />
+            </g>
+        </g>
+        <use fill="url(#b)"
+             xlink:href="#c"
+             clip-path="url(#clip-page)" />
+    </g>
 </svg>
