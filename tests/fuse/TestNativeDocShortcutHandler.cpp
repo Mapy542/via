@@ -19,11 +19,14 @@ class TestNativeDocShortcutHandler : public QObject {
     void testShortcutArgument_MissingNativeDocStillDetected();
     void testParseShortcutText_ValidShortcut();
     void testParseShortcutFile_InvalidHeader();
-    void testExtensionsAndMimeTypes_SameCount();
+    void testDesktopMetadata_SameCount();
     void testMimePackageXml_ContainsAllExtensions();
     void testMimePackageXml_ContainsAllMimeTypes();
+    void testMimePackageXml_ContainsAllIconDeclarations();
     void testDesktopMimeTypes_AreDistinct();
     void testDesktopMimeTypes_MatchExpectedPrefix();
+    void testDesktopIconNames_AreDistinct();
+    void testDesktopIconNames_MatchMimeDerivedNames();
     void testDescribeErrorResponse_PlainTextExportLimitMapsToFriendlyMessage();
     void testExportFailureMessage_SizeLimitUsesFriendlyMessage();
     void testExportFailureMessage_403PermissionPreservesOriginal();
@@ -94,11 +97,13 @@ void TestNativeDocShortcutHandler::testParseShortcutFile_InvalidHeader() {
     QVERIFY(error.contains(QStringLiteral("header")));
 }
 
-void TestNativeDocShortcutHandler::testExtensionsAndMimeTypes_SameCount() {
-    // The extension list and MIME type list must stay in lock-step.
+void TestNativeDocShortcutHandler::testDesktopMetadata_SameCount() {
+    // The extension, MIME type, and icon lists must stay in lock-step.
     const QStringList exts = nativeDocShortcutExtensions();
     const QStringList mimes = nativeDocDesktopMimeTypes();
+    const QStringList icons = nativeDocDesktopIconNames();
     QCOMPARE(exts.size(), mimes.size());
+    QCOMPARE(exts.size(), icons.size());
 }
 
 void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllExtensions() {
@@ -118,6 +123,16 @@ void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllMimeTypes() {
     }
 }
 
+void TestNativeDocShortcutHandler::testMimePackageXml_ContainsAllIconDeclarations() {
+    const QString xml = nativeDocMimePackageXml();
+    for (const QString& iconName : nativeDocDesktopIconNames()) {
+        const QString iconDeclaration =
+            QStringLiteral("<icon name=\"") + iconName + QStringLiteral("\"/>");
+        QVERIFY2(xml.contains(iconDeclaration),
+                 qPrintable(QStringLiteral("MIME package XML missing icon ") + iconName));
+    }
+}
+
 void TestNativeDocShortcutHandler::testDesktopMimeTypes_AreDistinct() {
     const QStringList mimes = nativeDocDesktopMimeTypes();
     QSet<QString> unique(mimes.begin(), mimes.end());
@@ -129,6 +144,24 @@ void TestNativeDocShortcutHandler::testDesktopMimeTypes_MatchExpectedPrefix() {
     for (const QString& mime : nativeDocDesktopMimeTypes()) {
         QVERIFY2(mime.startsWith(QStringLiteral("application/x-via-")),
                  qPrintable(QStringLiteral("Unexpected MIME prefix: ") + mime));
+    }
+}
+
+void TestNativeDocShortcutHandler::testDesktopIconNames_AreDistinct() {
+    const QStringList iconNames = nativeDocDesktopIconNames();
+    QSet<QString> unique(iconNames.begin(), iconNames.end());
+    QCOMPARE(unique.size(), iconNames.size());
+}
+
+void TestNativeDocShortcutHandler::testDesktopIconNames_MatchMimeDerivedNames() {
+    const QStringList mimeTypes = nativeDocDesktopMimeTypes();
+    const QStringList iconNames = nativeDocDesktopIconNames();
+
+    QCOMPARE(mimeTypes.size(), iconNames.size());
+    for (int i = 0; i < mimeTypes.size(); ++i) {
+        QString derivedIconName = mimeTypes[i];
+        derivedIconName.replace(QLatin1Char('/'), QLatin1Char('-'));
+        QCOMPARE(iconNames[i], derivedIconName);
     }
 }
 

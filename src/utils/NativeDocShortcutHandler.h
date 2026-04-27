@@ -10,12 +10,21 @@
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
+#include <QTextStream>
 #include <QUrl>
+#include <array>
 #include <optional>
 
 struct NativeDocShortcutInfo {
     QUrl url;
     QString remoteMimeType;
+};
+
+struct NativeDocDesktopRegistration {
+    const char* extension;
+    const char* mimeType;
+    const char* iconName;
+    const char* comment;
 };
 
 inline QString nativeDocShortcutPathFromArgument(const QString& argument) {
@@ -30,19 +39,53 @@ inline QString nativeDocShortcutPathFromArgument(const QString& argument) {
     return QFileInfo(argument).absoluteFilePath();
 }
 
+inline const std::array<NativeDocDesktopRegistration, 5>& nativeDocDesktopRegistrations() {
+    static const std::array<NativeDocDesktopRegistration, 5> registrations{{
+        {"gdoc", "application/x-via-gdoc", "application-x-via-gdoc", "Via Google Docs shortcut"},
+        {"gsheet", "application/x-via-gsheet", "application-x-via-gsheet",
+         "Via Google Sheets shortcut"},
+        {"gslides", "application/x-via-gslides", "application-x-via-gslides",
+         "Via Google Slides shortcut"},
+        {"gdraw", "application/x-via-gdraw", "application-x-via-gdraw",
+         "Via Google Drawings shortcut"},
+        {"gdrive", "application/x-via-gdrive", "application-x-via-gdrive",
+         "Via Google Drive shortcut"},
+    }};
+
+    return registrations;
+}
+
 inline QStringList nativeDocShortcutExtensions() {
-    return {
-        QStringLiteral("gdoc"),  QStringLiteral("gsheet"), QStringLiteral("gslides"),
-        QStringLiteral("gdraw"), QStringLiteral("gdrive"),
-    };
+    QStringList extensions;
+    const auto& registrations = nativeDocDesktopRegistrations();
+    extensions.reserve(static_cast<qsizetype>(registrations.size()));
+    for (const auto& registration : registrations) {
+        extensions.append(QString::fromLatin1(registration.extension));
+    }
+
+    return extensions;
 }
 
 inline QStringList nativeDocDesktopMimeTypes() {
-    return {
-        QStringLiteral("application/x-via-gdoc"),    QStringLiteral("application/x-via-gsheet"),
-        QStringLiteral("application/x-via-gslides"), QStringLiteral("application/x-via-gdraw"),
-        QStringLiteral("application/x-via-gdrive"),
-    };
+    QStringList mimeTypes;
+    const auto& registrations = nativeDocDesktopRegistrations();
+    mimeTypes.reserve(static_cast<qsizetype>(registrations.size()));
+    for (const auto& registration : registrations) {
+        mimeTypes.append(QString::fromLatin1(registration.mimeType));
+    }
+
+    return mimeTypes;
+}
+
+inline QStringList nativeDocDesktopIconNames() {
+    QStringList iconNames;
+    const auto& registrations = nativeDocDesktopRegistrations();
+    iconNames.reserve(static_cast<qsizetype>(registrations.size()));
+    for (const auto& registration : registrations) {
+        iconNames.append(QString::fromLatin1(registration.iconName));
+    }
+
+    return iconNames;
 }
 
 inline QString nativeDocDesktopMimeTypesField() {
@@ -51,30 +94,21 @@ inline QString nativeDocDesktopMimeTypesField() {
 }
 
 inline QString nativeDocMimePackageXml() {
-    return QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
-<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/x-via-gdoc">
-    <comment>Via Google Docs shortcut</comment>
-    <glob pattern="*.gdoc"/>
-  </mime-type>
-  <mime-type type="application/x-via-gsheet">
-    <comment>Via Google Sheets shortcut</comment>
-    <glob pattern="*.gsheet"/>
-  </mime-type>
-  <mime-type type="application/x-via-gslides">
-    <comment>Via Google Slides shortcut</comment>
-    <glob pattern="*.gslides"/>
-  </mime-type>
-  <mime-type type="application/x-via-gdraw">
-    <comment>Via Google Drawings shortcut</comment>
-    <glob pattern="*.gdraw"/>
-  </mime-type>
-  <mime-type type="application/x-via-gdrive">
-    <comment>Via Google Drive shortcut</comment>
-    <glob pattern="*.gdrive"/>
-  </mime-type>
-</mime-info>
-)");
+    QString xml;
+    QTextStream out(&xml);
+    out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    out << "<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n";
+
+    for (const auto& registration : nativeDocDesktopRegistrations()) {
+        out << "  <mime-type type=\"" << registration.mimeType << "\">\n";
+        out << "    <comment>" << registration.comment << "</comment>\n";
+        out << "    <icon name=\"" << registration.iconName << "\"/>\n";
+        out << "    <glob pattern=\"*." << registration.extension << "\"/>\n";
+        out << "  </mime-type>\n";
+    }
+
+    out << "</mime-info>\n";
+    return xml;
 }
 
 inline bool isNativeDocShortcutPath(const QString& path) {
@@ -82,7 +116,8 @@ inline bool isNativeDocShortcutPath(const QString& path) {
     return nativeDocShortcutExtensions().contains(suffix);
 }
 
-inline bool isNativeDocShortcutArgument(const QString& argument, QString* resolvedPathOut = nullptr) {
+inline bool isNativeDocShortcutArgument(const QString& argument,
+                                        QString* resolvedPathOut = nullptr) {
     const QString resolvedPath = nativeDocShortcutPathFromArgument(argument);
     if (!isNativeDocShortcutPath(resolvedPath)) {
         return false;
@@ -104,13 +139,17 @@ inline bool isNativeDocExportLimitError(const QString& errorMsg, int httpStatus)
            lowered.contains(QStringLiteral("too large to be exported")) ||
            lowered.contains(QStringLiteral("too large to export")) ||
            (lowered.contains(QStringLiteral("export")) &&
-            (lowered.contains(QStringLiteral("limit")) || lowered.contains(QStringLiteral("maximum")) ||
-             lowered.contains(QStringLiteral("size")) || lowered.contains(QStringLiteral("too large"))));
+            (lowered.contains(QStringLiteral("limit")) ||
+             lowered.contains(QStringLiteral("maximum")) ||
+             lowered.contains(QStringLiteral("size")) ||
+             lowered.contains(QStringLiteral("too large"))));
 }
 
 inline QString nativeDocExportFailureMessage(const QString& errorMsg, int httpStatus) {
     if (isNativeDocExportLimitError(errorMsg, httpStatus)) {
-        return QStringLiteral("Google limits native doc exports to 10 MB. Open the document in your browser instead.");
+        return QStringLiteral(
+            "Google limits native doc exports to 10 MB. Open the document in your browser "
+            "instead.");
     }
 
     const QString trimmed = errorMsg.trimmed();
@@ -125,10 +164,11 @@ inline QString nativeDocExportFailureMessage(const QString& errorMsg, int httpSt
     return QStringLiteral("Native document export failed.");
 }
 
-inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(const QString& text,
-                                                                       QString* errorOut = nullptr) {
+inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(
+    const QString& text, QString* errorOut = nullptr) {
     const QStringList rawLines = text.split(QLatin1Char('\n'));
-    if (rawLines.isEmpty() || rawLines.first().trimmed() != QStringLiteral("[Via Native Document]")) {
+    if (rawLines.isEmpty() ||
+        rawLines.first().trimmed() != QStringLiteral("[Via Native Document]")) {
         if (errorOut) {
             *errorOut = QStringLiteral("missing Via native-doc header");
         }
@@ -167,8 +207,8 @@ inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(const QSt
     return info;
 }
 
-inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutFile(const QString& path,
-                                                                       QString* errorOut = nullptr) {
+inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutFile(
+    const QString& path, QString* errorOut = nullptr) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         if (errorOut) {

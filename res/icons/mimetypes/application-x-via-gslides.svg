@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 128 128">
+    <rect x="22"
+          y="12"
+          width="84"
+          height="104"
+          rx="16"
+          fill="#ffffff"
+          stroke="#fa7b17"
+          stroke-width="8" />
+    <path d="M78 12v26a10 10 0 0 0 10 10h18"
+          fill="#fee8d6" />
+    <path d="M78 12l28 36H88a10 10 0 0 1-10-10V12Z"
+          fill="#fbc28b" />
+    <rect x="34"
+          y="50"
+          width="60"
+          height="36"
+          rx="6"
+          fill="#fff1e0"
+          stroke="#fa7b17"
+          stroke-width="5" />
+    <rect x="42"
+          y="92"
+          width="44"
+          height="6"
+          rx="3"
+          fill="#fa7b17"
+          opacity="0.85" />
+    <path d="M56 58h16v20H56z"
+          fill="#fa7b17"
+          opacity="0.2" />
+    <path d="M58 60l16 10-16 10z"
+          fill="#fa7b17" />
+</svg>

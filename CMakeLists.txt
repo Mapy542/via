@@ -167,6 +167,15 @@ install(FILES res/icons/via.svg
     DESTINATION share/icons/hicolor/scalable/apps
 )
 
+install(FILES
+    res/icons/mimetypes/application-x-via-gdoc.svg
+    res/icons/mimetypes/application-x-via-gsheet.svg
+    res/icons/mimetypes/application-x-via-gslides.svg
+    res/icons/mimetypes/application-x-via-gdraw.svg
+    res/icons/mimetypes/application-x-via-gdrive.svg
+    DESTINATION share/icons/hicolor/scalable/mimetypes
+)
+
 # ==============================================================================
 # Testing Support (Qt Test + CTest)
 # ==============================================================================
@@ -235,6 +244,7 @@ if(BUILD_TESTS)
     add_qt_test(test_NativeDocShortcutHandler tests/fuse/TestNativeDocShortcutHandler.cpp)
 
     # UI tests
+    add_qt_test(test_AutostartManager tests/ui/TestAutostartManager.cpp)
     add_qt_test(test_UiStatusCoordinator tests/ui/TestUiStatusCoordinator.cpp)
     add_qt_test(test_UiStatusIntegration tests/ui/TestUiStatusIntegration.cpp)
 

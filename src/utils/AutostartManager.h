@@ -4,7 +4,7 @@
  *
  * Handles:
  * - Installing the .desktop file to ~/.local/share/applications/
- * - Installing the app icon to ~/.local/share/icons/hicolor/scalable/apps/
+ * - Installing the app and native-doc MIME icons to ~/.local/share/icons/hicolor/
  * - Writing/removing ~/.config/autostart/via.desktop for login autostart
  * - Syncing autostart state with QSettings on startup
  */
@@ -35,7 +35,7 @@ class AutostartManager {
      * @brief Install desktop integration files on first run
      *
      * Installs the .desktop file to ~/.local/share/applications/ and
-     * the app icon to ~/.local/share/icons/hicolor/scalable/apps/.
+     * the app and native-doc MIME icons to ~/.local/share/icons/hicolor/.
      * Also syncs the autostart entry with the current QSettings value.
      *
      * Safe to call every startup — only writes files if they are missing
@@ -46,13 +46,13 @@ class AutostartManager {
 
         const bool desktopUpdated = installDesktopFile(execPath);
         const bool mimeUpdated = installMimePackage();
-        installIcon();
+        const bool iconsUpdated = installThemeIcons();
 
         // Always refresh if files were written, then validate registration.
         // If validation fails (e.g. a previous refresh was silently lost),
         // retry the refresh once so Dolphin and other file managers resolve
         // our custom MIME types on this launch.
-        if (desktopUpdated || mimeUpdated) {
+        if (desktopUpdated || mimeUpdated || iconsUpdated) {
             refreshDesktopDatabases();
         }
 
@@ -327,6 +327,8 @@ class AutostartManager {
             }
         }
 
+        refreshIconThemeCache();
+
         // KDE/Plasma maintains its own service cache (sycoca). Without
         // rebuilding it, Dolphin may not pick up new MIME type associations
         // until the cache expires (~5 minutes) or the session restarts.
@@ -446,52 +448,155 @@ class AutostartManager {
               qPrintable(mimeappsPath));
     }
 
-    /**
-     * @brief Install the app icon to the user's icon theme
-     *
-     * Copies via.svg from the Qt resource system (embedded in the binary)
-     * or from alongside the executable to
-     * ~/.local/share/icons/hicolor/scalable/apps/via.svg
-     */
-    static void installIcon() {
-        QString iconsDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
-                           "/icons/hicolor/scalable/apps";
-
-        QString destPath = iconsDir + "/via.svg";
-        if (QFile::exists(destPath)) {
-            return;  // Already installed
+    static void refreshIconThemeCache() {
+        const QString hicolorDir =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+            "/icons/hicolor";
+        if (!QDir(hicolorDir).exists()) {
+            return;
         }
+
+        const QString gtkUpdateIconCache =
+            QStandardPaths::findExecutable(QStringLiteral("gtk-update-icon-cache"));
+        if (gtkUpdateIconCache.isEmpty()) {
+            return;
+        }
+
+        const int rc = QProcess::execute(
+            gtkUpdateIconCache,
+            {QStringLiteral("--force"), QStringLiteral("--ignore-theme-index"), hicolorDir});
+        if (rc != 0) {
+            qWarning("AutostartManager: gtk-update-icon-cache failed (%d)", rc);
+        }
+    }
+
+    static bool installThemeIcons() {
+        bool updated = false;
+        updated |= installThemeIcon(QStringLiteral("apps"), QStringLiteral("via.svg"));
+
+        for (const QString& iconName : nativeDocDesktopIconNames()) {
+            updated |=
+                installThemeIcon(QStringLiteral("mimetypes"), iconName + QStringLiteral(".svg"));
+        }
+
+        return updated;
+    }
+
+    static bool installThemeIcon(const QString& category, const QString& fileName) {
+        const QString iconsDir =
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+            "/icons/hicolor/scalable/" + category;
+        const QString destPath = iconsDir + "/" + fileName;
 
         QDir dir;
         if (!dir.mkpath(iconsDir)) {
             qWarning("AutostartManager: cannot create %s", qPrintable(iconsDir));
-            return;
+            return false;
         }
 
-        // Try to find the icon from the AppDir or the source tree
-        // When running as an AppImage, $APPDIR points to the mounted AppImage contents
-        QStringList searchPaths;
-        QByteArray appDirEnv = qgetenv("APPDIR");
-        if (!appDirEnv.isEmpty()) {
-            QString appDir = QString::fromUtf8(appDirEnv);
-            searchPaths << appDir + "/usr/share/icons/hicolor/scalable/apps/via.svg";
-            searchPaths << appDir + "/via.svg";
-        }
-        // Also try relative to the executable (for non-AppImage installs)
-        QString exeDir = QCoreApplication::applicationDirPath();
-        searchPaths << exeDir + "/../share/icons/hicolor/scalable/apps/via.svg";
-        searchPaths << exeDir + "/../../res/icons/via.svg";
+        const QStringList searchPaths = iconSearchPaths(category, fileName);
+        for (const QString& srcPath : searchPaths) {
+            if (!QFile::exists(srcPath)) {
+                continue;
+            }
 
-        for (const QString& src : searchPaths) {
-            if (QFile::exists(src)) {
-                if (QFile::copy(src, destPath)) {
-                    qInfo("AutostartManager: installed icon to %s", qPrintable(destPath));
-                    return;
+            bool changed = false;
+            if (copyFileReplacingIfChanged(srcPath, destPath, &changed)) {
+                if (changed) {
+                    qInfo("AutostartManager: installed %s icon to %s", qPrintable(fileName),
+                          qPrintable(destPath));
                 }
+                return changed;
+            }
+
+            qWarning("AutostartManager: failed to copy %s from %s to %s", qPrintable(fileName),
+                     qPrintable(srcPath), qPrintable(destPath));
+            return false;
+        }
+
+        qWarning("AutostartManager: could not find %s for %s icon install", qPrintable(fileName),
+                 qPrintable(category));
+        return false;
+    }
+
+    static bool copyFileReplacingIfChanged(const QString& sourcePath, const QString& destPath,
+                                           bool* changedOut = nullptr) {
+        if (changedOut) {
+            *changedOut = false;
+        }
+
+        QFile sourceFile(sourcePath);
+        if (!sourceFile.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        const QByteArray sourceContent = sourceFile.readAll();
+        sourceFile.close();
+
+        QFile existingFile(destPath);
+        if (existingFile.exists() && existingFile.open(QIODevice::ReadOnly)) {
+            const QByteArray existingContent = existingFile.readAll();
+            existingFile.close();
+            if (existingContent == sourceContent) {
+                return true;
             }
         }
 
-        qWarning("AutostartManager: could not find via.svg to install as icon");
+        if (QFile::exists(destPath) && !QFile::remove(destPath)) {
+            return false;
+        }
+
+        QFile destFile(destPath);
+        if (!destFile.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+
+        if (destFile.write(sourceContent) != sourceContent.size()) {
+            destFile.close();
+            return false;
+        }
+        destFile.close();
+
+        if (changedOut) {
+            *changedOut = true;
+        }
+        return true;
+    }
+
+    static QStringList iconSearchPaths(const QString& category, const QString& fileName) {
+        QStringList searchPaths;
+
+        const QByteArray appDirEnv = qgetenv("APPDIR");
+        if (!appDirEnv.isEmpty()) {
+            const QString appDir = QString::fromUtf8(appDirEnv);
+            searchPaths << appDir + "/usr/share/icons/hicolor/scalable/" + category + "/" +
+                               fileName;
+            if (category == QLatin1String("apps") && fileName == QLatin1String("via.svg")) {
+                searchPaths << appDir + "/via.svg";
+            }
+        }
+
+        QDir searchDir(QCoreApplication::applicationDirPath());
+        const QString sourceRelativePath =
+            category == QLatin1String("apps")
+                ? QStringLiteral("res/icons/") + fileName
+                : QStringLiteral("res/icons/") + category + QLatin1Char('/') + fileName;
+
+        for (int depth = 0; depth < 6; ++depth) {
+            searchPaths << searchDir.absoluteFilePath(
+                QStringLiteral("share/icons/hicolor/scalable/") + category + QLatin1Char('/') +
+                fileName);
+            searchPaths << searchDir.absoluteFilePath(
+                QStringLiteral("usr/share/icons/hicolor/scalable/") + category + QLatin1Char('/') +
+                fileName);
+            searchPaths << searchDir.absoluteFilePath(sourceRelativePath);
+
+            if (!searchDir.cdUp()) {
+                break;
+            }
+        }
+
+        searchPaths.removeDuplicates();
+        return searchPaths;
     }
 
     /**

@@ -457,9 +457,7 @@ void SettingsWindow::setupFuseTab() {
     nativeDocLayout->addWidget(new QLabel("Google-native docs:", m_fuseTab));
     m_nativeDocModeCombo = new QComboBox(m_fuseTab);
     m_nativeDocModeCombo->addItem("Hide (don't show in mount)", "hide");
-    m_nativeDocModeCombo->addItem(
-        "Browser shortcuts (.gdoc, ...)",
-        "browser-shortcut");  // TODO: Implement custom icons for these shortcuts
+    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, ...)", "browser-shortcut");
     m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, ...)", "open-document");
     m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
     m_nativeDocModeCombo->setEnabled(false);
