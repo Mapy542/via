@@ -150,6 +150,29 @@ set(RESOURCES
     res/resources.qrc
 )
 
+set(VIA_THEME_APP_ICON res/icons/via.svg)
+set(VIA_THEME_MIMETYPE_ICON_FILES
+    res/icons/mimetypes/application-x-via-gdoc.svg
+    res/icons/mimetypes/application-x-via-gsheet.svg
+    res/icons/mimetypes/application-x-via-gslides.svg
+    res/icons/mimetypes/application-x-via-gdraw.svg
+    res/icons/mimetypes/application-x-via-gdrive.svg
+)
+set(VIA_THEME_ICON_FILES
+    ${VIA_THEME_APP_ICON}
+    ${VIA_THEME_MIMETYPE_ICON_FILES}
+)
+
+foreach(icon_file IN LISTS VIA_THEME_ICON_FILES)
+    get_filename_component(icon_dir "${icon_file}" DIRECTORY)
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/${icon_dir}")
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/${icon_file}"
+        "${CMAKE_BINARY_DIR}/${icon_file}"
+        COPYONLY
+    )
+endforeach()
+
 # Create executable
 add_executable(${PROJECT_NAME}
     ${SOURCES}
@@ -197,16 +220,12 @@ install(FILES res/via-native-docs.xml
     DESTINATION share/mime/packages
 )
 
-install(FILES res/icons/via.svg
+install(FILES ${VIA_THEME_APP_ICON}
     DESTINATION share/icons/hicolor/scalable/apps
 )
 
 install(FILES
-    res/icons/mimetypes/application-x-via-gdoc.svg
-    res/icons/mimetypes/application-x-via-gsheet.svg
-    res/icons/mimetypes/application-x-via-gslides.svg
-    res/icons/mimetypes/application-x-via-gdraw.svg
-    res/icons/mimetypes/application-x-via-gdrive.svg
+    ${VIA_THEME_MIMETYPE_ICON_FILES}
     DESTINATION share/icons/hicolor/scalable/mimetypes
 )
 
