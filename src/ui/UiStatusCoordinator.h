@@ -65,7 +65,9 @@ class UiStatusCoordinator : public QObject {
     void onUploadStarted(const QString& fileId, const QString& path);
     void onUploadFinished(const QString& fileId, const QString& path);
     void onDirtyFilesFlushed(int count);
-    void onMetadataRefreshed();
+    void onMetadataRefreshStarted();
+    void onMetadataRefreshFinished();
+    void onMetadataRefreshFailed(const QString& error);
     void refreshMirrorStatus();
 
    private:
@@ -74,6 +76,7 @@ class UiStatusCoordinator : public QObject {
     void refreshMirrorStatusInternal();
     void setMirrorStatusInternal(const QString& status);
     void setFuseStatusInternal(const QString& status);
+    void clearFuseActivityState();
     UiStatusPriority effectivePriority() const;
     QString combinedStatusText() const;
     QString effectiveStatusText() const;
@@ -87,6 +90,7 @@ class UiStatusCoordinator : public QObject {
 
     int m_pendingActions = 0;
     int m_fuseActiveOps = 0;
+    bool m_metadataRefreshActive = false;
 
     bool m_authenticated = false;
     bool m_authExpired = false;

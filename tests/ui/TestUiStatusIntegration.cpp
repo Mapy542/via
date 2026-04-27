@@ -24,7 +24,7 @@ class TestUiStatusIntegration : public QObject {
     void cleanup();
 
     void testFuseUploadingStatusPropagatesToTrayAndWindow();
-    void testFuseOnlyStatusPropagatesWhenMirrorDisabled();
+    void testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled();
     void testAuthExpiredRecoveryPropagatesToTrayAndWindow();
 
    private:
@@ -97,16 +97,22 @@ void TestUiStatusIntegration::testFuseUploadingStatusPropagatesToTrayAndWindow()
     QTRY_COMPARE(traySummary(), expected);
 }
 
-void TestUiStatusIntegration::testFuseOnlyStatusPropagatesWhenMirrorDisabled() {
+void TestUiStatusIntegration::testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled() {
     UiStatusCoordinator coordinator(nullptr, nullptr, nullptr);
     SystemTrayManager tray(nullptr, nullptr, &coordinator);
     MainWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &coordinator, nullptr);
 
-    coordinator.updateFuseStatus(QStringLiteral("Refreshing metadata"));
+    coordinator.onMetadataRefreshStarted();
 
     QTRY_COMPARE(window.m_statusLabel->text(), QStringLiteral("Refreshing metadata"));
     QTRY_COMPARE(tray.m_statusAction->text(), QStringLiteral("Refreshing metadata"));
     QTRY_COMPARE(tray.trayIcon()->toolTip(), QStringLiteral("Via\nRefreshing metadata"));
+
+    coordinator.onMetadataRefreshFinished();
+
+    QTRY_COMPARE(window.m_statusLabel->text(), QStringLiteral("Mounted"));
+    QTRY_COMPARE(tray.m_statusAction->text(), QStringLiteral("Mounted"));
+    QTRY_COMPARE(tray.trayIcon()->toolTip(), QStringLiteral("Via\nMounted"));
 }
 
 void TestUiStatusIntegration::testAuthExpiredRecoveryPropagatesToTrayAndWindow() {

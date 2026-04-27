@@ -1111,12 +1111,11 @@ void FuseDriver::refreshMetadata() {
     }
 
     qDebug() << "FuseDriver: Refreshing metadata from remote";
+    emit metadataRefreshStarted();
 
     if (m_metadataRefreshWorker) {
         QMetaObject::invokeMethod(m_metadataRefreshWorker, "checkNow", Qt::QueuedConnection);
     }
-
-    emit metadataRefreshed();
 }
 
 void FuseDriver::flushDirtyFiles() {
@@ -2654,6 +2653,10 @@ void FuseDriver::startBackgroundWorkers() {
         // Relay path-aware remote change events for UI activity logging.
         connect(m_metadataRefreshWorker, &MetadataRefreshWorker::changeProcessedDetailed, this,
                 &FuseDriver::fuseRemoteChange);
+        connect(m_metadataRefreshWorker, &MetadataRefreshWorker::refreshCompleted, this,
+                [this](int) { emit metadataRefreshed(); });
+        connect(m_metadataRefreshWorker, &MetadataRefreshWorker::error, this,
+                &FuseDriver::metadataRefreshFailed);
 
         m_metadataRefreshThread->start();
     }

@@ -32,6 +32,7 @@
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
+#include "auth/WakeRefreshNotificationGate.h"
 #include "fuse/FileCache.h"
 #include "fuse/FuseDriver.h"
 #include "sync/ChangeProcessor.h"
@@ -517,17 +518,20 @@ int main(int argc, char* argv[]) {
 
     // Detect system suspend/resume and recover after wake
     SuspendMonitor suspendMonitor(&app);
+    WakeRefreshNotificationGate wakeRefreshNotificationGate;
+
     QObject::connect(
         &suspendMonitor, &SuspendMonitor::resumed, &app,
         [&authManager, &remoteWatcher, &localWatcher, &changeProcessor, &syncActionThread,
          &fullSync, &fullSyncLocalTimer, &fuseDriver, &trayManager, &notificationManager,
-         &statusCoordinator, mirrorEnabled, fuseEnabled]() {
+         &statusCoordinator, &wakeRefreshNotificationGate, mirrorEnabled, fuseEnabled]() {
             qInfo() << "Resume handler: refreshing auth and restarting components";
             statusCoordinator.updateMirrorStatus("Recovering from sleep...");
 
             // 1. Force a token refresh — connections are likely stale and the
             //    access token may have expired while the machine was asleep.
             if (!authManager.refreshToken().isEmpty()) {
+                wakeRefreshNotificationGate.beginWakeRefreshAttempt();
                 authManager.refreshTokens();
             }
 
@@ -787,8 +791,12 @@ int main(int argc, char* argv[]) {
                          });
         QObject::connect(&fuseDriver, &FuseDriver::dirtyFilesFlushed, &statusCoordinator,
                          &UiStatusCoordinator::onDirtyFilesFlushed);
+        QObject::connect(&fuseDriver, &FuseDriver::metadataRefreshStarted, &statusCoordinator,
+                         &UiStatusCoordinator::onMetadataRefreshStarted);
         QObject::connect(&fuseDriver, &FuseDriver::metadataRefreshed, &statusCoordinator,
-                         &UiStatusCoordinator::onMetadataRefreshed);
+                         &UiStatusCoordinator::onMetadataRefreshFinished);
+        QObject::connect(&fuseDriver, &FuseDriver::metadataRefreshFailed, &statusCoordinator,
+                         &UiStatusCoordinator::onMetadataRefreshFailed);
         QObject::connect(&fuseDriver, &FuseDriver::downloadStarted, &statusCoordinator,
                          &UiStatusCoordinator::onDownloadStarted);
         QObject::connect(&fuseDriver, &FuseDriver::downloadFinished, &statusCoordinator,
@@ -944,21 +952,36 @@ int main(int argc, char* argv[]) {
         });
 
     QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &app,
-                     [&refreshInFlight]() { refreshInFlight = false; });
-
-    QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshError, &app,
-                     [&refreshInFlight, &notificationManager, &mainWindow](const QString& error) {
+                     [&refreshInFlight, &wakeRefreshNotificationGate]() {
                          refreshInFlight = false;
-                         mainWindow.addRecentActivity("Token refresh error: " + error);
-                         notificationManager.showWarning("Authentication Warning", error);
+                         wakeRefreshNotificationGate.markTokenRefreshed();
                      });
+
+    QObject::connect(
+        &authManager, &GoogleAuthManager::tokenRefreshError, &app,
+        [&refreshInFlight, &notificationManager, &mainWindow,
+         &wakeRefreshNotificationGate](const QString& error) {
+            refreshInFlight = false;
+
+            const bool wakeAuthExpired = wakeRefreshNotificationGate.sawWakeAuthExpired();
+            if (wakeRefreshNotificationGate.consumeTokenRefreshWarningSuppression()) {
+                qWarning() << "Resume handler: suppressed wake token refresh warning"
+                           << (wakeAuthExpired ? "after auth expiration:" : ":") << error;
+                return;
+            }
+
+            mainWindow.addRecentActivity("Token refresh error: " + error);
+            notificationManager.showWarning("Authentication Warning", error);
+        });
 
     QObject::connect(
         &authManager, &GoogleAuthManager::authExpired, &app,
         [&refreshInFlight, &localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread,
          &fullSync, &fullSyncLocalTimer, &trayManager, &mainWindow, &notificationManager,
-         &statusCoordinator, &fuseDriver](const QString& reason) {
+         &statusCoordinator, &fuseDriver, &wakeRefreshNotificationGate,
+         &app](const QString& reason) {
             refreshInFlight = false;
+            wakeRefreshNotificationGate.markAuthExpired();
             fullSync.cancel();
             fullSyncLocalTimer.stop();
             stopFuseComponent(&fuseDriver);
@@ -973,6 +996,12 @@ int main(int argc, char* argv[]) {
             notificationManager.showWarning(
                 "Authentication Expired",
                 "Session expired. Re-authentication is required to resume sync.");
+
+            QTimer::singleShot(0, &app, [&wakeRefreshNotificationGate]() {
+                if (wakeRefreshNotificationGate.sawWakeAuthExpired()) {
+                    wakeRefreshNotificationGate.reset();
+                }
+            });
         });
 
     // Auto-login if tokens are available - check after connections are established

@@ -173,9 +173,9 @@ void UiStatusCoordinator::updateMirrorStatus(const QString& status) {
 void UiStatusCoordinator::updateFuseStatus(const QString& status) {
     const UiStatusSnapshot before = snapshot();
 
-    if (status.compare(QStringLiteral("Idle"), Qt::CaseInsensitive) == 0) {
-        m_fuseActiveOps = 0;
-        m_fuseIdleTimer->stop();
+    if (status.compare(QStringLiteral("Idle"), Qt::CaseInsensitive) == 0 ||
+        status.compare(QStringLiteral("Mounted"), Qt::CaseInsensitive) == 0) {
+        clearFuseActivityState();
     }
 
     setFuseStatusInternal(status);
@@ -197,11 +197,8 @@ void UiStatusCoordinator::updateAuthState(bool authenticated) {
         if (m_changeProcessor) {
             setMirrorStatusInternal(QStringLiteral("Not connected"));
         }
-        m_fuseActiveOps = 0;
-        m_fuseIdleTimer->stop();
-        if (isMeaningfulStatus(m_fuseStatusText)) {
-            setFuseStatusInternal(QStringLiteral("Idle"));
-        }
+        clearFuseActivityState();
+        setFuseStatusInternal(QStringLiteral("Idle"));
     }
 
     recalcGlobalPriority();
@@ -219,6 +216,8 @@ void UiStatusCoordinator::setAuthExpired(const QString& reason) {
     m_authExpiredReason = reason;
     m_mirrorOverrideStatus = QStringLiteral("Authentication expired");
     setMirrorStatusInternal(m_mirrorOverrideStatus);
+    clearFuseActivityState();
+    setFuseStatusInternal(QStringLiteral("Idle"));
     recalcGlobalPriority();
 
     emitIfChanged(before);
@@ -296,9 +295,37 @@ void UiStatusCoordinator::onDirtyFilesFlushed(int count) {
     }
 }
 
-void UiStatusCoordinator::onMetadataRefreshed() {  // TODO: fix when this renders. Stuck on
-                                                   // post-wake-from-sleep
-    updateFuseStatus(QStringLiteral("Refreshing metadata"));
+void UiStatusCoordinator::onMetadataRefreshStarted() {
+    const UiStatusSnapshot before = snapshot();
+
+    if (!m_metadataRefreshActive) {
+        m_metadataRefreshActive = true;
+        ++m_fuseActiveOps;
+    }
+
+    m_fuseIdleTimer->stop();
+    setFuseStatusInternal(QStringLiteral("Refreshing metadata"));
+    emitIfChanged(before);
+}
+
+void UiStatusCoordinator::onMetadataRefreshFinished() {
+    const UiStatusSnapshot before = snapshot();
+
+    if (m_metadataRefreshActive) {
+        m_metadataRefreshActive = false;
+        m_fuseActiveOps = std::max(0, m_fuseActiveOps - 1);
+        if (m_fuseActiveOps == 0) {
+            m_fuseIdleTimer->start();
+        }
+    }
+
+    emitIfChanged(before);
+}
+
+void UiStatusCoordinator::onMetadataRefreshFailed(const QString& error) {
+    Q_UNUSED(error)
+
+    onMetadataRefreshFinished();
 }
 
 void UiStatusCoordinator::refreshMirrorStatus() {
@@ -375,6 +402,12 @@ void UiStatusCoordinator::setMirrorStatusInternal(const QString& status) {
 void UiStatusCoordinator::setFuseStatusInternal(const QString& status) {
     m_fuseStatusText = status;
     m_fusePriority = priorityFromStatusText(status);
+}
+
+void UiStatusCoordinator::clearFuseActivityState() {
+    m_fuseActiveOps = 0;
+    m_metadataRefreshActive = false;
+    m_fuseIdleTimer->stop();
 }
 
 UiStatusPriority UiStatusCoordinator::effectivePriority() const {

@@ -411,9 +411,20 @@ class FuseDriver : public QObject {
     void fileModified(const QString& path);
 
     /**
+     * @brief Emitted when metadata refresh starts
+     */
+    void metadataRefreshStarted();
+
+    /**
      * @brief Emitted when metadata refresh completes
      */
     void metadataRefreshed();
+
+    /**
+     * @brief Emitted when metadata refresh fails
+     * @param error Error message
+     */
+    void metadataRefreshFailed(const QString& error);
 
     /**
      * @brief Emitted when dirty files are flushed

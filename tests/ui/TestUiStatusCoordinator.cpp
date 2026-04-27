@@ -18,6 +18,9 @@ class TestUiStatusCoordinator : public QObject {
     void cleanup();
 
     void testFuseStatusSurvivesMirrorRefresh();
+    void testMetadataRefreshLifecycleReturnsToMounted();
+    void testMetadataRefreshFailureReturnsToMounted();
+    void testMetadataRefreshClearsOnLogoutAndAuthExpired();
     void testStickyMirrorStatusSurvivesRefresh();
     void testLoggedOutAndAuthExpiredStayDistinct();
 
@@ -66,6 +69,55 @@ void TestUiStatusCoordinator::testFuseStatusSurvivesMirrorRefresh() {
     status = m_coordinator->snapshot();
     QCOMPARE(status.fuseStatusText, QStringLiteral("Uploading..."));
     QVERIFY(status.combinedStatusText.contains(QStringLiteral("Uploading...")));
+}
+
+void TestUiStatusCoordinator::testMetadataRefreshLifecycleReturnsToMounted() {
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+
+    m_coordinator->onMetadataRefreshStarted();
+
+    UiStatusSnapshot status = m_coordinator->snapshot();
+    QCOMPARE(status.fuseStatusText, QStringLiteral("Refreshing metadata"));
+    QCOMPARE(static_cast<int>(status.resolvedPriority),
+             static_cast<int>(UiStatusPriority::Syncing));
+
+    m_coordinator->onMetadataRefreshFinished();
+
+    QTRY_COMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Mounted"));
+}
+
+void TestUiStatusCoordinator::testMetadataRefreshFailureReturnsToMounted() {
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+
+    m_coordinator->onMetadataRefreshStarted();
+    m_coordinator->onMetadataRefreshFailed(QStringLiteral("network unavailable"));
+
+    QTRY_COMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Mounted"));
+}
+
+void TestUiStatusCoordinator::testMetadataRefreshClearsOnLogoutAndAuthExpired() {
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+
+    m_coordinator->onMetadataRefreshStarted();
+    QCOMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Refreshing metadata"));
+
+    m_coordinator->updateAuthState(false);
+
+    UiStatusSnapshot status = m_coordinator->snapshot();
+    QCOMPARE(status.fuseStatusText, QStringLiteral("Idle"));
+    QCOMPARE(status.combinedStatusText, QStringLiteral("Not connected"));
+
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+    m_coordinator->onMetadataRefreshStarted();
+    m_coordinator->setAuthExpired(QStringLiteral("refresh token revoked"));
+
+    status = m_coordinator->snapshot();
+    QCOMPARE(status.fuseStatusText, QStringLiteral("Idle"));
+    QVERIFY(status.combinedStatusText.contains(QStringLiteral("Authentication expired")));
 }
 
 void TestUiStatusCoordinator::testStickyMirrorStatusSurvivesRefresh() {

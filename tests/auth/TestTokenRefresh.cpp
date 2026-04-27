@@ -19,6 +19,7 @@
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
+#include "auth/WakeRefreshNotificationGate.h"
 
 // ===========================================================================
 //  Fake TokenStorage — stores everything in-memory, no disk I/O
@@ -30,7 +31,8 @@ class FakeTokenStorage : public TokenStorage {
 
     // We rely on a real TokenStorage for encode/decode but override save/get
     // to keep everything in-memory.
-    void saveTokens(const QString& accessToken, const QString& refreshToken, const QDateTime& expiry) {
+    void saveTokens(const QString& accessToken, const QString& refreshToken,
+                    const QDateTime& expiry) {
         m_access = accessToken;
         m_refresh = refreshToken;
         m_expiry = expiry;
@@ -39,7 +41,9 @@ class FakeTokenStorage : public TokenStorage {
     QString getRefreshToken() const { return m_refresh; }
     QDateTime getTokenExpiry() const { return m_expiry; }
     bool hasValidTokens() const { return !m_refresh.isEmpty(); }
-    bool isTokenExpired() const { return m_expiry.isValid() && m_expiry <= QDateTime::currentDateTimeUtc(); }
+    bool isTokenExpired() const {
+        return m_expiry.isValid() && m_expiry <= QDateTime::currentDateTimeUtc();
+    }
     void clearTokens() {
         m_access.clear();
         m_refresh.clear();
@@ -70,7 +74,8 @@ class FakeTokenStorage : public TokenStorage {
 class TestableAuthManager : public GoogleAuthManager {
     Q_OBJECT
    public:
-    explicit TestableAuthManager(TokenStorage* ts, QObject* parent = nullptr) : GoogleAuthManager(ts, parent) {}
+    explicit TestableAuthManager(TokenStorage* ts, QObject* parent = nullptr)
+        : GoogleAuthManager(ts, parent) {}
 
     // --- Intercept refreshTokens so the test controls the outcome --------
     int refreshCallCount = 0;
@@ -83,13 +88,16 @@ class TestableAuthManager : public GoogleAuthManager {
 
     /// Simulate a successful token refresh (emits the same signals as the
     /// real implementation after it receives a new access_token from Google).
-    void simulateRefreshSuccess(const QString& newToken = "new-access-token", int expiresInSecs = 3600) {
+    void simulateRefreshSuccess(const QString& newToken = "new-access-token",
+                                int expiresInSecs = 3600) {
         // Replicate what the real refreshTokens() completion handler does:
         setTokensDirectly(newToken, expiresInSecs);
         emit tokenRefreshed();
     }
 
-    void simulateRefreshFailure(const QString& msg = "simulated failure") { emit tokenRefreshError(msg); }
+    void simulateRefreshFailure(const QString& msg = "simulated failure") {
+        emit tokenRefreshError(msg);
+    }
 
     // --- Direct setters so tests can put the object into any state --------
     void setTokensDirectly(const QString& accessToken, int expiresInSecs) {
@@ -106,7 +114,8 @@ class TestableAuthManager : public GoogleAuthManager {
         m_fakeAuthenticated = true;
     }
 
-    void setExpiredTokenDirectly(const QString& accessToken = "expired-token", int secondsAgo = 3600) {
+    void setExpiredTokenDirectly(const QString& accessToken = "expired-token",
+                                 int secondsAgo = 3600) {
         m_fakeAccessToken = accessToken;
         m_fakeExpiry = QDateTime::currentDateTimeUtc().addSecs(-secondsAgo);
         m_fakeAuthenticated = true;
@@ -207,6 +216,9 @@ class TestTokenRefresh : public QObject {
 
     // Suspend / resume end-to-end simulation
     void testSuspendResumeTokenRefreshFlow();
+    void testWakeRefreshWarningGateSuppressesWakeOnlyError();
+    void testWakeRefreshWarningGateClearsAfterSuccess();
+    void testWakeRefreshWarningGateDeduplicatesAuthExpiredThenError();
 
    private:
     TestableAuthManager* m_authManager = nullptr;
@@ -285,7 +297,9 @@ void TestTokenRefresh::testEnsureValidToken_TriggersRefresh() {
     m_authManager->refreshCallCount = 0;
 
     // Schedule a deferred "successful refresh" so the event loop unblocks
-    QTimer::singleShot(50, m_authManager, [this]() { m_authManager->simulateRefreshSuccess("brand-new-token", 3600); });
+    QTimer::singleShot(50, m_authManager, [this]() {
+        m_authManager->simulateRefreshSuccess("brand-new-token", 3600);
+    });
 
     bool ok = m_authManager->ensureValidToken(5000);
     QVERIFY(ok);
@@ -345,7 +359,6 @@ void TestTokenRefresh::testAuthFailureSuppressesErrorSignal() {
 void TestTokenRefresh::testNonAuthFailureEmitsErrorSignal() {
     m_authManager->setTokensDirectly("good-token", 3600);
     m_authManager->setRefreshTokenDirectly("refresh");
-
     FakeDriveClientForAuth driveClient(m_authManager);
 
     QSignalSpy errorSpy(&driveClient, &GoogleDriveClient::error);
@@ -362,6 +375,35 @@ void TestTokenRefresh::testNonAuthFailureEmitsErrorSignal() {
     QCOMPARE(errorSpy.count(), 1);          // error() MUST fire for non-auth
     QCOMPARE(errorDetailedSpy.count(), 1);  // errorDetailed MUST fire
     QCOMPARE(authFailureSpy.count(), 0);    // authenticationFailure must NOT fire
+}
+
+void TestTokenRefresh::testWakeRefreshWarningGateSuppressesWakeOnlyError() {
+    WakeRefreshNotificationGate gate;
+
+    gate.beginWakeRefreshAttempt();
+
+    QVERIFY(gate.consumeTokenRefreshWarningSuppression());
+    QVERIFY(!gate.consumeTokenRefreshWarningSuppression());
+}
+
+void TestTokenRefresh::testWakeRefreshWarningGateClearsAfterSuccess() {
+    WakeRefreshNotificationGate gate;
+
+    gate.beginWakeRefreshAttempt();
+    gate.markTokenRefreshed();
+
+    QVERIFY(!gate.consumeTokenRefreshWarningSuppression());
+}
+
+void TestTokenRefresh::testWakeRefreshWarningGateDeduplicatesAuthExpiredThenError() {
+    WakeRefreshNotificationGate gate;
+
+    gate.beginWakeRefreshAttempt();
+    gate.markAuthExpired();
+
+    QVERIFY(gate.sawWakeAuthExpired());
+    QVERIFY(gate.consumeTokenRefreshWarningSuppression());
+    QVERIFY(!gate.consumeTokenRefreshWarningSuppression());
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +427,8 @@ void TestTokenRefresh::testSuspendResumeTokenRefreshFlow() {
     m_authManager->refreshCallCount = 0;
 
     // Schedule a deferred "successful refresh" to unblock the event loop
-    QTimer::singleShot(50, m_authManager, [this]() { m_authManager->simulateRefreshSuccess("resumed-token", 3600); });
+    QTimer::singleShot(50, m_authManager,
+                       [this]() { m_authManager->simulateRefreshSuccess("resumed-token", 3600); });
 
     bool ok = m_authManager->ensureValidToken(5000);
 
