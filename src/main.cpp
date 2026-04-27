@@ -6,9 +6,6 @@
  * a Google Drive desktop client for Linux.
  */
 
-// TODO: Make sure internal application version matches release version in app images, (and build
-// from source CMAKE? two sources of truth)
-
 // TODO: Feature: Detect if system is operating on power saver/metered network and automatically
 // pause sync and show notification
 #include <QApplication>
@@ -29,6 +26,7 @@
 #include <QTimer>
 #include <memory>
 
+#include "ViaVersion.h"
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
@@ -239,7 +237,7 @@ int main(int argc, char* argv[]) {
     // Set application metadata
     app.setApplicationName("Via");
     app.setApplicationDisplayName("Via");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationVersion(QStringLiteral(VIA_APP_VERSION));
     app.setOrganizationName("Via");
     app.setOrganizationDomain("via.local");
 

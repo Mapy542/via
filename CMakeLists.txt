@@ -1,10 +1,43 @@
 cmake_minimum_required(VERSION 3.20)
 
+set(VIA_VERSION_FILE "${CMAKE_CURRENT_LIST_DIR}/VERSION")
+if(NOT EXISTS "${VIA_VERSION_FILE}")
+    message(FATAL_ERROR "Missing VERSION file at ${VIA_VERSION_FILE}")
+endif()
+
+file(STRINGS "${VIA_VERSION_FILE}" VIA_CHECKED_IN_VERSION LIMIT_COUNT 1)
+string(STRIP "${VIA_CHECKED_IN_VERSION}" VIA_CHECKED_IN_VERSION)
+
+set(VIA_VERSION_OVERRIDE "" CACHE STRING "Override Via application version for one-off builds")
+
+if(VIA_VERSION_OVERRIDE)
+    string(STRIP "${VIA_VERSION_OVERRIDE}" VIA_RESOLVED_VERSION)
+else()
+    set(VIA_RESOLVED_VERSION "${VIA_CHECKED_IN_VERSION}")
+endif()
+
+if(VIA_RESOLVED_VERSION STREQUAL "")
+    message(FATAL_ERROR "Via version cannot be empty")
+endif()
+
+if(NOT VIA_RESOLVED_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$")
+    message(FATAL_ERROR
+        "Via version '${VIA_RESOLVED_VERSION}' is invalid. Expected 3 or 4 numeric components."
+    )
+endif()
+
 project(via
-    VERSION 1.0.0
+    VERSION ${VIA_RESOLVED_VERSION}
     DESCRIPTION "Google Drive Desktop Client for Linux"
     LANGUAGES CXX
 )
+
+set(VIA_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${VIA_GENERATED_DIR}")
+file(GENERATE OUTPUT "${VIA_GENERATED_DIR}/ViaVersion.h"
+    CONTENT "#pragma once\n#define VIA_APP_VERSION \"${PROJECT_VERSION}\"\n"
+)
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/via-version.txt" CONTENT "${PROJECT_VERSION}\n")
 
 # C++20 Standard
 set(CMAKE_CXX_STANDARD 20)
@@ -141,6 +174,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${VIA_GENERATED_DIR}
 )
 
 # Compiler warnings
@@ -207,6 +241,7 @@ if(BUILD_TESTS)
     )
     target_include_directories(via_testable PUBLIC
         ${CMAKE_SOURCE_DIR}/src
+        ${VIA_GENERATED_DIR}
     )
     target_compile_options(via_testable PRIVATE -Wall -Wextra)
 

@@ -7,19 +7,56 @@ on:
     workflow_dispatch:
         inputs:
             version:
-                description: 'Release version label (e.g. v0.1.0)'
+                description: 'Release tag or version (e.g. v0.1.0 or 0.1.0)'
                 required: true
                 type: string
 
 env:
-    RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
     FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
     contents: write # Required for creating releases
 
 jobs:
+    validate:
+        runs-on: ubuntu-latest
+        outputs:
+            release_tag: ${{ steps.version.outputs.release_tag }}
+            resolved_version: ${{ steps.version.outputs.resolved_version }}
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Validate checked-in version against release ref
+              id: version
+              env:
+                  RELEASE_REF: ${{ inputs.version || github.ref_name }}
+              run: |
+                  set -euo pipefail
+
+                  if [[ -z "${RELEASE_REF}" ]]; then
+                      echo "Release ref is empty" >&2
+                      exit 1
+                  fi
+
+                  checked_in_version="$(tr -d '[:space:]' < VERSION)"
+                  if [[ -z "${checked_in_version}" ]]; then
+                      echo "VERSION is empty" >&2
+                      exit 1
+                  fi
+
+                  release_version="${RELEASE_REF#v}"
+                  if [[ "${release_version}" != "${checked_in_version}" ]]; then
+                      echo "Release ref ${RELEASE_REF} does not match checked-in version ${checked_in_version}" >&2
+                      exit 1
+                  fi
+
+                  printf 'release_tag=v%s\n' "${release_version}" >> "$GITHUB_OUTPUT"
+                  printf 'resolved_version=%s\n' "${checked_in_version}" >> "$GITHUB_OUTPUT"
+
     build:
+        needs: validate
         strategy:
             matrix:
                 include:
@@ -42,9 +79,12 @@ jobs:
             runner: ${{ matrix.runner }}
             qt_host: ${{ matrix.qt_host }}
             qt_arch: ${{ matrix.qt_arch }}
+            version_override: ${{ needs.validate.outputs.resolved_version }}
 
     package:
-        needs: build
+        needs:
+            - validate
+            - build
         strategy:
             matrix:
                 include:
@@ -103,6 +143,26 @@ jobs:
                   name: ${{ matrix.artifact_name }}
                   path: build/
 
+            - name: Read resolved version
+              id: version
+              env:
+                  EXPECTED_VERSION: ${{ needs.validate.outputs.resolved_version }}
+              run: |
+                  set -euo pipefail
+
+                  resolved_version="$(tr -d '[:space:]' < build/via-version.txt)"
+                  if [[ -z "${resolved_version}" ]]; then
+                    echo "build/via-version.txt is empty" >&2
+                    exit 1
+                  fi
+
+                  if [[ "${resolved_version}" != "${EXPECTED_VERSION}" ]]; then
+                    echo "Build artifact version ${resolved_version} does not match validated version ${EXPECTED_VERSION}" >&2
+                    exit 1
+                  fi
+
+                  printf 'resolved_version=%s\n' "${resolved_version}" >> "$GITHUB_OUTPUT"
+
             - name: Install linuxdeploy
               run: |
                   wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.linuxdeploy_arch }}.AppImage
@@ -135,13 +195,13 @@ jobs:
 
             - name: Rename AppImage
               run: |
-                  mv Via*.AppImage Via-${{ env.RELEASE_VERSION }}-${{ matrix.arch }}.AppImage
+                  mv Via*.AppImage Via-${{ steps.version.outputs.resolved_version }}-${{ matrix.arch }}.AppImage
 
             - name: Create Release
               uses: softprops/action-gh-release@v1
               with:
-                  tag_name: ${{ env.RELEASE_VERSION }}
-                  name: Via ${{ env.RELEASE_VERSION }}
+                  tag_name: ${{ needs.validate.outputs.release_tag }}
+                  name: Via ${{ steps.version.outputs.resolved_version }}
                   files: Via-*.AppImage
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

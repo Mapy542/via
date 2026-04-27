@@ -10,7 +10,7 @@
 #   - A working C++ compiler and CMake
 #
 # Output:
-#   Via-x86_64.AppImage in the project root
+#   Via-<version>-<arch>.AppImage in the project root
 # ==============================================================================
 
 set -euo pipefail
@@ -58,6 +58,18 @@ download_tool() {
     chmod +x "${dest}"
 }
 
+read_resolved_version() {
+    local build_dir="$1"
+    local version_file="${build_dir}/via-version.txt"
+
+    if [[ ! -f "${version_file}" ]]; then
+        error "Resolved version file not found at ${version_file}"
+        exit 1
+    fi
+
+    tr -d '[:space:]' < "${version_file}"
+}
+
 # --- Preflight checks --------------------------------------------------------
 
 check_command cmake
@@ -72,11 +84,23 @@ download_tool "${LINUXDEPLOY_QT_URL}" "${LINUXDEPLOY_QT}"
 # --- Build --------------------------------------------------------------------
 
 info "Configuring Release build..."
-cmake -B "${BUILD_DIR}" \
-    -S "${PROJECT_DIR}" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/usr \
+cmake_args=(
+    -B "${BUILD_DIR}"
+    -S "${PROJECT_DIR}"
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX=/usr
     -DBUILD_TESTS=OFF
+)
+
+if [[ -n "${VIA_VERSION_OVERRIDE:-}" ]]; then
+    cmake_args+=("-DVIA_VERSION_OVERRIDE=${VIA_VERSION_OVERRIDE}")
+fi
+
+cmake "${cmake_args[@]}"
+
+APP_VERSION="$(read_resolved_version "${BUILD_DIR}")"
+APPIMAGE_ARCH="$(uname -m)"
+TARGET_APPIMAGE="Via-${APP_VERSION}-${APPIMAGE_ARCH}.AppImage"
 
 info "Building..."
 cmake --build "${BUILD_DIR}" --parallel
@@ -127,16 +151,22 @@ export EXTRA_QT_PLUGINS="svg;"
 export APPIMAGE_EXTRACT_AND_RUN=1
 
 cd "${PROJECT_DIR}"
+rm -f "${TARGET_APPIMAGE}"
 
 "${LINUXDEPLOY}" \
     --appdir "${APPDIR}" \
     --plugin qt \
     --output appimage
 
-# Rename to a consistent name
-GENERATED=$(ls -1t Via*.AppImage 2>/dev/null | head -n1)
-if [[ -n "${GENERATED}" && "${GENERATED}" != "Via-x86_64.AppImage" ]]; then
-    mv "${GENERATED}" "Via-x86_64.AppImage"
+# Rename to the resolved versioned name
+GENERATED="$(find . -maxdepth 1 -type f -name 'Via*.AppImage' -printf '%T@ %f\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+if [[ -z "${GENERATED}" ]]; then
+    error "linuxdeploy did not produce an AppImage"
+    exit 1
 fi
 
-info "Done! AppImage created: ${PROJECT_DIR}/Via-x86_64.AppImage"
+if [[ "${GENERATED}" != "${TARGET_APPIMAGE}" ]]; then
+    mv "${GENERATED}" "${TARGET_APPIMAGE}"
+fi
+
+info "Done! AppImage created: ${PROJECT_DIR}/${TARGET_APPIMAGE}"

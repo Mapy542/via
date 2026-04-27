@@ -25,6 +25,7 @@ Or use the VS Code tasks (Ctrl+Shift+B for the default build).
 ```
 via/
 ├── CMakeLists.txt              # Top-level build configuration
+├── VERSION                     # Checked-in application/release version
 ├── CTestCustom.cmake           # CTest output settings (disables truncation)
 ├── scripts/
 │   └── make-appimage.sh        # Local AppImage builder
@@ -170,16 +171,27 @@ Via uses four primary threads. Understanding which thread owns which data is cri
 
 ### CMake Configuration
 
-| Option             | Default | Effect                                    |
-| ------------------ | ------- | ----------------------------------------- |
-| `CMAKE_BUILD_TYPE` | —       | `Debug` (dev) or `Release` (distribution) |
-| `BUILD_TESTS`      | `ON`    | Builds unit tests and enables CTest       |
+| Option                 | Default | Effect                                                 |
+| ---------------------- | ------- | ------------------------------------------------------ |
+| `CMAKE_BUILD_TYPE`     | —       | `Debug` (dev) or `Release` (distribution)              |
+| `BUILD_TESTS`          | `ON`    | Builds unit tests and enables CTest                    |
+| `VIA_VERSION_OVERRIDE` | empty   | Optional one-off override for the resolved app version |
 
 The build produces:
 
 - `build/via` — main application binary
 - `build/test_*` — individual test executables (one per test file)
 - `build/compile_commands.json` — for IDE/clangd integration
+- `build/via-version.txt` — resolved version used by the binary and packaging
+
+### Version Source
+
+`VERSION` at the repository root is the authoritative checked-in version for runtime metadata, update checks, and release packaging.
+
+- CMake reads `VERSION` before `project(...)` and uses it as `PROJECT_VERSION`
+- The resolved version is written to `build/via-version.txt` and injected into the binary via `build/generated/ViaVersion.h`
+- Normal local builds need no extra flags
+- `-DVIA_VERSION_OVERRIDE=<x.y.z>` is available for one-off source builds and CI experiments, but releases should update `VERSION` in a normal commit instead of overriding it in the workflow
 
 ### CMake Conventions
 
@@ -369,11 +381,11 @@ void TestMyClass::testConcurrentAccess() {
 
 ### Workflows (`.github/workflows/`)
 
-| Workflow            | Trigger                                 | Purpose                                                       |
-| ------------------- | --------------------------------------- | ------------------------------------------------------------- |
-| `build.yml`         | Push to `main`/`develop`, PRs to `main` | Build the project on Ubuntu with Qt 6.7.3                     |
-| `release.yml`       | Push `v*` tag                           | Build release binary, create AppImage, publish GitHub Release |
-| `todo-to-issue.yml` | —                                       | Converts `TODO` comments to GitHub issues                     |
+| Workflow            | Trigger                                 | Purpose                                                                                    |
+| ------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `build.yml`         | Push to `main`/`develop`, PRs to `main` | Build the project on Ubuntu with Qt 6.7.3                                                  |
+| `release.yml`       | Push `v*` tag                           | Validate tag vs `VERSION`, build release binary, package AppImages, publish GitHub Release |
+| `todo-to-issue.yml` | —                                       | Converts `TODO` comments to GitHub issues                                                  |
 
 ### CI Qt Version
 
@@ -409,13 +421,30 @@ This script:
 2. Runs a Release CMake build into `build-appimage/`
 3. Installs to an AppDir structure
 4. Runs `linuxdeploy --plugin qt` to bundle all Qt libraries/plugins
-5. Outputs `Via-x86_64.AppImage` in the project root
+5. Reads `build-appimage/via-version.txt` and renames the artifact to `Via-<version>-<arch>.AppImage`
+
+Optional one-off version override:
+
+```bash
+VIA_VERSION_OVERRIDE=1.2.3 ./scripts/make-appimage.sh
+```
 
 ### CI Release Build
 
-The `release.yml` workflow automates this on tag push. Tag `v1.0.0` to create a release:
+The `release.yml` workflow validates the pushed tag (or manual dispatch version) against the checked-in `VERSION` file and fails before publishing if they do not match.
+
+Recommended release flow:
+
+1. Update `VERSION` in a normal commit.
+2. Push that commit.
+3. Tag the same commit with `v<version>`.
+4. Push the tag and let CI verify the tag matches `VERSION`.
+
+Example:
 
 ```bash
+git commit -am "Bump version to 1.0.0"
+git push origin main
 git tag v1.0.0
 git push origin v1.0.0
 ```
@@ -486,6 +515,9 @@ ctest --test-dir build -R "test_.*Cache" --output-on-failure
 
 # Build AppImage locally
 ./scripts/make-appimage.sh
+
+# Build with a one-off version override
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DVIA_VERSION_OVERRIDE=1.2.3
 
 # Check for compile_commands.json (for clangd/IDE)
 ls build/compile_commands.json
