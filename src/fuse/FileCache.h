@@ -31,6 +31,7 @@
 
 class SyncDatabase;
 class GoogleDriveClient;
+class RuntimePauseController;
 
 /**
  * @struct CacheEntry
@@ -197,6 +198,12 @@ class FileCache : public QObject {
      */
     qint64 currentCacheSize() const;
 
+    /**
+     * @brief Attach the shared runtime pause controller
+     * @param pauseController Pause policy instance, may be nullptr
+     */
+    void setPauseController(RuntimePauseController* pauseController);
+
     // ========================================================================
     // Cache Operations (from FUSE Procedure Flow Chart: open flow)
     // ========================================================================
@@ -219,6 +226,14 @@ class FileCache : public QObject {
      * @return true if the exported representation is in cache and fresh
      */
     bool isCached(const QString& fileId, const QString& exportMimeType) const;
+
+    /**
+     * @brief Check whether the requested content is already available locally
+     * @param fileId Google Drive file ID
+     * @param exportMimeType Optional export representation MIME type
+     * @return true if the request can be served without Drive access
+     */
+    bool hasLocalContent(const QString& fileId, const QString& exportMimeType = QString()) const;
 
     /**
      * @brief Get cached file path (downloads if not cached)
@@ -627,6 +642,9 @@ class FileCache : public QObject {
     QString generateUploadSnapshotPath(const QString& fileId, quint64 generation) const;
     QString getContentPathLocked(const QString& fileId,
                                  const QString& exportMimeType = QString()) const;
+    bool hasLocalContentLocked(const QString& fileId,
+                               const QString& exportMimeType = QString()) const;
+    bool isDriveApiAllowedLocked() const;
     QString getReadyExportPathLocked(const QString& fileId, const QString& cacheKey,
                                      const QString& cachePath, bool retainOnCompletion = false);
     bool recordCacheEntryLocked(const QString& cacheKey, const QString& fileId,
@@ -649,6 +667,7 @@ class FileCache : public QObject {
     // Dependencies
     SyncDatabase* m_database;
     GoogleDriveClient* m_driveClient;
+    RuntimePauseController* m_pauseController = nullptr;
 
     // Cache state
     QString m_cacheDirectory;

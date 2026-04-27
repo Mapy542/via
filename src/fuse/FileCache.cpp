@@ -15,6 +15,7 @@
 #include <QStandardPaths>
 
 #include "api/GoogleDriveClient.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 
 namespace {
@@ -158,6 +159,11 @@ qint64 FileCache::currentCacheSize() const {
     return m_currentSize;
 }
 
+void FileCache::setPauseController(RuntimePauseController* pauseController) {
+    QMutexLocker locker(&m_mutex);
+    m_pauseController = pauseController;
+}
+
 bool FileCache::isCached(const QString& fileId) const { return isCached(fileId, QString()); }
 
 bool FileCache::isCached(const QString& fileId, const QString& exportMimeType) const {
@@ -178,8 +184,14 @@ bool FileCache::isCached(const QString& fileId, const QString& exportMimeType) c
     return hasUsableExportBytes(entry.cachePath);
 }
 
+bool FileCache::hasLocalContent(const QString& fileId, const QString& exportMimeType) const {
+    QMutexLocker locker(&m_mutex);
+    return hasLocalContentLocked(fileId, exportMimeType);
+}
+
 QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
     const QString cacheKey = cacheKeyFor(fileId);
+    QString blockedMessage;
 
     // Check if already cached (with lock)
     {
@@ -241,6 +253,20 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
                         << "is missing from both pending store and cache"
                         << "— local changes may be lost; falling back to remote download";
         }
+
+        if (!isDriveApiAllowedLocked()) {
+            blockedMessage =
+                m_pauseController
+                    ? m_pauseController->blockedOperationMessage(QStringLiteral("download files"))
+                    : QStringLiteral("Drive access is currently paused.");
+        }
+    }
+
+    if (!blockedMessage.isEmpty()) {
+        qInfo() << "FileCache: Refusing cache-miss download for" << fileId << "while paused";
+        emit downloadFailedDetailed(fileId, blockedMessage, 0);
+        emit downloadFailed(fileId, blockedMessage);
+        return QString();
     }
 
     // Not cached - need to download
@@ -354,6 +380,7 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
 QString FileCache::getExportedPath(const QString& fileId, const QString& exportMimeType) {
     const QString cacheKey = cacheKeyFor(fileId, exportMimeType);
     const QString cachePath = generateCachePath(fileId, exportMimeType);
+    QString blockedMessage;
 
     if (!m_driveClient) {
         qWarning() << "FileCache: No GoogleDriveClient available for export";
@@ -378,7 +405,17 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
             return readyPath;
         }
 
-        if (m_pendingExportRequests.contains(cacheKey)) {
+        const bool activeExportAlreadyStarted = m_activeExportKeys.contains(cacheKey);
+        if (!isDriveApiAllowedLocked() && !activeExportAlreadyStarted) {
+            blockedMessage = m_pauseController
+                                 ? m_pauseController->blockedOperationMessage(
+                                       QStringLiteral("export native documents"))
+                                 : QStringLiteral("Drive access is currently paused.");
+        }
+
+        if (!blockedMessage.isEmpty()) {
+            // Keep queued exports intact; they may resume once Drive access returns.
+        } else if (m_pendingExportRequests.contains(cacheKey)) {
             const int queuedIndex = m_queuedExportKeys.indexOf(cacheKey);
             if (queuedIndex >= 0) {
                 m_queuedExportKeys.removeAt(queuedIndex);
@@ -403,6 +440,13 @@ QString FileCache::getExportedPath(const QString& fileId, const QString& exportM
             m_activeExportKeys.insert(cacheKey);
             toStart.append(request);
         }
+    }
+
+    if (!blockedMessage.isEmpty()) {
+        qInfo() << "FileCache: Refusing export cache miss for" << fileId << "while paused";
+        emit downloadFailedDetailed(fileId, blockedMessage, 0);
+        emit downloadFailed(fileId, blockedMessage);
+        return QString();
     }
 
     startExportRequests(toStart);
@@ -468,6 +512,10 @@ void FileCache::queueExportedPath(const QString& fileId, const QString& exportMi
         QMutexLocker locker(&m_mutex);
         const QString readyPath = getReadyExportPathLocked(fileId, cacheKey, cachePath);
         if (!readyPath.isEmpty()) {
+            return;
+        }
+
+        if (!isDriveApiAllowedLocked()) {
             return;
         }
 
@@ -658,19 +706,24 @@ void FileCache::markDirty(const QString& fileId, const QString& path) {
 
     qDebug() << "FileCache: Marking" << fileId << "as dirty";
 
-    DirtyFileEntry entry;
+    const DirtyFileEntry current = m_dirtyFiles.value(fileId);
+
+    DirtyFileEntry entry = current;
     entry.fileId = fileId;
     entry.path = path;
     entry.markedDirtyAt = QDateTime::currentDateTime();
-    entry.uploadFailed = false;
-    entry.generation = m_dirtyFiles.contains(fileId) ? m_dirtyFiles[fileId].generation + 1 : 1;
-    entry.uploadedGeneration = 0;
+    entry.generation = current.fileId.isEmpty() ? 1 : current.generation + 1;
+    if (current.fileId.isEmpty()) {
+        entry.lastUploadAttempt = QDateTime();
+        entry.uploadFailed = false;
+        entry.uploadedGeneration = 0;
+    }
 
     m_dirtyFiles[fileId] = entry;
 
     // Record in database
     if (m_database) {
-        m_database->markFuseDirty(fileId, path);
+        m_database->markFuseDirty(fileId, path, entry.generation, entry.uploadedGeneration);
     }
 
     emit fileDirty(fileId, path);
@@ -948,6 +1001,12 @@ void FileCache::markUploadedGeneration(const QString& fileId, quint64 generation
 
     if (generation >= it->uploadedGeneration) {
         it->uploadedGeneration = generation;
+    }
+    it->uploadFailed = false;
+    it->lastUploadAttempt = QDateTime::currentDateTime();
+
+    if (m_database) {
+        m_database->markFuseUploadedGeneration(fileId, it->uploadedGeneration);
     }
 }
 
@@ -1323,6 +1382,35 @@ QString FileCache::getContentPathLocked(const QString& fileId,
                                     : generateCachePath(fileId, exportMimeType);
 }
 
+bool FileCache::hasLocalContentLocked(const QString& fileId, const QString& exportMimeType) const {
+    const QString cacheKey = cacheKeyFor(fileId, exportMimeType);
+
+    if (exportMimeType.isEmpty() && m_dirtyFiles.contains(fileId)) {
+        if (QFile::exists(generateDirtyPath(fileId))) {
+            return true;
+        }
+        if (QFile::exists(generateCachePath(fileId))) {
+            return true;
+        }
+    }
+
+    if (m_cacheEntries.contains(cacheKey)) {
+        const CacheEntry& entry = m_cacheEntries[cacheKey];
+        return exportMimeType.isEmpty() ? QFile::exists(entry.cachePath)
+                                        : hasUsableExportBytes(entry.cachePath);
+    }
+
+    if (!exportMimeType.isEmpty()) {
+        return hasUsableExportBytes(generateCachePath(fileId, exportMimeType));
+    }
+
+    return false;
+}
+
+bool FileCache::isDriveApiAllowedLocked() const {
+    return !m_pauseController || m_pauseController->isDriveApiAllowed();
+}
+
 QString FileCache::moveToDirtyStore(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
 
@@ -1545,10 +1633,15 @@ void FileCache::loadCacheFromDatabase() {
         entry.markedDirtyAt = dbEntry.markedDirtyAt;
         entry.lastUploadAttempt = dbEntry.lastUploadAttempt;
         entry.uploadFailed = dbEntry.uploadFailed;
-        entry.generation = 1;
-        entry.uploadedGeneration = 0;
+        entry.generation = qMax<quint64>(1, dbEntry.generation);
+        entry.uploadedGeneration = qMin(dbEntry.uploadedGeneration, entry.generation);
 
         m_dirtyFiles[entry.fileId] = entry;
+    }
+
+    const QList<QString> dirtyFileIds = m_dirtyFiles.keys();
+    for (const QString& fileId : dirtyFileIds) {
+        maybeFinalizeUploadedGenerationLocked(fileId);
     }
 
     qDebug() << "FileCache: Loaded" << m_cacheEntries.size() << "cache entries from database";

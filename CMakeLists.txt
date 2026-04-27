@@ -89,6 +89,7 @@ set(SOURCES
     src/sync/ChangeProcessor.cpp
     src/sync/SyncActionQueue.cpp
     src/sync/SyncActionThread.cpp
+    src/sync/RuntimePauseController.cpp
     src/sync/MirrorPathResolver.cpp
     src/sync/FileFilter.cpp
     src/sync/FullSync.cpp
@@ -103,6 +104,7 @@ set(SOURCES
     src/utils/LogManager.cpp
     src/utils/CacheMaintenance.cpp
     src/utils/FileInUseChecker.cpp
+    src/utils/PowerProfileMonitor.cpp
     src/utils/SuspendMonitor.cpp
 )
 
@@ -125,6 +127,7 @@ set(HEADERS
     src/sync/ChangeProcessor.h
     src/sync/SyncActionQueue.h
     src/sync/SyncActionThread.h
+    src/sync/RuntimePauseController.h
     src/sync/MirrorPathResolver.h
     src/sync/FileFilter.h
     src/sync/FullSync.h
@@ -139,6 +142,7 @@ set(HEADERS
     src/utils/LogManager.h
     src/utils/CacheMaintenance.h
     src/utils/FileInUseChecker.h
+    src/utils/PowerProfileMonitor.h
     src/utils/AutostartManager.h
     src/utils/NativeDocShortcutHandler.h
     src/utils/UpdateChecker.h
@@ -283,6 +287,8 @@ if(BUILD_TESTS)
     add_qt_test(test_SyncDatabase tests/sync/TestSyncDatabase.cpp)
     add_qt_test(test_SyncActionQueue tests/sync/TestSyncActionQueue.cpp)
     add_qt_test(test_SyncActionThread tests/sync/TestSyncActionThread.cpp)
+    add_qt_test(test_RuntimePauseController tests/sync/TestRuntimePauseController.cpp)
+    add_qt_test(test_PowerProfileMonitor tests/sync/TestPowerProfileMonitor.cpp)
     add_qt_test(test_LocalChangeWatcher tests/sync/TestLocalChangeWatcher.cpp)
     add_qt_test(test_RemoteChangeWatcher tests/sync/TestRemoteChangeWatcher.cpp)
     add_qt_test(test_FullSync tests/sync/TestFullSync.cpp)

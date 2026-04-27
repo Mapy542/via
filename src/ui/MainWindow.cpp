@@ -24,6 +24,7 @@
 #include "auth/GoogleAuthManager.h"
 #include "sync/ChangeProcessor.h"
 #include "sync/FullSync.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
 #include "sync/SyncActionThread.h"
 #include "utils/NotificationManager.h"
@@ -32,6 +33,7 @@
 MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
                        SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
                        SyncActionThread* syncActionThread, FullSync* fullSync,
+                       RuntimePauseController* pauseController,
                        UiStatusCoordinator* statusCoordinator,
                        NotificationManager* notificationManager, QWidget* parent)
     : QMainWindow(parent),
@@ -41,6 +43,7 @@ MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveC
       m_syncActionThread(syncActionThread),
       m_changeProcessor(changeProcessor),
       m_fullSync(fullSync),
+      m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_notificationManager(notificationManager),
       m_settingsWindow(nullptr),
@@ -268,6 +271,12 @@ void MainWindow::connectSignals() {
                 &MainWindow::applyStatusSnapshot);
     }
 
+    if (m_pauseController) {
+        connect(m_pauseController, &RuntimePauseController::stateChanged, this,
+                &MainWindow::applyPauseControllerState);
+        applyPauseControllerState();
+    }
+
     // Auth manager connections
     if (m_authManager) {
         connect(m_authManager, &GoogleAuthManager::authenticated, this,
@@ -417,6 +426,7 @@ void MainWindow::updateAuthState(bool authenticated) {
 
     if (authenticated) {
         m_accountLabel->setText("Signed in to Google Drive");
+        applyPauseControllerState();
         if (!m_statusCoordinator) {
             updateSyncStatus("Ready to sync");
         }
@@ -452,6 +462,14 @@ void MainWindow::setAuthExpired(const QString& reason) {
 void MainWindow::updatePauseButton(bool paused) {
     m_syncPaused = paused;
     m_pauseSyncButton->setText(paused ? "Resume Sync" : "Pause Sync");
+}
+
+void MainWindow::applyPauseControllerState() {
+    if (!m_pauseController) {
+        return;
+    }
+
+    updatePauseButton(m_pauseController->isEffectivelyPaused());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -501,6 +519,14 @@ void MainWindow::onOpenFolderClicked() {
 }
 
 void MainWindow::onPauseSyncClicked() {
+    if (m_pauseController) {
+        m_pauseController->togglePause();
+        addRecentActivity(m_pauseController->isEffectivelyPaused()
+                              ? QStringLiteral("Sync paused")
+                              : QStringLiteral("Sync resumed"));
+        return;
+    }
+
     if (m_changeProcessor) {
         if (m_syncPaused) {
             m_changeProcessor->resume();

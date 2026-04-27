@@ -140,6 +140,7 @@ class TestSyncDatabase : public QObject {
     void testFuseMetadataByPath_NotExists_ReturnsEmpty();
     void testFuseDirtyFiles_Basic();
     void testFuseDirtyFiles_ReMarkPreservesFailureState();
+    void testFuseDirtyFiles_PersistsGenerationState();
     void testFuseDirtyFiles_RapidInterleavedUpdates();
     void testFuseCacheEntry_Basic();
     void testFuseCacheEntry_UpdateAccessAndClearAll();
@@ -383,7 +384,7 @@ void TestSyncDatabase::testMigration_V1ToV3() {
             QSqlQuery versionQuery(dbCheck);
             QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
             QVERIFY(versionQuery.next());
-            QCOMPARE(versionQuery.value(0).toInt(), 5);
+            QCOMPARE(versionQuery.value(0).toInt(), 6);
             dbCheck.close();
         }
         QSqlDatabase::removeDatabase(checkConn);
@@ -485,7 +486,7 @@ void TestSyncDatabase::testMigration_V2ToV3() {
             QSqlQuery versionQuery(dbCheck);
             QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
             QVERIFY(versionQuery.next());
-            QCOMPARE(versionQuery.value(0).toInt(), 5);
+            QCOMPARE(versionQuery.value(0).toInt(), 6);
             dbCheck.close();
         }
         QSqlDatabase::removeDatabase(checkConn);
@@ -1269,6 +1270,45 @@ void TestSyncDatabase::testFuseDirtyFiles_ReMarkPreservesFailureState() {
             QVERIFY(entry.uploadFailed);
             QVERIFY(entry.lastUploadAttempt.isValid());
             QVERIFY(entry.lastUploadAttempt >= previousAttempt);
+            break;
+        }
+    }
+    QVERIFY(found);
+}
+
+void TestSyncDatabase::testFuseDirtyFiles_PersistsGenerationState() {
+    const QString fileId = QStringLiteral("DIRTY_GENERATION_ID");
+
+    QVERIFY(m_db->markFuseDirty(fileId, "/dirty/generation.txt", 4, 2));
+    QVERIFY(m_db->markFuseUploadFailed(fileId));
+
+    QList<FuseDirtyFile> dirty = m_db->getFuseDirtyFiles();
+    bool found = false;
+    for (const auto& entry : dirty) {
+        if (entry.fileId == fileId) {
+            found = true;
+            QCOMPARE(entry.generation, static_cast<quint64>(4));
+            QCOMPARE(entry.uploadedGeneration, static_cast<quint64>(2));
+            QVERIFY(entry.uploadFailed);
+            QVERIFY(entry.lastUploadAttempt.isValid());
+            break;
+        }
+    }
+    QVERIFY(found);
+
+    QVERIFY(m_db->markFuseDirty(fileId, "/dirty/generation-next.txt", 5, 2));
+    QVERIFY(m_db->markFuseUploadedGeneration(fileId, 5));
+
+    dirty = m_db->getFuseDirtyFiles();
+    found = false;
+    for (const auto& entry : dirty) {
+        if (entry.fileId == fileId) {
+            found = true;
+            QCOMPARE(entry.path, QString("/dirty/generation-next.txt"));
+            QCOMPARE(entry.generation, static_cast<quint64>(5));
+            QCOMPARE(entry.uploadedGeneration, static_cast<quint64>(5));
+            QVERIFY(!entry.uploadFailed);
+            QVERIFY(entry.lastUploadAttempt.isValid());
             break;
         }
     }

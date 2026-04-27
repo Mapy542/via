@@ -35,6 +35,7 @@
 #include "MetadataRefreshWorker.h"
 #include "NativeDocPolicy.h"
 #include "api/GoogleDriveClient.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 #include "utils/NativeDocShortcutHandler.h"
 
@@ -709,6 +710,8 @@ FuseDriver::FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, Q
       m_metadataRefreshThread(nullptr),
       m_dirtySyncWorker(nullptr),
       m_metadataRefreshWorker(nullptr),
+      m_pauseController(nullptr),
+      m_backgroundSyncPaused(false),
       m_nextFileHandle(1) {
     // Set default mount point
     m_mountPoint = QDir::homePath() + "/GoogleDriveFuse";
@@ -778,6 +781,17 @@ FileCache* FuseDriver::fileCache() const { return m_fileCache; }
 SyncDatabase* FuseDriver::database() const { return m_database; }
 
 GoogleDriveClient* FuseDriver::driveClient() const { return m_driveClient; }
+
+void FuseDriver::setPauseController(RuntimePauseController* pauseController) {
+    m_pauseController = pauseController;
+    if (m_fileCache) {
+        m_fileCache->setPauseController(pauseController);
+    }
+}
+
+bool FuseDriver::isDriveApiAllowed() const {
+    return !m_pauseController || m_pauseController->isDriveApiAllowed();
+}
 
 // ============================================================================
 // Public Slots
@@ -1110,11 +1124,40 @@ void FuseDriver::refreshMetadata() {
         return;
     }
 
+    if (!isDriveApiAllowed()) {
+        qInfo() << "FuseDriver: Skipping metadata refresh while Drive access is paused";
+        return;
+    }
+
     qDebug() << "FuseDriver: Refreshing metadata from remote";
     emit metadataRefreshStarted();
 
     if (m_metadataRefreshWorker) {
         QMetaObject::invokeMethod(m_metadataRefreshWorker, "checkNow", Qt::QueuedConnection);
+    }
+}
+
+void FuseDriver::pauseSync() {
+    m_backgroundSyncPaused = true;
+
+    if (m_dirtySyncWorker) {
+        QMetaObject::invokeMethod(m_dirtySyncWorker, "pause", Qt::QueuedConnection);
+    }
+    if (m_metadataRefreshWorker) {
+        QMetaObject::invokeMethod(m_metadataRefreshWorker, "pause", Qt::QueuedConnection);
+    }
+
+    stageDirtyFilesForPause();
+}
+
+void FuseDriver::resumeSync() {
+    m_backgroundSyncPaused = false;
+
+    if (m_dirtySyncWorker) {
+        QMetaObject::invokeMethod(m_dirtySyncWorker, "resume", Qt::QueuedConnection);
+    }
+    if (m_metadataRefreshWorker) {
+        QMetaObject::invokeMethod(m_metadataRefreshWorker, "resume", Qt::QueuedConnection);
     }
 }
 
@@ -1193,6 +1236,26 @@ void FuseDriver::flushDirtyFiles() {
 
     qInfo() << "FuseDriver: Flushed" << uploadedCount << "files";
     emit dirtyFilesFlushed(uploadedCount);
+}
+
+int FuseDriver::pausedMutationErrorCode() const {
+    if (m_pauseController && m_pauseController->hasEffectiveAutoPauseReason(
+                                 RuntimePauseController::AutoPauseReason::Offline)) {
+        return -ENETDOWN;
+    }
+
+    return -EAGAIN;
+}
+
+void FuseDriver::emitDriveOperationBlocked(const QString& action, const QString& path) {
+    const QString message = m_pauseController
+                                ? m_pauseController->blockedOperationMessage(action)
+                                : QStringLiteral("Drive access is currently unavailable.");
+
+    QMetaObject::invokeMethod(
+        this,
+        [this, action, path, message]() { emit driveOperationBlocked(action, path, message); },
+        Qt::QueuedConnection);
 }
 
 // ============================================================================
@@ -1641,6 +1704,12 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         NativeDocRepresentation repr =
             effectiveNativeDocRepresentation(meta.remoteMimeType, meta.nativeDocModeOverride, mode);
         if (repr.visible && !repr.synthetic && !repr.outputMimeType.isEmpty()) {
+            if (!drv->isDriveApiAllowed() &&
+                !drv->m_fileCache->hasLocalContent(meta.fileId, repr.outputMimeType)) {
+                drv->emitDriveOperationBlocked(QStringLiteral("export native documents"), qpath);
+                return -EHOSTDOWN;
+            }
+
             QString cachePath = drv->m_fileCache->getExportedPath(meta.fileId, repr.outputMimeType);
             if (cachePath.isEmpty()) {
                 qWarning() << "FuseDriver::open: export failed for" << meta.fileId << "("
@@ -1678,6 +1747,11 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
     }
 
     // Get cached file path (may trigger download)
+    if (!drv->isDriveApiAllowed() && !drv->m_fileCache->hasLocalContent(meta.fileId)) {
+        drv->emitDriveOperationBlocked(QStringLiteral("download uncached files"), qpath);
+        return -EHOSTDOWN;
+    }
+
     QString cachePath = drv->m_fileCache->getCachedPath(meta.fileId, meta.size);
     if (cachePath.isEmpty()) {
         return -EIO;
@@ -1844,6 +1918,13 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
     return 0;
 }
 
+// TODO: Implement full hardened offline support
+// First, “accept dirty files while paused” is reasonable for existing cached files, but full
+// offline FUSE mutations are not currently in scope. FuseDriver.cpp:1847 still performs create,
+// mkdir, rename, move, trash, and delete as immediate Drive calls. If you want those to work
+// offline too, that becomes a separate durable operation-journal feature with replay and conflict
+// handling.
+
 int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     Q_UNUSED(mode)
     auto* drv = self();
@@ -1854,6 +1935,11 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
 
     if (!drv || !drv->m_driveClient || !drv->m_database) {
         return -EIO;
+    }
+
+    if (!drv->isDriveApiAllowed()) {
+        drv->emitDriveOperationBlocked(QStringLiteral("create folders"), qpath);
+        return drv->pausedMutationErrorCode();
     }
 
     // Get parent folder ID
@@ -1922,6 +2008,11 @@ int FuseDriver::fuseRmdir(const char* path) {
         return -EIO;
     }
 
+    if (!drv->isDriveApiAllowed()) {
+        drv->emitDriveOperationBlocked(QStringLiteral("trash folders"), qpath);
+        return drv->pausedMutationErrorCode();
+    }
+
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
@@ -1967,6 +2058,11 @@ int FuseDriver::fuseUnlink(const char* path) {
 
     if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
+    }
+
+    if (!drv->isDriveApiAllowed()) {
+        drv->emitDriveOperationBlocked(QStringLiteral("trash files"), qpath);
+        return drv->pausedMutationErrorCode();
     }
 
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
@@ -2041,6 +2137,18 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
 
     bool isRename = (oldName != newName);
     bool isMove = (oldParentPath != newParentPath);
+
+    if (!isRename && !isMove) {
+        return 0;
+    }
+
+    if (!drv->isDriveApiAllowed()) {
+        const QString action = (isMove && isRename) ? QStringLiteral("move or rename items")
+                                                    : (isMove ? QStringLiteral("move items")
+                                                              : QStringLiteral("rename items"));
+        drv->emitDriveOperationBlocked(action, fromPath);
+        return drv->pausedMutationErrorCode();
+    }
 
     // LOG-02: When both move and rename are needed, issue a single atomic PATCH request
     if (isMove && isRename) {
@@ -2221,6 +2329,11 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
 
     if (!drv || !drv->m_driveClient || !drv->m_fileCache) {
         return -EIO;
+    }
+
+    if (!drv->isDriveApiAllowed()) {
+        drv->emitDriveOperationBlocked(QStringLiteral("create files"), qpath);
+        return drv->pausedMutationErrorCode();
     }
 
     // Get parent folder ID
@@ -2427,6 +2540,7 @@ bool FuseDriver::initializeFileCache() {
     }
 
     m_fileCache = new FileCache(m_database, m_driveClient, this);
+    m_fileCache->setPauseController(m_pauseController);
 
     if (!m_cacheDirectory.isEmpty()) {
         m_fileCache->setCacheDirectory(m_cacheDirectory);
@@ -2502,10 +2616,28 @@ bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& p
     return true;
 }
 
+void FuseDriver::stageDirtyFilesForPause() {
+    if (!m_fileCache) {
+        return;
+    }
+
+    const QList<DirtyFileEntry> dirtyFiles = m_fileCache->getDirtyFiles();
+    for (const DirtyFileEntry& entry : dirtyFiles) {
+        const QString fusePath =
+            entry.path.startsWith(QLatin1Char('/')) ? entry.path : QStringLiteral("/") + entry.path;
+        stageDirtyFileForUpload(entry.fileId, fusePath, -1);
+    }
+}
+
 int FuseDriver::truncateWithoutHandle(const QString& fileId, qint64 expectedSize,
                                       const QString& path, off_t size) {
     if (fileId.isEmpty() || !m_fileCache) {
         return -EIO;
+    }
+
+    if (!isDriveApiAllowed() && !m_fileCache->hasLocalContent(fileId)) {
+        emitDriveOperationBlocked(QStringLiteral("download uncached files"), path);
+        return -EHOSTDOWN;
     }
 
     QString cachePath = m_fileCache->getCachedPath(fileId, expectedSize);
@@ -2558,6 +2690,9 @@ void FuseDriver::startBackgroundWorkers() {
                 });
 
         m_dirtySyncThread->start();
+        if (m_backgroundSyncPaused || !isDriveApiAllowed()) {
+            QMetaObject::invokeMethod(m_dirtySyncWorker, "pause", Qt::QueuedConnection);
+        }
     }
 
     // Relay file download activity signals from the cache.
@@ -2659,6 +2794,9 @@ void FuseDriver::startBackgroundWorkers() {
                 &FuseDriver::metadataRefreshFailed);
 
         m_metadataRefreshThread->start();
+        if (m_backgroundSyncPaused || !isDriveApiAllowed()) {
+            QMetaObject::invokeMethod(m_metadataRefreshWorker, "pause", Qt::QueuedConnection);
+        }
     }
 }
 

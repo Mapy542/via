@@ -21,6 +21,7 @@
 class GoogleAuthManager;
 class ChangeProcessor;
 class UiStatusCoordinator;
+class RuntimePauseController;
 
 /**
  * @class SystemTrayManager
@@ -48,6 +49,7 @@ class SystemTrayManager : public QObject {
      * @param parent Parent object
      */
     explicit SystemTrayManager(GoogleAuthManager* authManager, ChangeProcessor* changeProcessor,
+                               RuntimePauseController* pauseController,
                                UiStatusCoordinator* statusCoordinator, QObject* parent = nullptr);
 
     ~SystemTrayManager() override;
@@ -125,6 +127,7 @@ class SystemTrayManager : public QObject {
     void onSyncNowClicked();
     void onRecentChangesClicked();
     void applyStatusSnapshot();
+    void applyPauseControllerState();
 
    private:
     void createMenu();
@@ -133,6 +136,7 @@ class SystemTrayManager : public QObject {
 
     GoogleAuthManager* m_authManager;
     ChangeProcessor* m_changeProcessor;
+    RuntimePauseController* m_pauseController;
     UiStatusCoordinator* m_statusCoordinator;
 
     struct NotificationEntry {

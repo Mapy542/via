@@ -53,6 +53,7 @@ struct FuseMetadata;
 // Forward declaration for internal worker classes
 class DirtySyncWorker;
 class MetadataRefreshWorker;
+class RuntimePauseController;
 
 /**
  * @brief Interface for metadata cache operations
@@ -346,6 +347,18 @@ class FuseDriver : public QObject {
      */
     GoogleDriveClient* driveClient() const;
 
+    /**
+     * @brief Attach the shared runtime pause controller
+     * @param pauseController Pause policy instance, may be nullptr
+     */
+    void setPauseController(RuntimePauseController* pauseController);
+
+    /**
+     * @brief Check whether Drive-backed activity is currently allowed
+     * @return true when Drive API work may proceed
+     */
+    bool isDriveApiAllowed() const;
+
    public slots:
     /**
      * @brief Mount the virtual filesystem
@@ -372,6 +385,16 @@ class FuseDriver : public QObject {
      * MetadataRefreshWorker when changes are detected.
      */
     void refreshMetadata();
+
+    /**
+     * @brief Pause FUSE background Drive activity while keeping the mount active
+     */
+    void pauseSync();
+
+    /**
+     * @brief Resume FUSE background Drive activity after a pause
+     */
+    void resumeSync();
 
     /**
      * @brief Flush all dirty files
@@ -514,6 +537,14 @@ class FuseDriver : public QObject {
      * @param changeType "created", "modified", or "deleted"
      */
     void fuseRemoteChange(const QString& displayPath, const QString& changeType);
+
+    /**
+     * @brief Emitted when a remote mutation is rejected because Drive access is paused
+     * @param action Human-readable operation description
+     * @param path FUSE path for the rejected operation
+     * @param message User-facing explanation
+     */
+    void driveOperationBlocked(const QString& action, const QString& path, const QString& message);
 
    private:
     // ========================================================================
@@ -713,6 +744,11 @@ class FuseDriver : public QObject {
     bool stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd = -1);
 
     /**
+     * @brief Push all current dirty files into the persistent pending store
+     */
+    void stageDirtyFilesForPause();
+
+    /**
      * @brief Truncate a file when no registered FUSE handle exists for it
      * @param fileId Google Drive file ID
      * @param expectedSize Cached/remote size hint for getCachedPath()
@@ -740,6 +776,9 @@ class FuseDriver : public QObject {
      * @brief Start background worker threads
      */
     void startBackgroundWorkers();
+
+    int pausedMutationErrorCode() const;
+    void emitDriveOperationBlocked(const QString& action, const QString& path);
 
     /**
      * @brief Stop background worker threads
@@ -831,6 +870,8 @@ class FuseDriver : public QObject {
     QThread* m_metadataRefreshThread;                ///< Metadata refresh worker thread
     DirtySyncWorker* m_dirtySyncWorker;              ///< Dirty file upload worker
     MetadataRefreshWorker* m_metadataRefreshWorker;  ///< Metadata refresh worker
+    RuntimePauseController* m_pauseController;       ///< Shared runtime pause policy
+    bool m_backgroundSyncPaused;                     ///< Whether background Drive work is paused
 
     // Open file handles
     QMap<uint64_t, FuseOpenFile> m_openFiles;  ///< Map of open file handles

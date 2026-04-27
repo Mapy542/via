@@ -6,8 +6,6 @@
  * a Google Drive desktop client for Linux.
  */
 
-// TODO: Feature: Detect if system is operating on power saver/metered network and automatically
-// pause sync and show notification
 #include <QApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -38,6 +36,7 @@
 #include "sync/FullSync.h"
 #include "sync/LocalChangeWatcher.h"
 #include "sync/RemoteChangeWatcher.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
 #include "sync/SyncActionThread.h"
 #include "sync/SyncDatabase.h"
@@ -50,6 +49,7 @@
 #include "utils/LogManager.h"
 #include "utils/NativeDocShortcutHandler.h"
 #include "utils/NotificationManager.h"
+#include "utils/PowerProfileMonitor.h"
 #include "utils/SuspendMonitor.h"
 #include "utils/ThemeHelper.h"
 #include "utils/UpdateChecker.h"
@@ -291,6 +291,8 @@ int main(int argc, char* argv[]) {
     // Initialize notification manager
     NotificationManager notificationManager;
 
+    RuntimePauseController pauseController;
+
     // Check for updates (runs asynchronously, shows dialog if update found)
     UpdateChecker updateChecker;
     updateChecker.checkForUpdates(/* silent = */ true);
@@ -322,6 +324,7 @@ int main(int argc, char* argv[]) {
     }
 
     FuseDriver fuseDriver(&driveClient, &syncDatabase);
+    fuseDriver.setPauseController(&pauseController);
     if (!fuseMountPoint.isEmpty()) {
         fuseDriver.setMountPoint(fuseMountPoint);
     }
@@ -444,9 +447,10 @@ int main(int argc, char* argv[]) {
 
     // Initialize shared UI status coordination and UI surfaces.
     UiStatusCoordinator statusCoordinator(&authManager, mirrorEnabled ? &syncActionQueue : nullptr,
-                                          mirrorEnabled ? &changeProcessor : nullptr);
+                                          mirrorEnabled ? &changeProcessor : nullptr,
+                                          &pauseController);
     SystemTrayManager trayManager(&authManager, mirrorEnabled ? &changeProcessor : nullptr,
-                                  &statusCoordinator);
+                                  &pauseController, &statusCoordinator);
     trayManager.show();
     notificationManager.setTrayIcon(trayManager.trayIcon());
     QObject::connect(&notificationManager, &NotificationManager::notificationShown, &trayManager,
@@ -478,41 +482,108 @@ int main(int argc, char* argv[]) {
 
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
-    MainWindow mainWindow(
-        &authManager, &driveClient, mirrorEnabled ? &syncActionQueue : nullptr,
-        mirrorEnabled ? &changeProcessor : nullptr, mirrorEnabled ? &syncActionThread : nullptr,
-        mirrorEnabled ? &fullSync : nullptr, &statusCoordinator, &notificationManager);
+    MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &syncActionQueue : nullptr,
+                          mirrorEnabled ? &changeProcessor : nullptr,
+                          mirrorEnabled ? &syncActionThread : nullptr,
+                          mirrorEnabled ? &fullSync : nullptr, &pauseController, &statusCoordinator,
+                          &notificationManager);
 
-    // ROB-02: Initialize network connectivity monitoring
+    // Initialize auto-pause sources that can safely feed the shared runtime policy.
     if (QNetworkInformation::loadDefaultBackend()) {
         QNetworkInformation* netInfo = QNetworkInformation::instance();
         if (netInfo) {
             qInfo() << "Network backend loaded:" << netInfo->backendName();
-            QObject::connect(
-                netInfo, &QNetworkInformation::reachabilityChanged, &app,
-                [&statusCoordinator, &remoteWatcher, &localWatcher, &changeProcessor,
-                 &syncActionThread, &fullSyncLocalTimer, mirrorEnabled,
-                 &fuseDriver](QNetworkInformation::Reachability reachability) {
-                    if (reachability == QNetworkInformation::Reachability::Online) {
-                        qInfo() << "Network: Online — resuming sync components";
-                        statusCoordinator.updateMirrorStatus("Online");
-                        if (mirrorEnabled) {
-                            remoteWatcher.start();
-                            fullSyncLocalTimer.start();
-                        }
-                    } else if (reachability == QNetworkInformation::Reachability::Disconnected) {
-                        qWarning() << "Network: Disconnected — pausing sync";
-                        statusCoordinator.updateMirrorStatus("Offline");
-                        if (mirrorEnabled) {
-                            remoteWatcher.stop();
-                            fullSyncLocalTimer.stop();
-                        }
-                    }
-                });
+            QObject::connect(netInfo, &QNetworkInformation::reachabilityChanged, &app,
+                             [&pauseController](QNetworkInformation::Reachability reachability) {
+                                 pauseController.setAutoPauseReasonActive(
+                                     RuntimePauseController::AutoPauseReason::Offline,
+                                     reachability != QNetworkInformation::Reachability::Online);
+                             });
+
+            pauseController.setAutoPauseReasonActive(
+                RuntimePauseController::AutoPauseReason::Offline,
+                netInfo->reachability() != QNetworkInformation::Reachability::Online);
+
+            if (netInfo->supports(QNetworkInformation::Feature::Metered)) {
+                QObject::connect(netInfo, &QNetworkInformation::isMeteredChanged, &app,
+                                 [&pauseController](bool isMetered) {
+                                     pauseController.setAutoPauseReasonActive(
+                                         RuntimePauseController::AutoPauseReason::MeteredNetwork,
+                                         isMetered);
+                                 });
+
+                pauseController.setAutoPauseReasonActive(
+                    RuntimePauseController::AutoPauseReason::MeteredNetwork, netInfo->isMetered());
+            } else {
+                qInfo() << "QNetworkInformation: metered state unsupported by backend";
+            }
         }
     } else {
         qInfo() << "QNetworkInformation: no backend available, skipping connectivity monitoring";
     }
+
+    PowerProfileMonitor powerProfileMonitor(&app);
+    QObject::connect(&powerProfileMonitor, &PowerProfileMonitor::powerSaverChanged, &app,
+                     [&pauseController](bool powerSaverActive) {
+                         pauseController.setAutoPauseReasonActive(
+                             RuntimePauseController::AutoPauseReason::PowerSaver, powerSaverActive);
+                     });
+    pauseController.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::PowerSaver,
+                                             powerProfileMonitor.isPowerSaverActive());
+
+    const auto pauseState =
+        std::make_shared<RuntimePauseController::Snapshot>(pauseController.snapshot());
+    const auto lastBlockedNoticeMs = std::make_shared<qint64>(0);
+
+    QObject::connect(
+        &pauseController, &RuntimePauseController::stateChanged, &app,
+        [&pauseController, &notificationManager, &localWatcher, &remoteWatcher, &changeProcessor,
+         &syncActionThread, &fullSync, &fullSyncLocalTimer, &fuseDriver, &authManager,
+         mirrorEnabled, fuseEnabled, pauseState]() {
+            const RuntimePauseController::Snapshot previous = *pauseState;
+            const RuntimePauseController::Snapshot current = pauseController.snapshot();
+            *pauseState = current;
+
+            if (previous.effectivePause == current.effectivePause) {
+                return;
+            }
+
+            if (current.effectivePause) {
+                qInfo() << "Runtime pause engaged:" << pauseController.effectiveStatusText();
+                if (mirrorEnabled) {
+                    fullSync.cancel();
+                    fullSyncLocalTimer.stop();
+                    localWatcher.pause();
+                    remoteWatcher.pause();
+                    changeProcessor.pause();
+                    syncActionThread.pause();
+                }
+                if (fuseEnabled) {
+                    fuseDriver.pauseSync();
+                }
+                if (authManager.isAuthenticated()) {
+                    notificationManager.showWarning(pauseController.pauseNotificationTitle(),
+                                                    pauseController.pauseNotificationMessage());
+                }
+                return;
+            }
+
+            qInfo() << "Runtime pause cleared";
+            if (mirrorEnabled && authManager.isAuthenticated()) {
+                localWatcher.resume();
+                remoteWatcher.resume();
+                changeProcessor.resume();
+                syncActionThread.resume();
+                fullSyncLocalTimer.start();
+            }
+            if (fuseEnabled) {
+                fuseDriver.resumeSync();
+            }
+            if (authManager.isAuthenticated()) {
+                notificationManager.showInfo(QStringLiteral("Sync Resumed"),
+                                             pauseController.resumeNotificationMessage());
+            }
+        });
 
     // Detect system suspend/resume and recover after wake
     SuspendMonitor suspendMonitor(&app);
@@ -522,7 +593,8 @@ int main(int argc, char* argv[]) {
         &suspendMonitor, &SuspendMonitor::resumed, &app,
         [&authManager, &remoteWatcher, &localWatcher, &changeProcessor, &syncActionThread,
          &fullSync, &fullSyncLocalTimer, &fuseDriver, &trayManager, &notificationManager,
-         &statusCoordinator, &wakeRefreshNotificationGate, mirrorEnabled, fuseEnabled]() {
+         &statusCoordinator, &wakeRefreshNotificationGate, &pauseController, mirrorEnabled,
+         fuseEnabled]() {
             qInfo() << "Resume handler: refreshing auth and restarting components";
             statusCoordinator.updateMirrorStatus("Recovering from sleep...");
 
@@ -549,7 +621,7 @@ int main(int argc, char* argv[]) {
 
                     // 3. Restart mirror sync components — they may be waiting on
                     //    dead network sockets inside polling loops.
-                    if (mirrorEnabled) {
+                    if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
                         remoteWatcher.stop();
                         remoteWatcher.start();
                         fullSyncLocalTimer.start();
@@ -560,7 +632,8 @@ int main(int argc, char* argv[]) {
 
                     // 4. Kick FUSE background workers.  Stopping and starting them
                     //    resets their QTimers and clears any stalled API calls.
-                    if (fuseEnabled && fuseDriver.isMounted()) {
+                    if (fuseEnabled && fuseDriver.isMounted() &&
+                        !pauseController.isEffectivelyPaused()) {
                         fuseDriver.refreshMetadata();
                     }
 
@@ -586,8 +659,9 @@ int main(int argc, char* argv[]) {
     // When authenticated, start sync components based on configured mode
     QObject::connect(&authManager, &GoogleAuthManager::authenticated, &app,
                      [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
-                      &fullSyncLocalTimer, &fuseDriver, fuseEnabled, mirrorEnabled, &syncFolder]() {
-                         if (mirrorEnabled) {
+                      &fullSyncLocalTimer, &fuseDriver, &pauseController, fuseEnabled,
+                      mirrorEnabled, &syncFolder]() {
+                         if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
                              startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
                                                  &syncActionThread);
                              fullSyncLocalTimer.start();
@@ -597,6 +671,9 @@ int main(int argc, char* argv[]) {
                          }
                          if (fuseEnabled) {
                              startFuseComponent(&fuseDriver, syncFolder);
+                             if (pauseController.isEffectivelyPaused()) {
+                                 fuseDriver.pauseSync();
+                             }
                          }
                      });
 
@@ -739,7 +816,11 @@ int main(int argc, char* argv[]) {
     // Connect tray "Sync Now" to full sync (only when mirror sync is enabled)
     if (mirrorEnabled) {
         QObject::connect(&trayManager, &SystemTrayManager::fullSyncRequested, &fullSync,
-                         &FullSync::fullSync);
+                         [&fullSync, &pauseController]() {
+                             if (!pauseController.isEffectivelyPaused()) {
+                                 fullSync.fullSync();
+                             }
+                         });
     }
 
     // Connect storage info to shared UI status coordinator
@@ -850,6 +931,21 @@ int main(int argc, char* argv[]) {
             [&mainWindow](const QString& displayPath, const QString& changeType) {
                 mainWindow.addRecentActivity(QString("Remote %1: %2").arg(changeType, displayPath));
             });
+        QObject::connect(&fuseDriver, &FuseDriver::driveOperationBlocked, &notificationManager,
+                         [&notificationManager, &mainWindow, lastBlockedNoticeMs](
+                             const QString& action, const QString& path, const QString& message) {
+                             mainWindow.addRecentActivity(
+                                 QString("Blocked while paused: %1 (%2)").arg(action, path));
+
+                             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                             if ((nowMs - *lastBlockedNoticeMs) < 4000) {
+                                 return;
+                             }
+
+                             *lastBlockedNoticeMs = nowMs;
+                             notificationManager.showWarning(QStringLiteral("Drive Access Paused"),
+                                                             message);
+                         });
     }
 
     // Periodically refresh storage info (every 10 minutes)
@@ -1017,23 +1113,27 @@ int main(int argc, char* argv[]) {
             qInfo() << "Starting sync components immediately";
 
             // Use QTimer::singleShot to ensure event loop is running
-            QTimer::singleShot(100, &app,
-                               [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread,
-                                &fullSync, &fullSyncLocalTimer, &fuseDriver, fuseEnabled,
-                                mirrorEnabled, &syncFolder, &trayManager, &statusCoordinator]() {
-                                   if (mirrorEnabled) {
-                                       startSyncComponents(&localWatcher, &remoteWatcher,
-                                                           &changeProcessor, &syncActionThread);
-                                       fullSyncLocalTimer.start();
-                                       // Trigger full sync after starting components
-                                       QTimer::singleShot(500, &fullSync, &FullSync::fullSync);
-                                   }
-                                   if (fuseEnabled) {
-                                       startFuseComponent(&fuseDriver, syncFolder);
-                                   }
-                                   statusCoordinator.updateAuthState(true);
-                                   trayManager.updateAuthState(true);
-                               });
+            QTimer::singleShot(
+                100, &app,
+                [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
+                 &fullSyncLocalTimer, &fuseDriver, &pauseController, fuseEnabled, mirrorEnabled,
+                 &syncFolder, &trayManager, &statusCoordinator]() {
+                    if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
+                        startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
+                                            &syncActionThread);
+                        fullSyncLocalTimer.start();
+                        // Trigger full sync after starting components
+                        QTimer::singleShot(500, &fullSync, &FullSync::fullSync);
+                    }
+                    if (fuseEnabled) {
+                        startFuseComponent(&fuseDriver, syncFolder);
+                        if (pauseController.isEffectivelyPaused()) {
+                            fuseDriver.pauseSync();
+                        }
+                    }
+                    statusCoordinator.updateAuthState(true);
+                    trayManager.updateAuthState(true);
+                });
         }
     }
 

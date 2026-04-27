@@ -104,11 +104,13 @@ struct FuseCacheEntry {
  * Maps to fuse_dirty_files table schema
  */
 struct FuseDirtyFile {
-    QString fileId;               ///< Google Drive file ID (primary key)
-    QString path;                 ///< Logical path in FUSE filesystem
-    QDateTime markedDirtyAt;      ///< When file was marked dirty
-    QDateTime lastUploadAttempt;  ///< Last upload attempt time
-    bool uploadFailed;            ///< Whether last upload failed
+    QString fileId;                  ///< Google Drive file ID (primary key)
+    QString path;                    ///< Logical path in FUSE filesystem
+    QDateTime markedDirtyAt;         ///< When file was marked dirty
+    QDateTime lastUploadAttempt;     ///< Last upload attempt time
+    bool uploadFailed;               ///< Whether last upload failed
+    quint64 generation = 0;          ///< Latest local dirty generation
+    quint64 uploadedGeneration = 0;  ///< Latest local generation confirmed uploaded
 };
 
 /**
@@ -427,9 +429,12 @@ class SyncDatabase : public QObject {
      * @brief Mark a FUSE file as dirty (needs upload)
      * @param fileId Google Drive file ID
      * @param path Logical path in FUSE filesystem
+     * @param generation Latest local dirty generation for the file
+     * @param uploadedGeneration Latest generation already uploaded to Drive
      * @return true if mark successful
      */
-    bool markFuseDirty(const QString& fileId, const QString& path);
+    bool markFuseDirty(const QString& fileId, const QString& path, quint64 generation = 1,
+                       quint64 uploadedGeneration = 0);
 
     /**
      * @brief Clear dirty flag for a FUSE file
@@ -444,6 +449,14 @@ class SyncDatabase : public QObject {
      * @return true if update successful
      */
     bool markFuseUploadFailed(const QString& fileId);
+
+    /**
+     * @brief Record that a dirty generation was uploaded successfully
+     * @param fileId Google Drive file ID
+     * @param uploadedGeneration Latest local generation confirmed uploaded
+     * @return true if update successful
+     */
+    bool markFuseUploadedGeneration(const QString& fileId, quint64 uploadedGeneration);
 
     /**
      * @brief Clear all FUSE cache entries from database

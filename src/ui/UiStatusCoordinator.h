@@ -14,6 +14,7 @@ class QTimer;
 class GoogleAuthManager;
 class SyncActionQueue;
 class ChangeProcessor;
+class RuntimePauseController;
 
 enum class UiStatusPriority {
     Idle = 0,
@@ -43,7 +44,9 @@ class UiStatusCoordinator : public QObject {
 
    public:
     explicit UiStatusCoordinator(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
-                                 ChangeProcessor* changeProcessor, QObject* parent = nullptr);
+                                 ChangeProcessor* changeProcessor,
+                                 RuntimePauseController* pauseController = nullptr,
+                                 QObject* parent = nullptr);
 
     UiStatusSnapshot snapshot() const;
 
@@ -84,6 +87,7 @@ class UiStatusCoordinator : public QObject {
     GoogleAuthManager* m_authManager;
     SyncActionQueue* m_syncActionQueue;
     ChangeProcessor* m_changeProcessor;
+    RuntimePauseController* m_pauseController;
 
     QTimer* m_statusTimer;
     QTimer* m_fuseIdleTimer;
@@ -93,6 +97,7 @@ class UiStatusCoordinator : public QObject {
     bool m_metadataRefreshActive = false;
 
     bool m_authenticated = false;
+    bool m_authStateExplicit = false;
     bool m_authExpired = false;
     bool m_hasConflicts = false;
     double m_storagePercent = -1.0;

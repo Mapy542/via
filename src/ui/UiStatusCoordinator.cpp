@@ -11,6 +11,7 @@
 
 #include "auth/GoogleAuthManager.h"
 #include "sync/ChangeProcessor.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
 
 namespace {
@@ -42,11 +43,13 @@ bool isMeaningfulStatus(const QString& status) {
 
 UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager,
                                          SyncActionQueue* syncActionQueue,
-                                         ChangeProcessor* changeProcessor, QObject* parent)
+                                         ChangeProcessor* changeProcessor,
+                                         RuntimePauseController* pauseController, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
       m_syncActionQueue(syncActionQueue),
       m_changeProcessor(changeProcessor),
+      m_pauseController(pauseController),
       m_statusTimer(nullptr),
       m_fuseIdleTimer(nullptr),
       m_pendingActions(0),
@@ -70,6 +73,11 @@ UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager,
     if (m_changeProcessor) {
         connect(m_changeProcessor, &ChangeProcessor::stateChanged, this,
                 [this](ChangeProcessor::State) { refreshMirrorStatus(); });
+    }
+
+    if (m_pauseController) {
+        connect(m_pauseController, &RuntimePauseController::stateChanged, this,
+                &UiStatusCoordinator::refreshMirrorStatus);
     }
 
     m_statusTimer = new QTimer(this);
@@ -185,6 +193,7 @@ void UiStatusCoordinator::updateFuseStatus(const QString& status) {
 void UiStatusCoordinator::updateAuthState(bool authenticated) {
     const UiStatusSnapshot before = snapshot();
 
+    m_authStateExplicit = true;
     m_authenticated = authenticated;
     if (authenticated) {
         m_authExpired = false;
@@ -211,6 +220,7 @@ void UiStatusCoordinator::updateAuthState(bool authenticated) {
 void UiStatusCoordinator::setAuthExpired(const QString& reason) {
     const UiStatusSnapshot before = snapshot();
 
+    m_authStateExplicit = true;
     m_authenticated = false;
     m_authExpired = true;
     m_authExpiredReason = reason;
@@ -364,6 +374,16 @@ void UiStatusCoordinator::refreshMirrorStatusInternal() {
 
     if (!m_mirrorOverrideStatus.isEmpty()) {
         setMirrorStatusInternal(m_mirrorOverrideStatus);
+        return;
+    }
+
+    if (m_authStateExplicit && !m_authenticated && !m_authExpired) {
+        setMirrorStatusInternal(QStringLiteral("Not connected"));
+        return;
+    }
+
+    if (m_authenticated && m_pauseController && m_pauseController->isEffectivelyPaused()) {
+        setMirrorStatusInternal(m_pauseController->effectiveStatusText());
         return;
     }
 

@@ -15,6 +15,7 @@
 
 #include "api/GoogleDriveClient.h"
 #include "fuse/FileCache.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 
 // ---------------------------------------------------------------------------
@@ -60,14 +61,21 @@ class FakeDriveClientFC : public GoogleDriveClient {
     int exportErrorStatus = 0;
     bool exportShouldFail = false;
     bool holdExports = false;
+    int downloadCallCount = 0;
     int exportCallCount = 0;
     int exportWriteCount = 0;
+    QString lastDownloadFileId;
+    QString lastDownloadPath;
     QString lastExportFileId;
     QString lastExportMimeType;
     QString lastExportPath;
     QList<HeldExport> heldExports;
 
-    void downloadFile(const QString& /*fileId*/, const QString& /*localPath*/) override {}
+    void downloadFile(const QString& fileId, const QString& localPath) override {
+        ++downloadCallCount;
+        lastDownloadFileId = fileId;
+        lastDownloadPath = localPath;
+    }
     void exportFile(const QString& fileId, const QString& exportMimeType,
                     const QString& localPath) override {
         ++exportCallCount;
@@ -186,6 +194,8 @@ class TestFileCache : public QObject {
 
     // Dirty guard in getCachedPath
     void testGetCachedPath_DirtyFileSkipsDownload();
+    void testGetCachedPath_PausedCacheMissFailsWithoutDownload();
+    void testGetCachedPath_PausedCacheHitStillWorks();
 
     // Pending-store (dirty file migration)
     void testMoveToDirtyStore_MovesFile();
@@ -206,17 +216,25 @@ class TestFileCache : public QObject {
     void testGetExportedPath_DifferentMimeTypesStayDistinct();
     void testGetExportedPath_ZeroBytePayloadFails();
     void testGetExportedPath_ZeroByteRemnantReexports();
+    void testGetExportedPath_PausedCacheMissFailsWithoutExport();
+    void testGetExportedPath_PausedCacheHitStillWorks();
     void testQueueExportedPath_BoundedConcurrency();
     void testQueueExportedPath_DeduplicatesRepeatedRequests();
     void testGetExportedPath_JoinsBackgroundExport();
 
+    // Restart durability
+    void testRestart_RestoresDirtyGenerationState();
+    void testRestart_FinalizesUploadedGenerationState();
+
    private:
     void createTestDatabase();
     void destroyTestDatabase();
+    void recreateCache();
 
     QTemporaryDir* m_tempDir = nullptr;
     SyncDatabase* m_db = nullptr;
     FakeDriveClientFC* m_driveClient = nullptr;
+    RuntimePauseController* m_pauseController = nullptr;
     FileCache* m_cache = nullptr;
 };
 
@@ -233,7 +251,9 @@ void TestFileCache::init() {
     createTestDatabase();
 
     m_driveClient = new FakeDriveClientFC(this);
+    m_pauseController = new RuntimePauseController(this);
     m_cache = new FileCache(m_db, m_driveClient, this);
+    m_cache->setPauseController(m_pauseController);
 
     // Set cache dir inside temp
     QString cacheDir = m_tempDir->path() + "/cache";
@@ -251,6 +271,8 @@ void TestFileCache::init() {
 void TestFileCache::cleanup() {
     delete m_cache;
     m_cache = nullptr;
+    delete m_pauseController;
+    m_pauseController = nullptr;
     delete m_driveClient;
     m_driveClient = nullptr;
     destroyTestDatabase();
@@ -270,6 +292,20 @@ void TestFileCache::destroyTestDatabase() {
         delete m_db;
         m_db = nullptr;
     }
+}
+
+void TestFileCache::recreateCache() {
+    delete m_cache;
+    m_cache = nullptr;
+
+    destroyTestDatabase();
+    createTestDatabase();
+
+    m_cache = new FileCache(m_db, m_driveClient, this);
+    m_cache->setPauseController(m_pauseController);
+    m_cache->setCacheDirectory(m_tempDir->path() + "/cache");
+    m_cache->setDirtyDirectory(m_tempDir->path() + "/pending");
+    QVERIFY(m_cache->initialize());
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +539,38 @@ void TestFileCache::testGetCachedPath_DirtyFileSkipsDownload() {
 
     // Cleanup
     QFile::remove(expectedPath);
+}
+
+void TestFileCache::testGetCachedPath_PausedCacheMissFailsWithoutDownload() {
+    const QString fileId = QStringLiteral("paused-cache-miss");
+
+    m_pauseController->requestManualPause();
+
+    QSignalSpy failedSpy(m_cache, &FileCache::downloadFailed);
+    QVERIFY(failedSpy.isValid());
+
+    const QString result = m_cache->getCachedPath(fileId);
+
+    QVERIFY(result.isEmpty());
+    QCOMPARE(m_driveClient->downloadCallCount, 0);
+    QCOMPARE(failedSpy.count(), 1);
+    QVERIFY(
+        failedSpy.takeFirst().at(1).toString().contains(QStringLiteral("Cannot download files")));
+}
+
+void TestFileCache::testGetCachedPath_PausedCacheHitStillWorks() {
+    const QString fileId = QStringLiteral("paused-cache-hit");
+    const QString cacheDir = m_cache->cacheDirectory();
+    seedCacheFile(m_cache, cacheDir, fileId, 32);
+
+    const QString expectedPath = m_cache->getCachePathForFile(fileId);
+
+    m_pauseController->requestManualPause();
+
+    const QString result = m_cache->getCachedPath(fileId);
+
+    QCOMPARE(result, expectedPath);
+    QCOMPARE(m_driveClient->downloadCallCount, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -976,11 +1044,7 @@ void TestFileCache::testGetExportedPath_ZeroByteRemnantReexports() {
 
     QVERIFY(m_db->recordFuseCacheEntry(cacheKey, remnantPath, 0));
 
-    delete m_cache;
-    m_cache = new FileCache(m_db, m_driveClient, this);
-    m_cache->setCacheDirectory(m_tempDir->path() + "/cache");
-    m_cache->setDirtyDirectory(m_tempDir->path() + "/pending");
-    QVERIFY(m_cache->initialize());
+    recreateCache();
 
     m_driveClient->exportShouldFail = false;
     m_driveClient->exportPayload = payload;
@@ -1002,6 +1066,49 @@ void TestFileCache::testGetExportedPath_ZeroByteRemnantReexports() {
     QVERIFY(exportedFile.open(QIODevice::ReadOnly));
     QCOMPARE(exportedFile.readAll(), payload);
     exportedFile.close();
+}
+
+void TestFileCache::testGetExportedPath_PausedCacheMissFailsWithoutExport() {
+    const QString fileId = QStringLiteral("paused-export-miss");
+    const QString exportMimeType = QStringLiteral("text/markdown");
+
+    m_pauseController->requestManualPause();
+
+    QSignalSpy failedSpy(m_cache, &FileCache::downloadFailed);
+    QVERIFY(failedSpy.isValid());
+
+    const QString result = m_cache->getExportedPath(fileId, exportMimeType);
+
+    QVERIFY(result.isEmpty());
+    QCOMPARE(m_driveClient->exportCallCount, 0);
+    QCOMPARE(failedSpy.count(), 1);
+    QVERIFY(failedSpy.takeFirst().at(1).toString().contains(
+        QStringLiteral("Cannot export native documents")));
+}
+
+void TestFileCache::testGetExportedPath_PausedCacheHitStillWorks() {
+    const QString fileId = QStringLiteral("paused-export-hit");
+    const QString exportMimeType = QStringLiteral("text/markdown");
+    const QByteArray payload("cached exported bytes");
+
+    m_driveClient->exportPayload = payload;
+
+    QSignalSpy completedSpy(m_cache, &FileCache::downloadCompleted);
+    QVERIFY(completedSpy.isValid());
+
+    QString exportedPath;
+    JoiningThread worker(
+        [&]() { exportedPath = m_cache->getExportedPath(fileId, exportMimeType); });
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 2000);
+    worker.join();
+
+    QCOMPARE(m_driveClient->exportCallCount, 1);
+
+    m_pauseController->requestManualPause();
+
+    const QString cachedAgain = m_cache->getExportedPath(fileId, exportMimeType);
+    QCOMPARE(cachedAgain, exportedPath);
+    QCOMPARE(m_driveClient->exportCallCount, 1);
 }
 
 void TestFileCache::testQueueExportedPath_BoundedConcurrency() {
@@ -1072,6 +1179,91 @@ void TestFileCache::testGetExportedPath_JoinsBackgroundExport() {
     QVERIFY(exportedFile.open(QIODevice::ReadOnly));
     QCOMPARE(exportedFile.readAll(), payload);
     exportedFile.close();
+}
+
+void TestFileCache::testRestart_RestoresDirtyGenerationState() {
+    const QString fileId = QStringLiteral("restart-dirty-state");
+    const QString logicalPath = QStringLiteral("/restart-dirty-state.txt");
+    const QByteArray initial("restart bytes");
+    const QString cachePath = m_cache->getCachePathForFile(fileId);
+
+    QVERIFY(QDir().mkpath(QFileInfo(cachePath).dir().absolutePath()));
+    QFile cacheFile(cachePath);
+    QVERIFY(cacheFile.open(QIODevice::WriteOnly));
+    QCOMPARE(cacheFile.write(initial), initial.size());
+    cacheFile.close();
+    QVERIFY(m_cache->recordCacheEntry(fileId, cachePath, initial.size()));
+
+    m_cache->markDirty(fileId, logicalPath);
+    const QString pendingPath = m_cache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+
+    m_cache->markUploadedGeneration(fileId, 1);
+
+    QFile pendingFile(pendingPath);
+    QVERIFY(pendingFile.open(QIODevice::Append));
+    QCOMPARE(pendingFile.write("+newer", 6), qint64(6));
+    pendingFile.close();
+
+    m_cache->markDirty(fileId, logicalPath);
+    m_cache->markUploadFailed(fileId);
+
+    QList<DirtyFileEntry> dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    QCOMPARE(dirty.first().generation, static_cast<quint64>(2));
+    QCOMPARE(dirty.first().uploadedGeneration, static_cast<quint64>(1));
+    QVERIFY(dirty.first().uploadFailed);
+    QVERIFY(dirty.first().lastUploadAttempt.isValid());
+
+    recreateCache();
+
+    dirty = m_cache->getDirtyFiles();
+    QCOMPARE(dirty.size(), 1);
+    QCOMPARE(dirty.first().fileId, fileId);
+    QCOMPARE(dirty.first().generation, static_cast<quint64>(2));
+    QCOMPARE(dirty.first().uploadedGeneration, static_cast<quint64>(1));
+    QVERIFY(dirty.first().uploadFailed);
+    QVERIFY(dirty.first().lastUploadAttempt.isValid());
+    QCOMPARE(m_cache->getContentPath(fileId), pendingPath);
+
+    QFile restoredPending(pendingPath);
+    QVERIFY(restoredPending.open(QIODevice::ReadOnly));
+    QCOMPARE(restoredPending.readAll(), QByteArray("restart bytes+newer"));
+    restoredPending.close();
+}
+
+void TestFileCache::testRestart_FinalizesUploadedGenerationState() {
+    const QString fileId = QStringLiteral("restart-uploaded-state");
+    const QString logicalPath = QStringLiteral("/restart-uploaded-state.txt");
+    const QByteArray content("uploaded before restart");
+    const QString cachePath = m_cache->getCachePathForFile(fileId);
+
+    QVERIFY(QDir().mkpath(QFileInfo(cachePath).dir().absolutePath()));
+    QFile cacheFile(cachePath);
+    QVERIFY(cacheFile.open(QIODevice::WriteOnly));
+    QCOMPARE(cacheFile.write(content), content.size());
+    cacheFile.close();
+    QVERIFY(m_cache->recordCacheEntry(fileId, cachePath, content.size()));
+
+    m_cache->markDirty(fileId, logicalPath);
+    const quint64 generation = m_cache->getDirtyFiles().first().generation;
+    const QString pendingPath = m_cache->moveToDirtyStore(fileId);
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+
+    m_cache->markUploadedGeneration(fileId, generation);
+
+    recreateCache();
+
+    QVERIFY(!m_cache->isDirty(fileId));
+    QVERIFY(m_cache->isCached(fileId));
+    QVERIFY(!QFile::exists(pendingPath));
+
+    QFile recycled(cachePath);
+    QVERIFY(recycled.open(QIODevice::ReadOnly));
+    QCOMPARE(recycled.readAll(), content);
+    recycled.close();
 }
 
 QTEST_MAIN(TestFileCache)

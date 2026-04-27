@@ -16,14 +16,17 @@
 #include "UiStatusCoordinator.h"
 #include "auth/GoogleAuthManager.h"
 #include "sync/ChangeProcessor.h"
+#include "sync/RuntimePauseController.h"
 #include "utils/ThemeHelper.h"
 
 SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
                                      ChangeProcessor* changeProcessor,
+                                     RuntimePauseController* pauseController,
                                      UiStatusCoordinator* statusCoordinator, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
       m_changeProcessor(changeProcessor),
+      m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_syncPaused(false),
       m_authenticated(false) {
@@ -55,6 +58,12 @@ SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
         connect(m_statusCoordinator, &UiStatusCoordinator::statusChanged, this,
                 &SystemTrayManager::applyStatusSnapshot);
         applyStatusSnapshot();
+    }
+
+    if (m_pauseController) {
+        connect(m_pauseController, &RuntimePauseController::stateChanged, this,
+                &SystemTrayManager::applyPauseControllerState);
+        applyPauseControllerState();
     }
 }
 
@@ -205,7 +214,9 @@ void SystemTrayManager::updateAuthState(bool authenticated) {
     m_pauseSyncAction->setEnabled(authenticated);
     m_syncNowAction->setEnabled(authenticated);
     m_recentChangesAction->setEnabled(authenticated);
-    if (!authenticated) {
+    if (authenticated) {
+        applyPauseControllerState();
+    } else {
         updatePauseAction(false);
     }
 }
@@ -213,6 +224,14 @@ void SystemTrayManager::updateAuthState(bool authenticated) {
 void SystemTrayManager::updatePauseAction(bool paused) {
     m_syncPaused = paused;
     m_pauseSyncAction->setText(paused ? "Resume Sync" : "Pause Sync");
+}
+
+void SystemTrayManager::applyPauseControllerState() {
+    if (!m_pauseController) {
+        return;
+    }
+
+    updatePauseAction(m_pauseController->isEffectivelyPaused());
 }
 
 void SystemTrayManager::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
@@ -236,6 +255,11 @@ void SystemTrayManager::onOpenFolderClicked() {
 }
 
 void SystemTrayManager::onPauseSyncClicked() {
+    if (m_pauseController) {
+        m_pauseController->togglePause();
+        return;
+    }
+
     if (m_changeProcessor) {
         if (m_syncPaused) {
             m_changeProcessor->resume();

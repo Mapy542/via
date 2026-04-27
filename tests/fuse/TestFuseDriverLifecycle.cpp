@@ -20,6 +20,7 @@
 #include "api/GoogleDriveClient.h"
 #include "fuse/FileCache.h"
 #include "fuse/FuseDriver.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 
 class FakeDriveClientFDL : public GoogleDriveClient {
@@ -89,6 +90,7 @@ class TestFuseDriverLifecycle : public QObject {
 
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
+    void testPauseSync_StagesDirtyFilesIntoPersistentStore();
     void testRegisterOpenFile_TracksWritableHandlesSeparately();
     void testNativeDocReportedSize_DoesNotMaterializeExportOnFirstStat();
     void testNativeDocExportLimitFailure_FallsBackToBrowserShortcutOverride();
@@ -234,6 +236,29 @@ void TestFuseDriverLifecycle::testStageDirtyFileForUpload_RetargetsRemainingHand
 
     m_driver->unregisterOpenFile(releasingFh);
     m_driver->unregisterOpenFile(remainingFh);
+}
+
+void TestFuseDriverLifecycle::testPauseSync_StagesDirtyFilesIntoPersistentStore() {
+    const QString fileId = QStringLiteral("pause-stage");
+    const QString logicalPath = QStringLiteral("pause-stage.txt");
+
+    seedCachedFile(fileId, logicalPath, QByteArray("pause me"));
+    m_driver->fileCache()->markDirty(fileId, logicalPath);
+
+    RuntimePauseController pauseController;
+    m_driver->setPauseController(&pauseController);
+
+    pauseController.requestManualPause();
+    m_driver->pauseSync();
+
+    const QString pendingPath = m_driver->fileCache()->getDirtyPathForFile(fileId);
+    QVERIFY(QFile::exists(pendingPath));
+    QVERIFY(!m_driver->fileCache()->isCached(fileId));
+
+    QFile pendingFile(pendingPath);
+    QVERIFY(pendingFile.open(QIODevice::ReadOnly));
+    QCOMPARE(pendingFile.readAll(), QByteArray("pause me"));
+    pendingFile.close();
 }
 
 void TestFuseDriverLifecycle::testRegisterOpenFile_TracksWritableHandlesSeparately() {

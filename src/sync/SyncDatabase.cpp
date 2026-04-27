@@ -15,11 +15,15 @@
 #include <stdexcept>
 
 const QString SyncDatabase::DB_NAME = "via_sync.db";
-const int SyncDatabase::DB_VERSION = 5;
+const int SyncDatabase::DB_VERSION = 6;
 
 namespace {
 
 static std::atomic<int> s_connectionCounter{0};
+
+bool tableExists(QSqlDatabase& db, const QString& tableName) {
+    return db.tables().contains(tableName, Qt::CaseInsensitive);
+}
 
 bool tableHasColumn(QSqlDatabase& db, const QString& tableName, const QString& columnName) {
     QSqlQuery query(db);
@@ -250,6 +254,24 @@ bool SyncDatabase::migrateDatabase(int currentVersion) {
             return false;
         }
         currentVersion = 5;
+    }
+
+    if (currentVersion < 6) {
+        if (tableExists(m_db, QStringLiteral("fuse_dirty_files"))) {
+            if (!addColumnIfMissing(m_db, "fuse_dirty_files",
+                                    "generation INTEGER NOT NULL DEFAULT 1")) {
+                logError("migrateDatabase (add fuse_dirty_files.generation)",
+                         m_db.lastError().text());
+                return false;
+            }
+            if (!addColumnIfMissing(m_db, "fuse_dirty_files",
+                                    "uploaded_generation INTEGER NOT NULL DEFAULT 0")) {
+                logError("migrateDatabase (add fuse_dirty_files.uploaded_generation)",
+                         m_db.lastError().text());
+                return false;
+            }
+        }
+        currentVersion = 6;
     }
 
     if (currentVersion == DB_VERSION) {
@@ -1212,6 +1234,18 @@ bool SyncDatabase::createFuseTables() {
         return false;
     }
 
+    if (!addColumnIfMissing(m_db, "fuse_dirty_files", "generation INTEGER NOT NULL DEFAULT 1")) {
+        logError("createFuseTables (fuse_dirty_files.generation)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "fuse_dirty_files",
+                            "uploaded_generation INTEGER NOT NULL DEFAULT 0")) {
+        logError("createFuseTables (fuse_dirty_files.uploaded_generation)",
+                 query.lastError().text());
+        return false;
+    }
+
     // FUSE cache entries table
     QString createFuseCacheEntriesTable = R"(
         CREATE TABLE IF NOT EXISTS fuse_cache_entries (
@@ -1421,6 +1455,14 @@ QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
             entry.lastUploadAttempt =
                 QDateTime::fromString(query.value("last_upload_attempt").toString(), Qt::ISODate);
             entry.uploadFailed = query.value("upload_failed").toInt() != 0;
+            const int generationIndex = query.record().indexOf("generation");
+            if (generationIndex >= 0) {
+                entry.generation = query.value(generationIndex).toULongLong();
+            }
+            const int uploadedGenerationIndex = query.record().indexOf("uploaded_generation");
+            if (uploadedGenerationIndex >= 0) {
+                entry.uploadedGeneration = query.value(uploadedGenerationIndex).toULongLong();
+            }
             dirtyFiles.append(entry);
         }
     }
@@ -1428,7 +1470,8 @@ QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
     return dirtyFiles;
 }
 
-bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path) {
+bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path, quint64 generation,
+                                 quint64 uploadedGeneration) {
     QMutexLocker locker(&m_mutex);
     QSqlQuery query(m_db);
 
@@ -1436,13 +1479,15 @@ bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path) {
     // This preserves failure tracking information if file was already dirty
     query.prepare(R"(
         INSERT OR IGNORE INTO fuse_dirty_files 
-        (file_id, path, marked_dirty_at, upload_failed)
-        VALUES (?, ?, ?, 0)
+        (file_id, path, marked_dirty_at, upload_failed, generation, uploaded_generation)
+        VALUES (?, ?, ?, 0, ?, ?)
     )");
 
     query.addBindValue(fileId);
     query.addBindValue(path);
     query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    query.addBindValue(static_cast<qulonglong>(generation));
+    query.addBindValue(static_cast<qulonglong>(uploadedGeneration));
 
     if (!query.exec()) {
         logError("markFuseDirty", query.lastError().text());
@@ -1454,11 +1499,14 @@ bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path) {
     if (query.numRowsAffected() == 0) {
         query.prepare(R"(
             UPDATE fuse_dirty_files 
-            SET path = ?, marked_dirty_at = ?
+            SET path = ?, marked_dirty_at = ?, generation = ?,
+                uploaded_generation = MAX(uploaded_generation, ?)
             WHERE file_id = ?
         )");
         query.addBindValue(path);
         query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+        query.addBindValue(static_cast<qulonglong>(generation));
+        query.addBindValue(static_cast<qulonglong>(uploadedGeneration));
         query.addBindValue(fileId);
 
         if (!query.exec()) {
@@ -1497,6 +1545,28 @@ bool SyncDatabase::markFuseUploadFailed(const QString& fileId) {
 
     if (!query.exec()) {
         logError("markFuseUploadFailed", query.lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+bool SyncDatabase::markFuseUploadedGeneration(const QString& fileId, quint64 uploadedGeneration) {
+    QMutexLocker locker(&m_mutex);
+    QSqlQuery query(m_db);
+    query.prepare(R"(
+        UPDATE fuse_dirty_files
+        SET uploaded_generation = MAX(uploaded_generation, ?),
+            upload_failed = 0,
+            last_upload_attempt = ?
+        WHERE file_id = ?
+    )");
+    query.addBindValue(static_cast<qulonglong>(uploadedGeneration));
+    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    query.addBindValue(fileId);
+
+    if (!query.exec()) {
+        logError("markFuseUploadedGeneration", query.lastError().text());
         return false;
     }
 

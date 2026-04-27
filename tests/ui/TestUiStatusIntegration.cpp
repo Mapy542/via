@@ -7,6 +7,7 @@
 
 #include "sync/ChangeProcessor.h"
 #include "sync/ChangeQueue.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
 
 #define private public
@@ -24,6 +25,7 @@ class TestUiStatusIntegration : public QObject {
     void cleanup();
 
     void testFuseUploadingStatusPropagatesToTrayAndWindow();
+    void testOfflineStatusPropagatesToTrayAndWindow();
     void testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled();
     void testAuthExpiredRecoveryPropagatesToTrayAndWindow();
 
@@ -35,6 +37,7 @@ class TestUiStatusIntegration : public QObject {
     ChangeQueue* m_changeQueue = nullptr;
     SyncActionQueue* m_syncActionQueue = nullptr;
     ChangeProcessor* m_changeProcessor = nullptr;
+    RuntimePauseController* m_pauseController = nullptr;
     UiStatusCoordinator* m_coordinator = nullptr;
     SystemTrayManager* m_tray = nullptr;
     MainWindow* m_window = nullptr;
@@ -44,10 +47,12 @@ void TestUiStatusIntegration::init() {
     m_changeQueue = new ChangeQueue();
     m_syncActionQueue = new SyncActionQueue();
     m_changeProcessor = new ChangeProcessor(m_changeQueue, m_syncActionQueue, nullptr, nullptr);
-    m_coordinator = new UiStatusCoordinator(nullptr, m_syncActionQueue, m_changeProcessor);
-    m_tray = new SystemTrayManager(nullptr, m_changeProcessor, m_coordinator);
+    m_pauseController = new RuntimePauseController();
+    m_coordinator =
+        new UiStatusCoordinator(nullptr, m_syncActionQueue, m_changeProcessor, m_pauseController);
+    m_tray = new SystemTrayManager(nullptr, m_changeProcessor, m_pauseController, m_coordinator);
     m_window = new MainWindow(nullptr, nullptr, m_syncActionQueue, m_changeProcessor, nullptr,
-                              nullptr, m_coordinator, nullptr);
+                              nullptr, m_pauseController, m_coordinator, nullptr);
 }
 
 void TestUiStatusIntegration::cleanup() {
@@ -62,6 +67,9 @@ void TestUiStatusIntegration::cleanup() {
 
     delete m_changeProcessor;
     m_changeProcessor = nullptr;
+
+    delete m_pauseController;
+    m_pauseController = nullptr;
 
     delete m_syncActionQueue;
     m_syncActionQueue = nullptr;
@@ -97,10 +105,27 @@ void TestUiStatusIntegration::testFuseUploadingStatusPropagatesToTrayAndWindow()
     QTRY_COMPARE(traySummary(), expected);
 }
 
+void TestUiStatusIntegration::testOfflineStatusPropagatesToTrayAndWindow() {
+    m_changeProcessor->start();
+    m_coordinator->updateAuthState(true);
+    m_coordinator->refreshMirrorStatus();
+
+    m_pauseController->setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,
+                                                true);
+
+    QTRY_COMPARE(windowSummary(), QStringLiteral("Offline"));
+    QTRY_COMPARE(traySummary(), QStringLiteral("Offline"));
+    QTRY_COMPARE(trayTooltip(), QStringLiteral("Via\nOffline"));
+    QTRY_COMPARE(m_window->m_pauseSyncButton->text(), QStringLiteral("Resume Sync"));
+    QTRY_COMPARE(m_tray->m_pauseSyncAction->text(), QStringLiteral("Resume Sync"));
+}
+
 void TestUiStatusIntegration::testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled() {
-    UiStatusCoordinator coordinator(nullptr, nullptr, nullptr);
-    SystemTrayManager tray(nullptr, nullptr, &coordinator);
-    MainWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &coordinator, nullptr);
+    RuntimePauseController pauseController;
+    UiStatusCoordinator coordinator(nullptr, nullptr, nullptr, &pauseController);
+    SystemTrayManager tray(nullptr, nullptr, &pauseController, &coordinator);
+    MainWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &pauseController,
+                      &coordinator, nullptr);
 
     coordinator.onMetadataRefreshStarted();
 

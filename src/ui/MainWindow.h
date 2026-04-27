@@ -27,6 +27,7 @@ class SyncActionThread;
 class ChangeProcessor;
 class FullSync;
 class UiStatusCoordinator;
+class RuntimePauseController;
 
 /**
  * @class MainWindow
@@ -52,6 +53,7 @@ class MainWindow : public QMainWindow {
     explicit MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
                         SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
                         SyncActionThread* syncActionThread, FullSync* fullSync,
+                        RuntimePauseController* pauseController,
                         UiStatusCoordinator* statusCoordinator,
                         NotificationManager* notificationManager, QWidget* parent = nullptr);
 
@@ -135,6 +137,7 @@ class MainWindow : public QMainWindow {
     void onPauseSyncClicked();
     void onRefreshClicked();
     void applyStatusSnapshot();
+    void applyPauseControllerState();
 
    private:
     void setupUi();
@@ -148,6 +151,7 @@ class MainWindow : public QMainWindow {
     SyncActionThread* m_syncActionThread;
     ChangeProcessor* m_changeProcessor;
     FullSync* m_fullSync;
+    RuntimePauseController* m_pauseController;
     UiStatusCoordinator* m_statusCoordinator;
     NotificationManager* m_notificationManager;
     SettingsWindow* m_settingsWindow;
