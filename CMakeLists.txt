@@ -245,6 +245,7 @@ if(BUILD_TESTS)
 
     # UI tests
     add_qt_test(test_AutostartManager tests/ui/TestAutostartManager.cpp)
+    add_qt_test(test_SettingsWindow tests/ui/TestSettingsWindow.cpp)
     add_qt_test(test_UiStatusCoordinator tests/ui/TestUiStatusCoordinator.cpp)
     add_qt_test(test_UiStatusIntegration tests/ui/TestUiStatusIntegration.cpp)
 

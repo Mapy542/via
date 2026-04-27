@@ -23,11 +23,21 @@
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QVBoxLayout>
+#include <memory>
 
 class GoogleAuthManager;
 class GoogleDriveClient;
 class SyncActionQueue;
 class ChangeProcessor;
+
+class SettingsCredentialStore {
+   public:
+    virtual ~SettingsCredentialStore() = default;
+
+    virtual QString getClientId() const = 0;
+    virtual QString getClientSecret() const = 0;
+    virtual void saveCredentials(const QString& clientId, const QString& clientSecret) = 0;
+};
 
 /**
  * @class SettingsWindow
@@ -50,7 +60,8 @@ class SettingsWindow : public QDialog {
      */
     explicit SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
                             ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
-                            QWidget* parent = nullptr);
+                            QWidget* parent = nullptr,
+                            SettingsCredentialStore* credentialStore = nullptr);
 
     ~SettingsWindow() override;
 
@@ -106,6 +117,7 @@ class SettingsWindow : public QDialog {
     void setupFuseTab();
     void setupMiscTab();
     void updateStorageInfo();
+    void updateClientSecretPlaceholder(bool hasStoredSecret);
     void refreshCacheUsageTracker();
     qint64 scanFuseCacheUsageBytes() const;
 
@@ -114,6 +126,8 @@ class SettingsWindow : public QDialog {
     ChangeProcessor* m_changeProcessor;
     GoogleDriveClient* m_driveClient;
     QSettings m_settings;
+    std::unique_ptr<SettingsCredentialStore> m_ownedCredentialStore;
+    SettingsCredentialStore* m_credentialStore;
 
     // Tab widget
     QTabWidget* m_tabWidget;

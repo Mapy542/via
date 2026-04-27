@@ -35,16 +35,37 @@ QString fuseCacheTooltip() {
         "Target size for evictable FUSE cache files. Pending uploads are stored separately and "
         "excluded from this tracker.");
 }
+
+QString emptySecretPlaceholder() { return QStringLiteral("Enter your OAuth Client Secret"); }
+
+QString storedSecretPlaceholder() { return QStringLiteral("••••••••••••••••"); }
+
+class TokenStorageCredentialStore final : public SettingsCredentialStore {
+   public:
+    QString getClientId() const override { return m_storage.getClientId(); }
+    QString getClientSecret() const override { return m_storage.getClientSecret(); }
+
+    void saveCredentials(const QString& clientId, const QString& clientSecret) override {
+        m_storage.saveCredentials(clientId, clientSecret);
+    }
+
+   private:
+    TokenStorage m_storage;
+};
 }  // namespace
 
 SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
                                ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
-                               QWidget* parent)
+                               QWidget* parent, SettingsCredentialStore* credentialStore)
     : QDialog(parent),
       m_authManager(authManager),
       m_syncActionQueue(syncActionQueue),
       m_changeProcessor(changeProcessor),
-      m_driveClient(driveClient) {
+      m_driveClient(driveClient),
+      m_ownedCredentialStore(
+          credentialStore == nullptr ? std::make_unique<TokenStorageCredentialStore>() : nullptr),
+      m_credentialStore(credentialStore != nullptr ? credentialStore
+                                                   : m_ownedCredentialStore.get()) {
     setWindowTitle("Settings");
     setMinimumSize(500, 450);
     resize(600, 500);
@@ -122,20 +143,21 @@ void SettingsWindow::setupLoginTab() {
 
     QFormLayout* credentialsForm = new QFormLayout();
     m_clientIdEdit = new QLineEdit(m_loginTab);
+    m_clientIdEdit->setObjectName("settingsClientIdEdit");
     m_clientIdEdit->setPlaceholderText("Enter your OAuth Client ID");
     m_clientIdEdit->setEchoMode(QLineEdit::Normal);
     credentialsForm->addRow("Client ID:", m_clientIdEdit);
 
     m_clientSecretEdit = new QLineEdit(m_loginTab);
-    m_clientSecretEdit->setPlaceholderText(
-        "Enter your OAuth Client Secret");  // TODO: Shows empty instead of password-mode key
-                                            // (••••••) on subsequent opens after saving
+    m_clientSecretEdit->setObjectName("settingsClientSecretEdit");
+    m_clientSecretEdit->setPlaceholderText(emptySecretPlaceholder());
     m_clientSecretEdit->setEchoMode(QLineEdit::Password);
     credentialsForm->addRow("Client Secret:", m_clientSecretEdit);
     apiLayout->addLayout(credentialsForm);
 
     QHBoxLayout* saveCredentialsLayout = new QHBoxLayout();
     m_saveCredentialsButton = new QPushButton("Save API Credentials", m_loginTab);
+    m_saveCredentialsButton->setObjectName("settingsSaveCredentialsButton");
     saveCredentialsLayout->addWidget(m_saveCredentialsButton);
     saveCredentialsLayout->addStretch();
     apiLayout->addLayout(saveCredentialsLayout);
@@ -553,13 +575,20 @@ void SettingsWindow::setupMiscTab() {
     layout->addStretch();
 }
 
-void SettingsWindow::loadSettings() {
-    // Load API credentials from token storage (via QSettings auth/ keys)
-    m_clientIdEdit->setText(m_settings.value("auth/clientIdDisplay", "").toString());
-    // Note: We don't display the secret for security, just show placeholder if set
-    if (!m_settings.value("auth/clientSecret").toString().isEmpty()) {
-        m_clientSecretEdit->setPlaceholderText("••••••••••••••••");
+void SettingsWindow::updateClientSecretPlaceholder(bool hasStoredSecret) {
+    if (!m_clientSecretEdit) {
+        return;
     }
+
+    m_clientSecretEdit->setPlaceholderText(hasStoredSecret ? storedSecretPlaceholder()
+                                                           : emptySecretPlaceholder());
+}
+
+void SettingsWindow::loadSettings() {
+    // Load API credentials from the secure credential store.
+    m_clientIdEdit->setText(m_credentialStore->getClientId());
+    m_clientSecretEdit->clear();
+    updateClientSecretPlaceholder(!m_credentialStore->getClientSecret().isEmpty());
 
     // Sync settings
     m_syncFolderEdit->setText(
@@ -744,13 +773,14 @@ void SettingsWindow::onBrowseFolderClicked() {
 void SettingsWindow::onSaveCredentialsClicked() {
     QString clientId = m_clientIdEdit->text().trimmed();
     QString clientSecret = m_clientSecretEdit->text().trimmed();
+    const QString existingSecret = m_credentialStore->getClientSecret();
 
     if (clientId.isEmpty()) {
         QMessageBox::warning(this, "Missing Client ID", "Please enter your OAuth Client ID.");
         return;
     }
 
-    if (clientSecret.isEmpty() && m_settings.value("auth/clientSecret").toString().isEmpty()) {
+    if (clientSecret.isEmpty() && existingSecret.isEmpty()) {
         QMessageBox::warning(this, "Missing Client Secret",
                              "Please enter your OAuth Client Secret.");
         return;
@@ -760,27 +790,19 @@ void SettingsWindow::onSaveCredentialsClicked() {
     // We store the display version of client ID for showing in UI
     m_settings.setValue("auth/clientIdDisplay", clientId);
 
-    // Use TokenStorage to properly encode and save credentials
-    TokenStorage storage;
+    const QString secretToSave = clientSecret.isEmpty() ? existingSecret : clientSecret;
 
-    // If client secret is not provided (placeholder shown), keep the existing one
-    if (!clientSecret.isEmpty()) {
-        storage.saveCredentials(clientId, clientSecret);
-    } else {
-        // Just update client ID, keep existing secret
-        QString existingSecret = storage.getClientSecret();
-        storage.saveCredentials(clientId, existingSecret);
-    }
+    // If the user leaves the secret field empty, preserve the stored secret.
+    m_credentialStore->saveCredentials(clientId, secretToSave);
 
     // Update the auth manager with new credentials
     if (m_authManager) {
-        QString actualSecret = clientSecret.isEmpty() ? storage.getClientSecret() : clientSecret;
-        m_authManager->setCredentials(clientId, actualSecret);
+        m_authManager->setCredentials(clientId, secretToSave);
     }
 
     // Clear the secret field for security
     m_clientSecretEdit->clear();
-    m_clientSecretEdit->setPlaceholderText("••••••••••••••••");
+    updateClientSecretPlaceholder(!secretToSave.isEmpty());
 
     QMessageBox::information(this, "Credentials Saved",
                              "Your Google API credentials have been saved.\n\n"
