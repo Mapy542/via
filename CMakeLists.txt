@@ -312,6 +312,7 @@ if(BUILD_TESTS)
     # Auth subsystem tests
     add_qt_test(test_TokenRefresh tests/auth/TestTokenRefresh.cpp)
     add_qt_test(test_AccountSwitch tests/auth/TestAccountSwitch.cpp)
+    add_qt_test(test_TokenStorage tests/auth/TestTokenStorage.cpp)
 
     # API tests
     add_qt_test(test_GoogleDriveClient tests/api/TestGoogleDriveClient.cpp)

@@ -17,6 +17,8 @@
 #include <QSettings>
 #include <QString>
 
+class QJsonObject;
+
 /**
  * @class TokenStorage
  * @brief Secure storage for OAuth tokens
@@ -121,6 +123,10 @@ class TokenStorage : public QObject {
     QString readFromFallbackFile(const QString& key) const;
     void deleteFromFallbackFile(const QString& key) const;
     QString fallbackFilePath() const;
+    QString fallbackLockFilePath() const;
+    bool mutateFallbackFile(const QString& key, const QString* value) const;
+    bool loadFallbackObject(const QString& path, QJsonObject& root) const;
+    bool writeFallbackObjectAtomically(const QString& path, const QJsonObject& root) const;
 
     // ── Combined read/write using best available backend ─────────────
     void secureWrite(const QString& key, const QString& value) const;

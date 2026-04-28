@@ -18,7 +18,24 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLockFile>
+#include <QSaveFile>
 #include <QStandardPaths>
+
+#ifdef Q_OS_UNIX
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+namespace {
+
+bool isFallbackForcedByEnvironment() {
+    const QByteArray value = qgetenv("VIA_FORCE_TOKEN_FALLBACK").trimmed().toLower();
+    return !value.isEmpty() && value != "0" && value != "false";
+}
+
+}  // namespace
 
 // ── Static constants ────────────────────────────────────────────────────────
 
@@ -32,8 +49,13 @@ const QString TokenStorage::CLIENT_SECRET_KEY = QStringLiteral("clientSecret");
 // ── Construction / destruction ──────────────────────────────────────────────
 
 TokenStorage::TokenStorage(QObject* parent)
-    : QObject(parent), m_keychainAvailable(QKeychain::isAvailable()) {
+    : QObject(parent),
+      m_keychainAvailable(QKeychain::isAvailable() && !isFallbackForcedByEnvironment()) {
     m_settings.setFallbacksEnabled(false);
+
+    if (isFallbackForcedByEnvironment()) {
+        qInfo() << "TokenStorage: forcing file-based fallback backend via VIA_FORCE_TOKEN_FALLBACK";
+    }
 
     if (m_keychainAvailable) {
         qInfo() << "TokenStorage: OS keyring available, using secure storage";
@@ -167,69 +189,193 @@ QString TokenStorage::fallbackFilePath() const {
     return dataPath + QStringLiteral("/secure_tokens.json");
 }
 
-bool TokenStorage::writeToFallbackFile(const QString& key, const QString& value) const {
-    QString path = fallbackFilePath();
+QString TokenStorage::fallbackLockFilePath() const {
+    return fallbackFilePath() + QStringLiteral(".lock");
+}
 
-    // Read existing JSON
-    QJsonObject root;
-    {
-        QFile file(path);
-        if (file.exists() && file.open(QIODevice::ReadOnly)) {
-            root = QJsonDocument::fromJson(file.readAll()).object();
-            file.close();
-        }
+bool TokenStorage::loadFallbackObject(const QString& path, QJsonObject& root) const {
+    QFile file(path);
+    if (!file.exists()) {
+        root = QJsonObject();
+        return true;
     }
 
-    root[key] = value;
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "Failed to open fallback token file for reading:" << path;
+        root = QJsonObject();
+        return false;
+    }
 
-    // Ensure directory exists
-    QDir().mkpath(QFileInfo(path).path());
+    const QByteArray payload = file.readAll();
+    file.close();
 
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        qWarning() << "Failed to open fallback token file for writing:" << path;
+    if (payload.trimmed().isEmpty()) {
+        root = QJsonObject();
+        return true;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        qWarning() << "Fallback token file is malformed, rebuilding from an empty object:" << path
+                   << parseError.errorString();
+        root = QJsonObject();
+        return true;
+    }
+
+    root = document.object();
+    return true;
+}
+
+bool TokenStorage::writeFallbackObjectAtomically(const QString& path,
+                                                 const QJsonObject& root) const {
+    const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    const QFileInfo fileInfo(path);
+    QDir directory(fileInfo.path());
+
+    if (!directory.exists() && !QDir().mkpath(directory.path())) {
+        qWarning() << "Failed to create fallback token directory:" << directory.path();
+        return false;
+    }
+
+#ifdef Q_OS_UNIX
+    QByteArray tempTemplate =
+        QFile::encodeName(directory.filePath(fileInfo.fileName() + QStringLiteral(".XXXXXX")));
+    tempTemplate.append('\0');
+
+    const int fileDescriptor = ::mkstemp(tempTemplate.data());
+    if (fileDescriptor == -1) {
+        qWarning() << "Failed to create fallback token temp file:" << path << strerror(errno);
+        return false;
+    }
+
+    const QString tempPath = QFile::decodeName(tempTemplate.constData());
+    bool ok = true;
+    qsizetype offset = 0;
+
+    if (::fchmod(fileDescriptor, S_IRUSR | S_IWUSR) != 0) {
+        qWarning() << "Failed to secure fallback token temp file permissions:" << tempPath
+                   << strerror(errno);
+        ok = false;
+    }
+
+    while (ok && offset < payload.size()) {
+        const ssize_t written =
+            ::write(fileDescriptor, payload.constData() + offset, payload.size() - offset);
+        if (written == -1) {
+            qWarning() << "Failed to write fallback token temp file:" << tempPath
+                       << strerror(errno);
+            ok = false;
+            break;
+        }
+        offset += written;
+    }
+
+    if (ok && ::fsync(fileDescriptor) != 0) {
+        qWarning() << "Failed to sync fallback token temp file:" << tempPath << strerror(errno);
+        ok = false;
+    }
+
+    if (::close(fileDescriptor) != 0) {
+        qWarning() << "Failed to close fallback token temp file:" << tempPath << strerror(errno);
+        ok = false;
+    }
+
+    if (!ok) {
+        QFile::remove(tempPath);
+        return false;
+    }
+
+    if (::rename(QFile::encodeName(tempPath).constData(), QFile::encodeName(path).constData()) !=
+        0) {
+        qWarning() << "Failed to replace fallback token file atomically:" << path
+                   << strerror(errno);
+        QFile::remove(tempPath);
+        return false;
+    }
+
+    return true;
+#else
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        qWarning() << "Failed to open fallback token file for atomic write:" << path;
         return false;
     }
 
     file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-    file.close();
+    if (file.write(payload) != payload.size()) {
+        qWarning() << "Failed to write fallback token file:" << path;
+        file.cancelWriting();
+        return false;
+    }
+
+    if (!file.commit()) {
+        qWarning() << "Failed to commit fallback token file:" << path;
+        return false;
+    }
+
     return true;
+#endif
+}
+
+bool TokenStorage::mutateFallbackFile(const QString& key, const QString* value) const {
+    const QString path = fallbackFilePath();
+    const QFileInfo fileInfo(path);
+
+    if (!QDir().mkpath(fileInfo.path())) {
+        qWarning() << "Failed to create fallback token directory:" << fileInfo.path();
+        return false;
+    }
+
+    // Serialize fallback mutations across instances and processes.
+    QLockFile lock(fallbackLockFilePath());
+    if (!lock.tryLock(5000)) {
+        qWarning() << "Failed to acquire fallback token file lock:" << fallbackLockFilePath();
+        return false;
+    }
+
+    QJsonObject root;
+    if (!loadFallbackObject(path, root)) {
+        return false;
+    }
+
+    if (value != nullptr) {
+        root.insert(key, *value);
+    } else {
+        if (!root.contains(key)) {
+            return true;
+        }
+        root.remove(key);
+    }
+
+    if (root.isEmpty()) {
+        if (!QFile::exists(path)) {
+            return true;
+        }
+        if (!QFile::remove(path)) {
+            qWarning() << "Failed to remove empty fallback token file:" << path;
+            return false;
+        }
+        return true;
+    }
+
+    return writeFallbackObjectAtomically(path, root);
+}
+
+bool TokenStorage::writeToFallbackFile(const QString& key, const QString& value) const {
+    return mutateFallbackFile(key, &value);
 }
 
 QString TokenStorage::readFromFallbackFile(const QString& key) const {
-    QFile file(fallbackFilePath());
-    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+    QJsonObject root;
+    if (!loadFallbackObject(fallbackFilePath(), root)) {
         return QString();
     }
-
-    QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
-    file.close();
     return root.value(key).toString();
 }
 
 void TokenStorage::deleteFromFallbackFile(const QString& key) const {
-    QString path = fallbackFilePath();
-    QFile file(path);
-    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
-        return;
-    }
-
-    QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
-    file.close();
-
-    if (!root.contains(key)) {
-        return;
-    }
-
-    root.remove(key);
-
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        return;
-    }
-    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-    file.close();
+    mutateFallbackFile(key, nullptr);
 }
 
 // ── Combined read/write using best available backend ────────────────────────
