@@ -313,6 +313,9 @@ if(BUILD_TESTS)
     add_qt_test(test_TokenRefresh tests/auth/TestTokenRefresh.cpp)
     add_qt_test(test_AccountSwitch tests/auth/TestAccountSwitch.cpp)
 
+    # API tests
+    add_qt_test(test_GoogleDriveClient tests/api/TestGoogleDriveClient.cpp)
+
     # ==================================================================
     # E2E FUSE Test Harness (headless mount for pjdfstest / fsstress)
     # ==================================================================

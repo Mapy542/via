@@ -46,6 +46,15 @@ class GoogleDriveClient : public QObject {
      */
     explicit GoogleDriveClient(GoogleAuthManager* authManager, QObject* parent = nullptr);
 
+    /**
+     * @brief Construct the Drive client with an injected network manager
+     * @param authManager Pointer to the authentication manager
+     * @param networkManager Network manager to use for requests; intended for tests
+     * @param parent Parent object
+     */
+    GoogleDriveClient(GoogleAuthManager* authManager, QNetworkAccessManager* networkManager,
+                      QObject* parent = nullptr);
+
     ~GoogleDriveClient() override;
 
     /**
