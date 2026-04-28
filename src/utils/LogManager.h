@@ -100,8 +100,6 @@ class LogManager : public QObject {
      */
     void writeToFile(const QString& message, QtMsgType type = QtDebugMsg);
 
-    static LogManager* s_instance;
-
     QFile m_logFile;
     QMutex m_mutex;
     QString m_logDir;

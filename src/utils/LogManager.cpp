@@ -12,13 +12,12 @@
 #include <QTextStream>
 #include <iostream>
 
-LogManager* LogManager::s_instance = nullptr;
-
 LogManager& LogManager::instance() {
-    if (!s_instance) {
-        s_instance = new LogManager();
-    }
-    return *s_instance;
+    // Function-local static initialization is thread-safe in C++11 and later.
+    // Keep the singleton heap-allocated so its lifetime stays process-wide without
+    // introducing shutdown-order coupling with other Qt globals.
+    static LogManager* instance = new LogManager();
+    return *instance;
 }
 
 LogManager::LogManager(QObject* parent)
@@ -137,7 +136,9 @@ void LogManager::setMaxLogFiles(int count) { m_maxLogFiles = count; }
 
 void LogManager::messageHandler(QtMsgType type, const QMessageLogContext& context,
                                 const QString& msg) {
-    if (!s_instance || !s_instance->m_initialized) {
+    LogManager& manager = instance();
+
+    if (!manager.m_initialized) {
         // Fallback to stderr
         std::cerr << msg.toStdString() << std::endl;
         return;
@@ -179,12 +180,12 @@ void LogManager::messageHandler(QtMsgType type, const QMessageLogContext& contex
     std::cout << formattedMsg.toStdString() << std::endl;
 
     // Write to file
-    s_instance->writeToFile(formattedMsg, type);
+    manager.writeToFile(formattedMsg, type);
 
     // For fatal messages, also write to stderr and abort
     if (type == QtFatalMsg) {
         std::cerr << "FATAL: " << msg.toStdString() << std::endl;
-        s_instance->flush();
+        manager.flush();
         abort();
     }
 }

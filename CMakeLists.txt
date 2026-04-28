@@ -303,8 +303,12 @@ if(BUILD_TESTS)
     add_qt_test(test_MetadataRefreshWorker tests/fuse/TestMetadataRefreshWorker.cpp)
     add_qt_test(test_NativeDocShortcutHandler tests/fuse/TestNativeDocShortcutHandler.cpp)
 
+    # Utility tests
+    add_qt_test(test_PathUtils tests/utils/TestPathUtils.cpp)
+
     # UI tests
     add_qt_test(test_AutostartManager tests/ui/TestAutostartManager.cpp)
+    add_qt_test(test_LogManager tests/utils/TestLogManager.cpp)
     add_qt_test(test_SettingsWindow tests/ui/TestSettingsWindow.cpp)
     add_qt_test(test_UiStatusCoordinator tests/ui/TestUiStatusCoordinator.cpp)
     add_qt_test(test_UiStatusIntegration tests/ui/TestUiStatusIntegration.cpp)

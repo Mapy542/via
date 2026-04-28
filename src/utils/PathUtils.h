@@ -13,6 +13,7 @@
 #define PATHUTILS_H
 
 #include <QDir>
+#include <QFileInfo>
 #include <QString>
 
 namespace PathUtils {
@@ -63,6 +64,90 @@ inline QString sanitizeRemoteFileName(const QString& name) {
 }
 
 /**
+ * @brief Check whether a path refers to a symbolic link without following it.
+ *
+ * @param path  Filesystem path to inspect
+ * @return true if the path entry exists and is a symlink
+ */
+inline bool isSymlink(const QString& path) { return QFileInfo(path).isSymLink(); }
+
+/**
+ * @brief Check whether a QFileInfo refers to a symbolic link without following it.
+ *
+ * @param fileInfo  Metadata to inspect
+ * @return true if the entry is a symlink
+ */
+inline bool isSymlink(const QFileInfo& fileInfo) { return fileInfo.isSymLink(); }
+
+/**
+ * @brief Check whether a candidate path is exactly the root or a child of it.
+ *
+ * Unlike a plain startsWith check, this requires a path-separator boundary so
+ * sibling prefixes such as "/sync.Trash-1000" do not count as being inside
+ * "/sync".
+ *
+ * @param candidatePath  Path being validated
+ * @param rootDir        Root directory boundary
+ * @return true if candidatePath is rootDir itself or nested beneath it
+ */
+inline bool isPathWithinRootBoundary(const QString& candidatePath, const QString& rootDir) {
+    if (candidatePath.isEmpty() || rootDir.isEmpty()) {
+        return false;
+    }
+
+    const QString cleanCandidate = QDir::cleanPath(candidatePath);
+    const QString cleanRoot = QDir::cleanPath(rootDir);
+
+    if (cleanCandidate == cleanRoot) {
+        return true;
+    }
+
+    if (cleanRoot == QStringLiteral("/")) {
+        return cleanCandidate.startsWith('/');
+    }
+
+    return cleanCandidate.startsWith(cleanRoot + QLatin1Char('/'));
+}
+
+/**
+ * @brief Resolve a path to its canonical location if it exists.
+ *
+ * This resolves symlink targets and normalizes the resulting absolute path.
+ *
+ * @param path  Existing filesystem path
+ * @return Canonical absolute path, or an empty string if unavailable
+ */
+inline QString canonicalPathIfExists(const QString& path) {
+    QFileInfo fileInfo(path);
+    if (!fileInfo.exists()) {
+        return QString();
+    }
+
+    return fileInfo.canonicalFilePath();
+}
+
+/**
+ * @brief Check whether an existing path resolves within an existing root.
+ *
+ * Useful for symlink-aware callers that need to validate the canonical target
+ * before recursing.
+ *
+ * @param path     Existing path that may be a symlink
+ * @param rootDir  Existing allowed root directory
+ * @return true if both canonical paths are available and the resolved path is inside the root
+ */
+inline bool isCanonicalPathWithinRoot(const QString& path, const QString& rootDir) {
+    const QString canonicalPath = canonicalPathIfExists(path);
+    const QString canonicalRoot = canonicalPathIfExists(rootDir);
+
+    if (canonicalPath.isEmpty() || canonicalRoot.isEmpty()) {
+        return false;
+    }
+
+    return isPathWithinRootBoundary(canonicalPath, canonicalRoot);
+}
+
+/**
  * @brief Verify that an absolute path stays within the given root directory.
  *
  * Cleans the path and checks that it starts with the cleaned root. Useful
@@ -73,15 +158,7 @@ inline QString sanitizeRemoteFileName(const QString& name) {
  * @return true if the path is safely contained within rootDir
  */
 inline bool isPathWithinRoot(const QString& absolutePath, const QString& rootDir) {
-    QString cleanPath = QDir::cleanPath(absolutePath);
-    QString cleanRoot = QDir::cleanPath(rootDir);
-
-    // Ensure root ends with separator for prefix match
-    if (!cleanRoot.endsWith('/')) {
-        cleanRoot += '/';
-    }
-
-    return cleanPath.startsWith(cleanRoot) || cleanPath == QDir::cleanPath(rootDir);
+    return isPathWithinRootBoundary(absolutePath, rootDir);
 }
 
 }  // namespace PathUtils
