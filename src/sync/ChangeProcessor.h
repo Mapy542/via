@@ -339,6 +339,12 @@ class ChangeProcessor : public QObject {
     void resolveConflictInternal(const ConflictInfo& conflict, ConflictResolutionStrategy strategy);
 
     /**
+     * @brief Clear the active flag for an idle loop and re-arm if work appeared meanwhile
+     * @return true when processNextChange() should be scheduled again
+     */
+    bool disarmIfIdleAndCheckForPendingWork();
+
+    /**
      * @brief Determine and queue sync actions for a validated change
      * @param change The validated change
      *
@@ -372,7 +378,8 @@ class ChangeProcessor : public QObject {
     SyncDatabase* m_database;
     GoogleDriveClient* m_driveClient;
 
-    // State
+    // State: m_state and m_processingActive form one synchronized state machine.
+    // Always read and write both while holding m_stateMutex.
     State m_state;
     mutable QMutex m_stateMutex;
 

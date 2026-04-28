@@ -21,10 +21,12 @@
 
 // Static registration for QMetaType
 static const int conflictInfoTypeId = qRegisterMetaType<ConflictInfo>("ConflictInfo");
-static const int conflictStrategyTypeId = qRegisterMetaType<ConflictResolutionStrategy>("ConflictResolutionStrategy");
+static const int conflictStrategyTypeId =
+    qRegisterMetaType<ConflictResolutionStrategy>("ConflictResolutionStrategy");
 
-ChangeProcessor::ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* syncActionQueue, SyncDatabase* database,
-                                 GoogleDriveClient* driveClient, QObject* parent)
+ChangeProcessor::ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* syncActionQueue,
+                                 SyncDatabase* database, GoogleDriveClient* driveClient,
+                                 QObject* parent)
     : QObject(parent),
       m_changeQueue(changeQueue),
       m_syncActionQueue(syncActionQueue),
@@ -40,7 +42,8 @@ ChangeProcessor::ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* sync
 
     // Connect to Change Queue's itemsAvailable signal (Jobs Available Wakeup)
     if (m_changeQueue) {
-        connect(m_changeQueue, &ChangeQueue::itemsAvailable, this, &ChangeProcessor::onItemsAvailable);
+        connect(m_changeQueue, &ChangeQueue::itemsAvailable, this,
+                &ChangeProcessor::onItemsAvailable);
     }
 }
 
@@ -56,7 +59,9 @@ void ChangeProcessor::setConflictResolutionStrategy(ConflictResolutionStrategy s
     qDebug() << "Conflict resolution strategy set to:" << static_cast<int>(strategy);
 }
 
-ConflictResolutionStrategy ChangeProcessor::conflictResolutionStrategy() const { return m_conflictStrategy; }
+ConflictResolutionStrategy ChangeProcessor::conflictResolutionStrategy() const {
+    return m_conflictStrategy;
+}
 
 void ChangeProcessor::setSyncFolder(const QString& path) {
     m_syncFolder = path;
@@ -95,6 +100,7 @@ void ChangeProcessor::unmarkFileInOperation(const QString& localPath) {
 }
 
 void ChangeProcessor::start() {
+    bool shouldSchedule = false;
     {
         QMutexLocker locker(&m_stateMutex);
         if (m_state == State::Running) {
@@ -102,9 +108,12 @@ void ChangeProcessor::start() {
             return;
         }
         m_state = State::Running;
+        if (!m_processingActive) {
+            m_processingActive = true;
+            shouldSchedule = true;
+        }
     }
 
-    m_processingActive = true;
     m_cachedSettings = SyncSettings::load();
     emit stateChanged(State::Running);
 
@@ -113,16 +122,18 @@ void ChangeProcessor::start() {
     rehydrateUnresolvedConflicts();
 
     // Start processing immediately if there are items
-    QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+    if (shouldSchedule) {
+        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+    }
 }
 
 void ChangeProcessor::stop() {
     {
         QMutexLocker locker(&m_stateMutex);
         m_state = State::Stopped;
+        m_processingActive = false;
     }
 
-    m_processingActive = false;
     emit stateChanged(State::Stopped);
 
     qInfo() << "ChangeProcessor stopped";
@@ -147,30 +158,36 @@ void ChangeProcessor::pause() {
             return;
         }
         m_state = State::Paused;
+        m_processingActive = false;
     }
 
-    m_processingActive = false;
     emit stateChanged(State::Paused);
 
     qInfo() << "ChangeProcessor paused";
 }
 
 void ChangeProcessor::resume() {
+    bool shouldSchedule = false;
     {
         QMutexLocker locker(&m_stateMutex);
         if (m_state != State::Paused) {
             return;
         }
         m_state = State::Running;
+        if (!m_processingActive) {
+            m_processingActive = true;
+            shouldSchedule = true;
+        }
     }
 
-    m_processingActive = true;
     emit stateChanged(State::Running);
 
     qInfo() << "ChangeProcessor resumed";
 
     // Resume processing
-    QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+    if (shouldSchedule) {
+        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+    }
 }
 
 void ChangeProcessor::onItemsAvailable() {
@@ -178,14 +195,38 @@ void ChangeProcessor::onItemsAvailable() {
     // This is called when the Change Queue transitions from empty to non-empty
     qDebug() << "ChangeProcessor received items available signal";
 
-    QMutexLocker locker(&m_stateMutex);
-    if (m_state == State::Running && !m_processingActive) {
-        m_processingActive = true;
+    bool shouldSchedule = false;
+    {
+        QMutexLocker locker(&m_stateMutex);
+        if (m_state == State::Running && !m_processingActive) {
+            m_processingActive = true;
+            shouldSchedule = true;
+        }
+    }
+
+    if (shouldSchedule) {
         QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
     }
 }
 
-void ChangeProcessor::resolveConflict(const QString& localPath, ConflictResolutionStrategy strategy) {
+bool ChangeProcessor::disarmIfIdleAndCheckForPendingWork() {
+    QMutexLocker locker(&m_stateMutex);
+    if (m_state != State::Running) {
+        m_processingActive = false;
+        return false;
+    }
+
+    m_processingActive = false;
+    if (m_changeQueue && !m_changeQueue->isEmpty()) {
+        m_processingActive = true;
+        return true;
+    }
+
+    return false;
+}
+
+void ChangeProcessor::resolveConflict(const QString& localPath,
+                                      ConflictResolutionStrategy strategy) {
     ConflictInfo conflict;
     {
         QMutexLocker locker(&m_conflictsMutex);
@@ -255,8 +296,11 @@ void ChangeProcessor::processNextChange() {
 
     // Check for items in the queue
     if (!m_changeQueue || m_changeQueue->isEmpty()) {
-        m_processingActive = false;
-        qDebug() << "ChangeProcessor idle - waiting for itemsAvailable signal";
+        if (disarmIfIdleAndCheckForPendingWork()) {
+            QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        } else {
+            qDebug() << "ChangeProcessor idle - waiting for itemsAvailable signal";
+        }
         return;
     }
 
@@ -268,7 +312,8 @@ void ChangeProcessor::processNextChange() {
         return;
     }
 
-    qDebug() << "Processing change:" << change.localPath << "type:" << static_cast<int>(change.changeType)
+    qDebug() << "Processing change:" << change.localPath
+             << "type:" << static_cast<int>(change.changeType)
              << "origin:" << static_cast<int>(change.origin);
 
     // Step 1: Validate the change
@@ -278,7 +323,8 @@ void ChangeProcessor::processNextChange() {
         return;
     }
 
-    if (m_database && !change.localPath.isEmpty() && m_database->hasUnresolvedConflict(change.localPath)) {
+    if (m_database && !change.localPath.isEmpty() &&
+        m_database->hasUnresolvedConflict(change.localPath)) {
         qWarning() << "Change skipped - unresolved conflict exists:" << change.localPath;
         appendConflictVersionForChange(change);
         emit changeSkipped(change.localPath, "Unresolved conflict exists, queued as new version");
@@ -372,7 +418,8 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
                 // Folder invalid if already exists and is not deleted
                 {
                     FileSyncState folderState = m_database->getFileState(localPath);
-                    if (!folderState.fileId.isEmpty() && m_database->wasFileDeleted(localPath) == false) {
+                    if (!folderState.fileId.isEmpty() &&
+                        m_database->wasFileDeleted(localPath) == false) {
                         qDebug() << "Validation failed - folder already exists:" << localPath;
                         return false;
                     }
@@ -385,8 +432,8 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
     }
 
     // Allow remote moves/renames even when modified time doesn't change.
-    if (change.origin == ChangeOrigin::Remote && hasDbState && !dbState.localPath.isEmpty() && !localPath.isEmpty() &&
-        localPath != dbState.localPath) {
+    if (change.origin == ChangeOrigin::Remote && hasDbState && !dbState.localPath.isEmpty() &&
+        !localPath.isEmpty() && localPath != dbState.localPath) {
         const QString oldPath = dbState.localPath;
         const QString newPath = localPath;
         QString oldDir = QFileInfo(oldPath).path();
@@ -409,7 +456,8 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
             change.moveDestination.clear();
         }
 
-        qDebug() << "Validation passed - remote path changed:" << changeId << "from" << oldPath << "to" << newPath;
+        qDebug() << "Validation passed - remote path changed:" << changeId << "from" << oldPath
+                 << "to" << newPath;
         if (!dedupValidate(change)) {
             return false;
         }
@@ -439,7 +487,8 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
             FileSyncState destState = m_database->getFileState(change.moveDestination);
             if (!destState.fileId.isEmpty() && !fileId.isEmpty() && destState.fileId != fileId &&
                 !m_database->wasFileDeleted(change.moveDestination)) {
-                qDebug() << "Validation failed - move destination already mapped:" << change.moveDestination;
+                qDebug() << "Validation failed - move destination already mapped:"
+                         << change.moveDestination;
                 return false;
             }
         } else {
@@ -456,7 +505,8 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
             if (change.localContentHash.isEmpty()) {
                 change.localContentHash = computeLocalFileMd5(localPath);
             }
-            if (!change.localContentHash.isEmpty() && change.localContentHash == dbState.localHashAtSync) {
+            if (!change.localContentHash.isEmpty() &&
+                change.localContentHash == dbState.localHashAtSync) {
                 qDebug() << "Validation failed - local content unchanged by hash:" << changeId;
                 return false;
             }
@@ -483,11 +533,14 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
             }
             qint64 diffSecs = dbSyncTime.secsTo(changeModTime);
             if (diffSecs < MIN_CHANGE_DIFF_SECS) {
-                qDebug() << "Validation failed - change not new enough:" << changeId << "diff:" << diffSecs << "secs";
+                qDebug() << "Validation failed - change not new enough:" << changeId
+                         << "diff:" << diffSecs << "secs";
                 return false;
             }
-            qDebug() << "Validation passed for modification time check:" << changeId << "diff:" << diffSecs << "secs"
-                     << " DB time:" << dbSyncTime.toString() << " Change time:" << change.modifiedTime.toString();
+            qDebug() << "Validation passed for modification time check:" << changeId
+                     << "diff:" << diffSecs << "secs"
+                     << " DB time:" << dbSyncTime.toString()
+                     << " Change time:" << change.modifiedTime.toString();
         }
         // If no DB record exists, this is a new file - allow it
     }
@@ -506,7 +559,8 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
             }
         }
         if (!m_database->wasFileDeleted(localPath)) {
-            qDebug() << "Validation passed for deletion - file not marked as deleted in DB:" << localPath;
+            qDebug() << "Validation passed for deletion - file not marked as deleted in DB:"
+                     << localPath;
         } else {
             qDebug() << "Validation failed - file already marked as deleted in DB:" << localPath;
             return false;
@@ -552,7 +606,8 @@ bool ChangeProcessor::dedupValidate(const ChangeQueueItem& change) {
 ConflictInfo ChangeProcessor::storeManualConflict(const ConflictInfo& conflict) {
     ConflictInfo stored = conflict;
     if (m_database && !conflict.localPath.isEmpty()) {
-        int conflictId = m_database->upsertConflictRecord(conflict.localPath, conflict.fileId, QString());
+        int conflictId =
+            m_database->upsertConflictRecord(conflict.localPath, conflict.fileId, QString());
         stored.conflictId = conflictId;
 
         ConflictVersion version;
@@ -577,7 +632,8 @@ void ChangeProcessor::appendConflictVersionForChange(const ChangeQueueItem& chan
     ConflictInfo conflict;
     conflict.localPath = change.localPath;
     conflict.fileId = change.fileId;
-    conflict.dbSyncTime = m_database ? m_database->getModifiedTimeAtSync(change.localPath) : QDateTime();
+    conflict.dbSyncTime =
+        m_database ? m_database->getModifiedTimeAtSync(change.localPath) : QDateTime();
     conflict.isConflicted = true;
 
     if (change.origin == ChangeOrigin::Local) {
@@ -623,11 +679,13 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
     }
 
     qInfo() << "ConflictCheck start"
-            << "origin=" << static_cast<int>(change.origin) << "type=" << static_cast<int>(change.changeType)
-            << "isDir=" << change.isDirectory << "path=" << change.localPath << "fileId=" << change.fileId;
+            << "origin=" << static_cast<int>(change.origin)
+            << "type=" << static_cast<int>(change.changeType) << "isDir=" << change.isDirectory
+            << "path=" << change.localPath << "fileId=" << change.fileId;
 
     if (change.origin == ChangeOrigin::Remote &&
-        (change.isDirectory || change.changeType == ChangeType::Move || change.changeType == ChangeType::Rename)) {
+        (change.isDirectory || change.changeType == ChangeType::Move ||
+         change.changeType == ChangeType::Rename)) {
         qInfo() << "ConflictCheck skip"
                 << "reason=Skipped_PathOpRemote"
                 << "type=" << static_cast<int>(change.changeType) << "isDir=" << change.isDirectory
@@ -662,8 +720,8 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
             change.localContentHash = computeLocalFileMd5(change.localPath);
         }
 
-        if (!change.isDirectory && !change.localContentHash.isEmpty() && !change.remoteMd5.isEmpty() &&
-            change.localContentHash == change.remoteMd5) {
+        if (!change.isDirectory && !change.localContentHash.isEmpty() &&
+            !change.remoteMd5.isEmpty() && change.localContentHash == change.remoteMd5) {
             qInfo() << "ConflictCheck skip"
                     << "reason=NoConflict_HashEqual"
                     << "path=" << change.localPath;
@@ -672,15 +730,17 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
 
         bool localChangedByHash = false;
         bool remoteChangedByHash = false;
-        if (!change.isDirectory && !baselineLocalHash.isEmpty() && !change.localContentHash.isEmpty()) {
+        if (!change.isDirectory && !baselineLocalHash.isEmpty() &&
+            !change.localContentHash.isEmpty()) {
             localChangedByHash = (change.localContentHash != baselineLocalHash);
         }
         if (!change.isDirectory && !baselineRemoteMd5.isEmpty() && !change.remoteMd5.isEmpty()) {
             remoteChangedByHash = (change.remoteMd5 != baselineRemoteMd5);
         }
 
-        if (!change.isDirectory && !change.localContentHash.isEmpty() && !change.remoteMd5.isEmpty() &&
-            !baselineLocalHash.isEmpty() && !baselineRemoteMd5.isEmpty()) {
+        if (!change.isDirectory && !change.localContentHash.isEmpty() &&
+            !change.remoteMd5.isEmpty() && !baselineLocalHash.isEmpty() &&
+            !baselineRemoteMd5.isEmpty()) {
             if (localChangedByHash && remoteChangedByHash) {
                 conflict.localPath = change.localPath;
                 conflict.fileId = change.fileId;
@@ -689,12 +749,13 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
                 conflict.dbSyncTime = dbSyncTime;
                 conflict.resolved = false;
                 conflict.isConflicted = true;
-                qInfo() << "Conflict (hash-based): local=" << localModTime << "remote=" << remoteModTime
-                        << "db=" << conflict.dbSyncTime;
+                qInfo() << "Conflict (hash-based): local=" << localModTime
+                        << "remote=" << remoteModTime << "db=" << conflict.dbSyncTime;
             } else {
                 qInfo() << "ConflictCheck skip"
                         << "reason=NoConflict_HashBaseline"
-                        << "path=" << change.localPath << "localChangedByHash=" << localChangedByHash
+                        << "path=" << change.localPath
+                        << "localChangedByHash=" << localChangedByHash
                         << "remoteChangedByHash=" << remoteChangedByHash;
             }
             return conflict;
@@ -717,7 +778,8 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
             conflict.resolved = false;
             conflict.isConflicted = true;
 
-            qInfo() << "Conflict: local=" << localModTime << "remote=" << remoteModTime << "db=" << conflict.dbSyncTime;
+            qInfo() << "Conflict: local=" << localModTime << "remote=" << remoteModTime
+                    << "db=" << conflict.dbSyncTime;
         } else {
             qInfo() << "ConflictCheck skip"
                     << "reason=NoConflict_Mtime"
@@ -726,7 +788,8 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
     }
 
     // Local-origin changes: fetch remote metadata to detect divergence before upload
-    if (change.origin == ChangeOrigin::Local && !change.fileId.isEmpty() && !change.isDirectory && m_driveClient) {
+    if (change.origin == ChangeOrigin::Local && !change.fileId.isEmpty() && !change.isDirectory &&
+        m_driveClient) {
         if (change.localContentHash.isEmpty()) {
             change.localContentHash = computeLocalFileMd5(change.localPath);
         }
@@ -734,7 +797,8 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
         DriveFile remoteFile = m_driveClient->getFileMetadataBlocking(change.fileId);
         if (!remoteFile.id.isEmpty()) {
             change.remoteMd5 = remoteFile.md5Checksum;
-            const bool localEqualsRemote = !change.localContentHash.isEmpty() && !change.remoteMd5.isEmpty() &&
+            const bool localEqualsRemote = !change.localContentHash.isEmpty() &&
+                                           !change.remoteMd5.isEmpty() &&
                                            (change.localContentHash == change.remoteMd5);
             if (localEqualsRemote) {
                 qInfo() << "ConflictCheck skip"
@@ -743,13 +807,15 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
                 return conflict;
             }
 
-            const bool localChangedByHash = !baselineLocalHash.isEmpty() && !change.localContentHash.isEmpty() &&
+            const bool localChangedByHash = !baselineLocalHash.isEmpty() &&
+                                            !change.localContentHash.isEmpty() &&
                                             (change.localContentHash != baselineLocalHash);
-            const bool remoteChangedByHash =
-                !baselineRemoteMd5.isEmpty() && !change.remoteMd5.isEmpty() && (change.remoteMd5 != baselineRemoteMd5);
+            const bool remoteChangedByHash = !baselineRemoteMd5.isEmpty() &&
+                                             !change.remoteMd5.isEmpty() &&
+                                             (change.remoteMd5 != baselineRemoteMd5);
 
-            if (!baselineLocalHash.isEmpty() && !baselineRemoteMd5.isEmpty() && localChangedByHash &&
-                remoteChangedByHash) {
+            if (!baselineLocalHash.isEmpty() && !baselineRemoteMd5.isEmpty() &&
+                localChangedByHash && remoteChangedByHash) {
                 QFileInfo localInfo(QDir(m_syncFolder).filePath(change.localPath));
                 conflict.localPath = change.localPath;
                 conflict.fileId = change.fileId;
@@ -762,7 +828,8 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
             } else {
                 qInfo() << "ConflictCheck skip"
                         << "reason=NoConflict_HashBaseline"
-                        << "path=" << change.localPath << "localChangedByHash=" << localChangedByHash
+                        << "path=" << change.localPath
+                        << "localChangedByHash=" << localChangedByHash
                         << "remoteChangedByHash=" << remoteChangedByHash;
             }
             return conflict;
@@ -772,8 +839,10 @@ ConflictInfo ChangeProcessor::checkForConflict(ChangeQueueItem& change) {
     return conflict;
 }
 
-void ChangeProcessor::resolveConflictInternal(const ConflictInfo& conflict, ConflictResolutionStrategy strategy) {
-    qInfo() << "Resolving conflict for:" << conflict.localPath << "with strategy:" << static_cast<int>(strategy);
+void ChangeProcessor::resolveConflictInternal(const ConflictInfo& conflict,
+                                              ConflictResolutionStrategy strategy) {
+    qInfo() << "Resolving conflict for:" << conflict.localPath
+            << "with strategy:" << static_cast<int>(strategy);
 
     // Determine effective strategy for KeepNewest
     ConflictResolutionStrategy effectiveStrategy = strategy;
@@ -864,21 +933,24 @@ void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
     const bool remoteReadOnly = m_cachedSettings.isRemoteReadOnly();
     const bool remoteNoDelete = m_cachedSettings.isRemoteNoDelete();
 
-    if ((change.changeType == ChangeType::Create || change.changeType == ChangeType::Modify) && !change.isDirectory) {
+    if ((change.changeType == ChangeType::Create || change.changeType == ChangeType::Modify) &&
+        !change.isDirectory) {
         if (change.origin == ChangeOrigin::Remote && !change.remoteMd5.isEmpty()) {
             QString localHash = change.localContentHash;
             if (localHash.isEmpty()) {
                 localHash = computeLocalFileMd5(change.localPath);
             }
             if (!localHash.isEmpty() && localHash == change.remoteMd5) {
-                qInfo() << "Skipping remote change - local content already matches remote hash:" << change.localPath;
+                qInfo() << "Skipping remote change - local content already matches remote hash:"
+                        << change.localPath;
                 return;
             }
         }
 
-        if (change.origin == ChangeOrigin::Local && !change.localContentHash.isEmpty() && !change.remoteMd5.isEmpty() &&
-            change.localContentHash == change.remoteMd5) {
-            qInfo() << "Skipping local change - remote content already matches local hash:" << change.localPath;
+        if (change.origin == ChangeOrigin::Local && !change.localContentHash.isEmpty() &&
+            !change.remoteMd5.isEmpty() && change.localContentHash == change.remoteMd5) {
+            qInfo() << "Skipping local change - remote content already matches local hash:"
+                    << change.localPath;
             return;
         }
     }
@@ -889,16 +961,17 @@ void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
     }
 
     // Enforce sync mode on actions only (do not affect detection)
-    if (remoteReadOnly &&
-        (action.actionType == SyncActionType::Upload || action.actionType == SyncActionType::MoveRemote ||
-         action.actionType == SyncActionType::RenameRemote || action.actionType == SyncActionType::DeleteRemote ||
-         action.actionType == SyncActionType::TrashRemote)) {
+    if (remoteReadOnly && (action.actionType == SyncActionType::Upload ||
+                           action.actionType == SyncActionType::MoveRemote ||
+                           action.actionType == SyncActionType::RenameRemote ||
+                           action.actionType == SyncActionType::DeleteRemote ||
+                           action.actionType == SyncActionType::TrashRemote)) {
         qInfo() << "Skipping remote action due to read-only sync mode:" << action.localPath;
         return;
     }
 
-    if (remoteNoDelete &&
-        (action.actionType == SyncActionType::DeleteRemote || action.actionType == SyncActionType::TrashRemote)) {
+    if (remoteNoDelete && (action.actionType == SyncActionType::DeleteRemote ||
+                           action.actionType == SyncActionType::TrashRemote)) {
         qInfo() << "Skipping remote delete/trash due to sync mode:" << action.localPath;
         return;
     }
@@ -911,14 +984,17 @@ void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
                 skippedPath = action.localPath;
             }
             emit changeSkipped(skippedPath, "duplicate pending sync action");
-            qInfo() << "Skipped duplicate sync action:" << static_cast<int>(action.actionType) << "for:" << skippedPath;
+            qInfo() << "Skipped duplicate sync action:" << static_cast<int>(action.actionType)
+                    << "for:" << skippedPath;
             return;
         }
-        qDebug() << "Queued sync action:" << static_cast<int>(action.actionType) << "for:" << action.localPath;
+        qDebug() << "Queued sync action:" << static_cast<int>(action.actionType)
+                 << "for:" << action.localPath;
     }
 }
 
-bool ChangeProcessor::buildSyncActionForChange(const ChangeQueueItem& change, SyncActionItem& action) const {
+bool ChangeProcessor::buildSyncActionForChange(const ChangeQueueItem& change,
+                                               SyncActionItem& action) const {
     action = SyncActionItem();
     action.localPath = change.localPath;
     action.fileId = change.fileId;
@@ -929,24 +1005,25 @@ bool ChangeProcessor::buildSyncActionForChange(const ChangeQueueItem& change, Sy
 
     switch (change.changeType) {
         case ChangeType::Create:
-            action.actionType =
-                change.origin == ChangeOrigin::Local ? SyncActionType::Upload : SyncActionType::Download;
+            action.actionType = change.origin == ChangeOrigin::Local ? SyncActionType::Upload
+                                                                     : SyncActionType::Download;
             return true;
 
         case ChangeType::Modify:
-            action.actionType =
-                change.origin == ChangeOrigin::Local ? SyncActionType::Upload : SyncActionType::Download;
+            action.actionType = change.origin == ChangeOrigin::Local ? SyncActionType::Upload
+                                                                     : SyncActionType::Download;
             return true;
 
         case ChangeType::Delete:
-            action.actionType =
-                change.origin == ChangeOrigin::Local ? SyncActionType::TrashRemote : SyncActionType::DeleteLocal;
+            action.actionType = change.origin == ChangeOrigin::Local ? SyncActionType::TrashRemote
+                                                                     : SyncActionType::DeleteLocal;
             return true;
 
         case ChangeType::Move:
             if (change.origin == ChangeOrigin::Local) {
                 if (action.fileId.isEmpty()) {
-                    qWarning() << "Skipping local move action - missing fileId for" << action.localPath;
+                    qWarning() << "Skipping local move action - missing fileId for"
+                               << action.localPath;
                     return false;
                 }
                 const QString destPath = change.moveDestination;
@@ -968,7 +1045,8 @@ bool ChangeProcessor::buildSyncActionForChange(const ChangeQueueItem& change, Sy
             action.renameTo = change.renameTo;
             if (change.origin == ChangeOrigin::Local) {
                 if (action.fileId.isEmpty()) {
-                    qWarning() << "Skipping local rename action - missing fileId for" << action.localPath;
+                    qWarning() << "Skipping local rename action - missing fileId for"
+                               << action.localPath;
                     return false;
                 }
                 action.actionType = SyncActionType::RenameRemote;
@@ -995,7 +1073,8 @@ QString ChangeProcessor::generateConflictCopyPath(const QString& originalPath) c
     if (suffix.isEmpty()) {
         conflictName = QString("%1/%2 (local conflict %3)").arg(dirPath, baseName, timestamp);
     } else {
-        conflictName = QString("%1/%2 (local conflict %3).%4").arg(dirPath, baseName, timestamp, suffix);
+        conflictName =
+            QString("%1/%2 (local conflict %3).%4").arg(dirPath, baseName, timestamp, suffix);
     }
 
     // Ensure unique name - use absolute path for existence check since
@@ -1003,10 +1082,14 @@ QString ChangeProcessor::generateConflictCopyPath(const QString& originalPath) c
     int counter = 1;
     while (QFile::exists(QDir(m_syncFolder).filePath(conflictName))) {
         if (suffix.isEmpty()) {
-            conflictName = QString("%1/%2 (local conflict %3 %4)").arg(dirPath, baseName, timestamp).arg(counter);
+            conflictName = QString("%1/%2 (local conflict %3 %4)")
+                               .arg(dirPath, baseName, timestamp)
+                               .arg(counter);
         } else {
-            conflictName =
-                QString("%1/%2 (local conflict %3 %4).%5").arg(dirPath, baseName, timestamp).arg(counter).arg(suffix);
+            conflictName = QString("%1/%2 (local conflict %3 %4).%5")
+                               .arg(dirPath, baseName, timestamp)
+                               .arg(counter)
+                               .arg(suffix);
         }
         ++counter;
     }

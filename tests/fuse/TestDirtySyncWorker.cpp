@@ -40,7 +40,12 @@ class FakeDriveClientDSW : public GoogleDriveClient {
     /// condition before the caller has entered wait().
     void updateFile(const QString& fileId, const QString& localPath) override {
         m_updateCalls[fileId]++;
-        if (m_failIds.contains(fileId)) {
+        if (m_failIdsWithEmptyErrorId.contains(fileId)) {
+            QTimer::singleShot(0, this, [this, localPath]() {
+                emit errorDetailed("updateFile", "Simulated empty-fileId failure", 500, QString(),
+                                   localPath);
+            });
+        } else if (m_failIds.contains(fileId)) {
             QTimer::singleShot(0, this, [this, fileId, localPath]() {
                 emit errorDetailed("updateFile", "Simulated failure", 500, fileId, localPath);
             });
@@ -72,6 +77,9 @@ class FakeDriveClientDSW : public GoogleDriveClient {
     /// Mark a fileId as one that should fail uploads
     void setFailForFileId(const QString& id) { m_failIds.insert(id); }
     void clearFailForFileId(const QString& id) { m_failIds.remove(id); }
+    void setFailForFileIdWithEmptyErrorId(const QString& id) {
+        m_failIdsWithEmptyErrorId.insert(id);
+    }
     int updateCallCountForFileId(const QString& id) const { return m_updateCalls.value(id, 0); }
 
     // Stubs required by base class
@@ -86,6 +94,7 @@ class FakeDriveClientDSW : public GoogleDriveClient {
 
    private:
     QSet<QString> m_failIds;
+    QSet<QString> m_failIdsWithEmptyErrorId;
     QMap<QString, int> m_updateCalls;
 };
 
@@ -135,6 +144,7 @@ class TestDirtySyncWorker : public QObject {
 
     // H5: error signal only wakes when fileId matches
     void testUploadError_MatchingFileId_Fails();
+    void testUploadError_EmptyFileId_UsesTrackedUploadId();
     void testUploadError_MismatchedFileId_ErrorNotAttributed();
 
     // GPT5.3 #8: retry budget
@@ -269,6 +279,26 @@ void TestDirtySyncWorker::testUploadError_MatchingFileId_Fails() {
 
     QCOMPARE(failSpy.first().at(0).toString(), fid);
     m_worker->stop();
+}
+
+void TestDirtySyncWorker::testUploadError_EmptyFileId_UsesTrackedUploadId() {
+    const QString fid = "file_empty_error_id";
+
+    createDirtyPendingFile(fid, "threaded upload content");
+    m_driveClient->setFailForFileIdWithEmptyErrorId(fid);
+
+    ThreadedDirtySyncWorkerHarness threadedWorker(m_fileCache, m_driveClient, m_db);
+    QSignalSpy failSpy(threadedWorker.worker(), &DirtySyncWorker::uploadFailed);
+    QSignalSpy cycleSpy(threadedWorker.worker(), &DirtySyncWorker::syncCycleCompleted);
+
+    QTRY_COMPARE_WITH_TIMEOUT(failSpy.size(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 1, 5000);
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 1);
+    QCOMPARE(failSpy.first().at(0).toString(), fid);
+    QCOMPARE(failSpy.first().at(2).toString(), QStringLiteral("Simulated empty-fileId failure"));
+    QCOMPARE(cycleSpy.last().at(0).toInt(), 0);
+    QCOMPARE(cycleSpy.last().at(1).toInt(), 1);
 }
 
 // ---------------------------------------------------------------------------

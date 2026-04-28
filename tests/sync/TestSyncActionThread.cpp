@@ -266,6 +266,8 @@ class TestSyncActionThread : public QObject {
     void testDownloadFolder();
     void testDeleteLocal();
     void testDeleteLocalFolderMarksDescendants();
+    void testDeleteLocalSymlinkFileRemovesLinkOnly();
+    void testDeleteLocalSymlinkDirectoryRemovesLinkOnly();
     void testMoveLocal();
     void testMoveLocal_DisambiguatesWhenDestinationExists();
     void testMoveLocal_UpdatesMetadataOnDestination();
@@ -670,6 +672,75 @@ void TestSyncActionThread::testDeleteLocalFolderMarksDescendants() {
     QVERIFY(m_db->wasFileDeleted("parent"));
     QVERIFY(m_db->wasFileDeleted("parent/sub"));
     QVERIFY(m_db->wasFileDeleted("parent/sub/file.txt"));
+}
+
+void TestSyncActionThread::testDeleteLocalSymlinkFileRemovesLinkOnly() {
+    QTemporaryDir externalDir;
+    QVERIFY(externalDir.isValid());
+
+    const QString externalFilePath = externalDir.filePath("outside.txt");
+    QVERIFY(QDir().mkpath(QFileInfo(externalFilePath).path()));
+    QFile externalFile(externalFilePath);
+    QVERIFY(externalFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(externalFile.write("outside"), 7);
+    externalFile.close();
+
+    const QString relPath = "delete/outside-link.txt";
+    const QString linkPath = m_tempDir->filePath(relPath);
+    QVERIFY(QDir().mkpath(QFileInfo(linkPath).path()));
+
+    if (!QFile::link(externalFilePath, linkPath)) {
+        QSKIP("Symlink creation not supported");
+    }
+
+    m_db->setFileId(relPath, "link-id-1");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::DeleteLocal;
+    action.localPath = relPath;
+
+    enqueueAndWait(action);
+
+    QVERIFY(!QFileInfo::exists(linkPath));
+    QVERIFY(QFile::exists(externalFilePath));
+    QVERIFY(m_db->wasFileDeleted(relPath));
+}
+
+void TestSyncActionThread::testDeleteLocalSymlinkDirectoryRemovesLinkOnly() {
+    QTemporaryDir externalDir;
+    QVERIFY(externalDir.isValid());
+
+    const QString externalTargetDir = externalDir.filePath("outside-dir");
+    const QString externalNestedFile = externalDir.filePath("outside-dir/kept.txt");
+    QVERIFY(QDir().mkpath(externalTargetDir));
+    QFile externalFile(externalNestedFile);
+    QVERIFY(externalFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(externalFile.write("outside-dir"), 11);
+    externalFile.close();
+
+    const QString relPath = "delete/outside-dir-link";
+    const QString childRelPath = relPath + "/kept.txt";
+    const QString linkPath = m_tempDir->filePath(relPath);
+    QVERIFY(QDir().mkpath(QFileInfo(linkPath).path()));
+
+    if (!QFile::link(externalTargetDir, linkPath)) {
+        QSKIP("Symlink creation not supported");
+    }
+
+    m_db->setFileId(relPath, "link-id-2");
+    m_db->setFileId(childRelPath, "child-id-1");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::DeleteLocal;
+    action.localPath = relPath;
+
+    enqueueAndWait(action);
+
+    QVERIFY(!QFileInfo::exists(linkPath));
+    QVERIFY(QDir(externalTargetDir).exists());
+    QVERIFY(QFile::exists(externalNestedFile));
+    QVERIFY(m_db->wasFileDeleted(relPath));
+    QVERIFY(!m_db->wasFileDeleted(childRelPath));
 }
 
 void TestSyncActionThread::testMoveLocal() {

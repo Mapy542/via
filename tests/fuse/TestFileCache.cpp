@@ -56,6 +56,11 @@ class FakeDriveClientFC : public GoogleDriveClient {
         int errorStatus = 0;
     };
 
+    QByteArray downloadPayload = QByteArray("downloaded cache file");
+    QString downloadErrorMessage;
+    int downloadErrorStatus = 0;
+    bool downloadShouldFail = false;
+    int downloadWriteCount = 0;
     QByteArray exportPayload = QByteArray("exported native doc");
     QString exportErrorMessage;
     int exportErrorStatus = 0;
@@ -75,6 +80,40 @@ class FakeDriveClientFC : public GoogleDriveClient {
         ++downloadCallCount;
         lastDownloadFileId = fileId;
         lastDownloadPath = localPath;
+
+        if (downloadShouldFail) {
+            emit error(QStringLiteral("downloadFile:%1").arg(fileId), downloadErrorMessage);
+            emit errorDetailed(QStringLiteral("downloadFile:%1").arg(fileId), downloadErrorMessage,
+                               downloadErrorStatus, fileId, localPath);
+            return;
+        }
+
+        QFileInfo fileInfo(localPath);
+        QDir().mkpath(fileInfo.dir().absolutePath());
+
+        QFile file(localPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            const QString message =
+                QStringLiteral("Failed to open file for writing: %1").arg(localPath);
+            emit error(QStringLiteral("downloadFile:%1").arg(fileId), message);
+            emit errorDetailed(QStringLiteral("downloadFile:%1").arg(fileId), message, 0, fileId,
+                               localPath);
+            return;
+        }
+
+        if (file.write(downloadPayload) != downloadPayload.size()) {
+            const QString message =
+                QStringLiteral("Failed to write downloaded file: %1").arg(localPath);
+            file.close();
+            emit error(QStringLiteral("downloadFile:%1").arg(fileId), message);
+            emit errorDetailed(QStringLiteral("downloadFile:%1").arg(fileId), message, 0, fileId,
+                               localPath);
+            return;
+        }
+
+        file.close();
+        ++downloadWriteCount;
+        emit fileDownloaded(fileId, localPath);
     }
     void exportFile(const QString& fileId, const QString& exportMimeType,
                     const QString& localPath) override {
@@ -193,6 +232,7 @@ class TestFileCache : public QObject {
     void testCacheLimit_OversizeFileReentersPressureAfterRelease();
 
     // Dirty guard in getCachedPath
+    void testGetCachedPath_SuccessRestrictsPermissions();
     void testGetCachedPath_DirtyFileSkipsDownload();
     void testGetCachedPath_PausedCacheMissFailsWithoutDownload();
     void testGetCachedPath_PausedCacheHitStillWorks();
@@ -207,6 +247,7 @@ class TestFileCache : public QObject {
     void testClearDirty_SkipsWhenWritableHandleExists();
     void testCreateUploadSnapshot_CopiesPendingContent();
     void testCreateUploadSnapshot_SkipsUploadedGeneration();
+    void testInitialize_RemovesSnapshotSymlinkLeafOnly();
     void testFinalizeUploadedGeneration_ClearsWhenWriterCloses();
 
     // Representation-specific cache key
@@ -323,6 +364,16 @@ static void seedCacheFile(FileCache* cache, const QString& /*cacheDir*/, const Q
 
     // Record entry via public API
     cache->recordCacheEntry(fileId, filePath, size);
+}
+
+static void verifyOwnerOnlyPermissions(const QString& path) {
+    const QFileDevice::Permissions permissions = QFile::permissions(path);
+    QVERIFY(permissions.testFlag(QFileDevice::ReadOwner));
+    QVERIFY(permissions.testFlag(QFileDevice::WriteOwner));
+    QVERIFY(!permissions.testFlag(QFileDevice::ReadGroup));
+    QVERIFY(!permissions.testFlag(QFileDevice::WriteGroup));
+    QVERIFY(!permissions.testFlag(QFileDevice::ReadOther));
+    QVERIFY(!permissions.testFlag(QFileDevice::WriteOther));
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +556,41 @@ void TestFileCache::testCacheLimit_OversizeFileReentersPressureAfterRelease() {
 // ---------------------------------------------------------------------------
 // Tests — dirty guard in getCachedPath
 // ---------------------------------------------------------------------------
+
+void TestFileCache::testGetCachedPath_SuccessRestrictsPermissions() {
+    const QString fileId = QStringLiteral("download-owner-only");
+    const QByteArray payload("sensitive downloaded bytes");
+
+    m_driveClient->downloadShouldFail = false;
+    m_driveClient->downloadPayload = payload;
+
+    QSignalSpy completedSpy(m_cache, &FileCache::downloadCompleted);
+    QVERIFY(completedSpy.isValid());
+
+    QString result;
+    JoiningThread worker([&]() { result = m_cache->getCachedPath(fileId); });
+
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 2000);
+    worker.join();
+
+    QVERIFY(!result.isEmpty());
+    QCOMPARE(m_driveClient->downloadCallCount, 1);
+    QCOMPARE(m_driveClient->downloadWriteCount, 1);
+    QCOMPARE(m_driveClient->lastDownloadFileId, fileId);
+    QVERIFY(m_cache->isCached(fileId));
+    QVERIFY(QFile::exists(result));
+
+    QFile downloadedFile(result);
+    QVERIFY(downloadedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(downloadedFile.readAll(), payload);
+    downloadedFile.close();
+
+    verifyOwnerOnlyPermissions(result);
+
+    const QList<QVariant> args = completedSpy.takeFirst();
+    QCOMPARE(args.at(0).toString(), fileId);
+    QCOMPARE(args.at(1).toString(), result);
+}
 
 // When a file is dirty but its cache entry is absent (e.g. post-restart
 // rehydration race), getCachedPath must return the on-disk path WITHOUT
@@ -837,6 +923,34 @@ void TestFileCache::testCreateUploadSnapshot_SkipsUploadedGeneration() {
     QVERIFY(snapshot.snapshotPath.isEmpty());
 }
 
+void TestFileCache::testInitialize_RemovesSnapshotSymlinkLeafOnly() {
+    QTemporaryDir externalDir;
+    QVERIFY(externalDir.isValid());
+
+    const QString snapshotRoot = m_tempDir->path() + "/pending/snapshots";
+    const QString externalSnapshotRoot = externalDir.path() + "/outside-snapshots";
+    const QString externalFilePath = externalSnapshotRoot + "/kept.txt";
+
+    QVERIFY(QDir().mkpath(externalSnapshotRoot));
+    QFile externalFile(externalFilePath);
+    QVERIFY(externalFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(externalFile.write("kept"), 4);
+    externalFile.close();
+
+    QVERIFY(QDir().rmdir(snapshotRoot));
+
+    if (!QFile::link(externalSnapshotRoot, snapshotRoot)) {
+        QSKIP("Symlink creation not supported");
+    }
+
+    recreateCache();
+
+    QVERIFY(QDir(snapshotRoot).exists());
+    QVERIFY(!QFileInfo(snapshotRoot).isSymLink());
+    QVERIFY(QDir(externalSnapshotRoot).exists());
+    QVERIFY(QFile::exists(externalFilePath));
+}
+
 void TestFileCache::testFinalizeUploadedGeneration_ClearsWhenWriterCloses() {
     const QString fileId = "finalize_uploaded";
 
@@ -945,6 +1059,8 @@ void TestFileCache::testGetExportedPath_SuccessCachesBufferedExport() {
     QVERIFY(exportedFile.open(QIODevice::ReadOnly));
     QCOMPARE(exportedFile.readAll(), payload);
     exportedFile.close();
+
+    verifyOwnerOnlyPermissions(result);
 
     const QString cachedAgain = m_cache->getExportedPath(fileId, exportMimeType);
     QCOMPARE(cachedAgain, result);

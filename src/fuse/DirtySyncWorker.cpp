@@ -312,15 +312,23 @@ void DirtySyncWorker::onUploadErrorDetailed(const QString& operation, const QStr
 
     QMutexLocker locker(&m_mutex);
 
-    // H5 fix: only react when the error is for the file we are uploading
-    if (m_uploadInProgress && m_currentUploadFileId == fileId) {
-        qWarning() << "DirtySyncWorker: Upload error for" << fileId << ":" << operation << "-"
-                   << errorMsg;
-        m_uploadSuccess = false;
-        m_uploadDone = true;
-        m_uploadError = errorMsg;
-        m_uploadCondition.wakeAll();
+    if (!m_uploadInProgress) {
+        return;
     }
+
+    QString attributedFileId = fileId;
+    if (fileId.isEmpty()) {
+        attributedFileId = m_currentUploadFileId;
+    } else if (m_currentUploadFileId != fileId) {
+        return;
+    }
+
+    qWarning() << "DirtySyncWorker: Upload error for" << attributedFileId << ":" << operation << "-"
+               << errorMsg;
+    m_uploadSuccess = false;
+    m_uploadDone = true;
+    m_uploadError = errorMsg;
+    m_uploadCondition.wakeAll();
 }
 
 // ============================================================================

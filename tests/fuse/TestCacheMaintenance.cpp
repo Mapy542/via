@@ -21,6 +21,7 @@ class TestCacheMaintenance : public QObject {
     void cleanup();
 
     void testPurgeFuseRepresentationCache_ClearsEvictableState();
+    void testPurgeFuseRepresentationCache_RemovesSymlinkLeavesOnly();
     void testPurgeFuseRepresentationCache_StopsWhenDatabaseClearFails();
 
    private:
@@ -115,6 +116,43 @@ void TestCacheMaintenance::testPurgeFuseRepresentationCache_ClearsEvictableState
         }
     }
     QVERIFY(foundDirtyFile);
+}
+
+void TestCacheMaintenance::testPurgeFuseRepresentationCache_RemovesSymlinkLeavesOnly() {
+    const QString cacheRoot = m_tempDir->path() + "/cache-root-symlinks";
+    const QString externalRoot = m_tempDir->path() + "/external-root";
+    const QString externalFilePath = externalRoot + "/outside.txt";
+    const QString externalDirPath = externalRoot + "/outside-dir";
+    const QString externalNestedPath = externalDirPath + "/nested.txt";
+    const QString fileLinkPath = cacheRoot + "/outside-link.txt";
+    const QString dirLinkPath = cacheRoot + "/outside-dir-link";
+
+    QVERIFY(QDir().mkpath(cacheRoot));
+    QVERIFY(QDir().mkpath(externalDirPath));
+    writeFile(externalFilePath, QByteArray("outside-file"));
+    writeFile(externalNestedPath, QByteArray("outside-dir-file"));
+
+    if (!QFile::link(externalFilePath, fileLinkPath) ||
+        !QFile::link(externalDirPath, dirLinkPath)) {
+        QSKIP("Symlink creation not supported");
+    }
+
+    QVERIFY(m_db->recordFuseCacheEntry("LINK_ID", fileLinkPath, 12));
+    QVERIFY(m_db->setFuseSyncState("cursor", "abc123"));
+
+    QVERIFY(CacheMaintenance::purgeFuseRepresentationCache(cacheRoot, *m_db));
+
+    QDir cacheDir(cacheRoot);
+    QVERIFY(cacheDir.exists());
+    QVERIFY(cacheDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty());
+
+    QVERIFY(QFile::exists(externalFilePath));
+    QVERIFY(QFile::exists(externalNestedPath));
+    QVERIFY(!QFileInfo::exists(fileLinkPath));
+    QVERIFY(!QFileInfo::exists(dirLinkPath));
+
+    QVERIFY(m_db->getFuseCacheEntries().isEmpty());
+    QVERIFY(m_db->getFuseSyncState("cursor").isEmpty());
 }
 
 void TestCacheMaintenance::testPurgeFuseRepresentationCache_StopsWhenDatabaseClearFails() {

@@ -44,6 +44,7 @@ class TestTrashPolicy : public QObject {
     void testAbsolute_PathCleaningDoubleSlash();
     void testAbsolute_PathCleaningDotSegment();
     void testAbsolute_SyncRootItself();
+    void testAbsolute_SiblingPrefixOutsideSyncRoot();
 
     // =========================================================================
     // isMoveToTrash
@@ -66,17 +67,25 @@ class TestTrashPolicy : public QObject {
 //  isTrashRelativePath
 // ===========================================================================
 
-void TestTrashPolicy::testRelative_TrashRootUid1000() { QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000")); }
+void TestTrashPolicy::testRelative_TrashRootUid1000() {
+    QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000"));
+}
 
-void TestTrashPolicy::testRelative_TrashRootUid0() { QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-0")); }
+void TestTrashPolicy::testRelative_TrashRootUid0() {
+    QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-0"));
+}
 
-void TestTrashPolicy::testRelative_TrashRootUidLarge() { QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-65534")); }
+void TestTrashPolicy::testRelative_TrashRootUidLarge() {
+    QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-65534"));
+}
 
 void TestTrashPolicy::testRelative_TrashFilesSubdir() {
     QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000/files"));
 }
 
-void TestTrashPolicy::testRelative_TrashInfoSubdir() { QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000/info")); }
+void TestTrashPolicy::testRelative_TrashInfoSubdir() {
+    QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000/info"));
+}
 
 void TestTrashPolicy::testRelative_NestedFileInTrash() {
     QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000/files/document.pdf"));
@@ -84,20 +93,30 @@ void TestTrashPolicy::testRelative_NestedFileInTrash() {
 
 void TestTrashPolicy::testRelative_EmptyPath() { QVERIFY(!TrashPolicy::isTrashRelativePath("")); }
 
-void TestTrashPolicy::testRelative_NormalFile() { QVERIFY(!TrashPolicy::isTrashRelativePath("documents/report.pdf")); }
+void TestTrashPolicy::testRelative_NormalFile() {
+    QVERIFY(!TrashPolicy::isTrashRelativePath("documents/report.pdf"));
+}
 
-void TestTrashPolicy::testRelative_NormalFolder() { QVERIFY(!TrashPolicy::isTrashRelativePath("photos/vacation")); }
+void TestTrashPolicy::testRelative_NormalFolder() {
+    QVERIFY(!TrashPolicy::isTrashRelativePath("photos/vacation"));
+}
 
-void TestTrashPolicy::testRelative_DotTrashNoUid() { QVERIFY(!TrashPolicy::isTrashRelativePath(".Trash")); }
+void TestTrashPolicy::testRelative_DotTrashNoUid() {
+    QVERIFY(!TrashPolicy::isTrashRelativePath(".Trash"));
+}
 
-void TestTrashPolicy::testRelative_DotTrashNonNumericUid() { QVERIFY(!TrashPolicy::isTrashRelativePath(".Trash-abc")); }
+void TestTrashPolicy::testRelative_DotTrashNonNumericUid() {
+    QVERIFY(!TrashPolicy::isTrashRelativePath(".Trash-abc"));
+}
 
 void TestTrashPolicy::testRelative_NestedTrashNotMatched() {
     // .Trash-1000 must be the FIRST path component
     QVERIFY(!TrashPolicy::isTrashRelativePath("subdir/.Trash-1000/files/foo.txt"));
 }
 
-void TestTrashPolicy::testRelative_TrailingSlash() { QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000/")); }
+void TestTrashPolicy::testRelative_TrailingSlash() {
+    QVERIFY(TrashPolicy::isTrashRelativePath(".Trash-1000/"));
+}
 
 // ===========================================================================
 //  isTrashPath (absolute)
@@ -108,7 +127,8 @@ void TestTrashPolicy::testAbsolute_TrashDirUnderSyncRoot() {
 }
 
 void TestTrashPolicy::testAbsolute_TrashFileUnderSyncRoot() {
-    QVERIFY(TrashPolicy::isTrashPath("/home/user/sync/.Trash-1000/files/document.pdf", "/home/user/sync"));
+    QVERIFY(TrashPolicy::isTrashPath("/home/user/sync/.Trash-1000/files/document.pdf",
+                                     "/home/user/sync"));
 }
 
 void TestTrashPolicy::testAbsolute_NormalFileUnderSyncRoot() {
@@ -135,17 +155,24 @@ void TestTrashPolicy::testAbsolute_SyncRootItself() {
     QVERIFY(!TrashPolicy::isTrashPath("/home/user/sync", "/home/user/sync"));
 }
 
+void TestTrashPolicy::testAbsolute_SiblingPrefixOutsideSyncRoot() {
+    QVERIFY(!TrashPolicy::isTrashPath("/home/user/sync.Trash-1000/files/document.pdf",
+                                      "/home/user/sync"));
+}
+
 // ===========================================================================
 //  isMoveToTrash
 // ===========================================================================
 
 void TestTrashPolicy::testMoveToTrash_LiveToTrash() {
-    QVERIFY(TrashPolicy::isMoveToTrash("/sync/doc.txt", "/sync/.Trash-1000/files/doc.txt", "/sync"));
+    QVERIFY(
+        TrashPolicy::isMoveToTrash("/sync/doc.txt", "/sync/.Trash-1000/files/doc.txt", "/sync"));
 }
 
 void TestTrashPolicy::testMoveToTrash_TrashToTrash() {
     // Move within trash is not a "move to trash"
-    QVERIFY(!TrashPolicy::isMoveToTrash("/sync/.Trash-1000/files/a.txt", "/sync/.Trash-1000/files/b.txt", "/sync"));
+    QVERIFY(!TrashPolicy::isMoveToTrash("/sync/.Trash-1000/files/a.txt",
+                                        "/sync/.Trash-1000/files/b.txt", "/sync"));
 }
 
 void TestTrashPolicy::testMoveToTrash_LiveToLive() {
@@ -162,16 +189,18 @@ void TestTrashPolicy::testMoveToTrash_TrashToLive() {
 // ===========================================================================
 
 void TestTrashPolicy::testRestoreFromTrash_TrashToLive() {
-    QVERIFY(TrashPolicy::isRestoreFromTrash("/sync/.Trash-1000/files/doc.txt", "/sync/doc.txt", "/sync"));
+    QVERIFY(TrashPolicy::isRestoreFromTrash("/sync/.Trash-1000/files/doc.txt", "/sync/doc.txt",
+                                            "/sync"));
 }
 
 void TestTrashPolicy::testRestoreFromTrash_LiveToTrash() {
-    QVERIFY(!TrashPolicy::isRestoreFromTrash("/sync/doc.txt", "/sync/.Trash-1000/files/doc.txt", "/sync"));
+    QVERIFY(!TrashPolicy::isRestoreFromTrash("/sync/doc.txt", "/sync/.Trash-1000/files/doc.txt",
+                                             "/sync"));
 }
 
 void TestTrashPolicy::testRestoreFromTrash_TrashToTrash() {
-    QVERIFY(
-        !TrashPolicy::isRestoreFromTrash("/sync/.Trash-1000/files/a.txt", "/sync/.Trash-1000/files/b.txt", "/sync"));
+    QVERIFY(!TrashPolicy::isRestoreFromTrash("/sync/.Trash-1000/files/a.txt",
+                                             "/sync/.Trash-1000/files/b.txt", "/sync"));
 }
 
 void TestTrashPolicy::testRestoreFromTrash_LiveToLive() {

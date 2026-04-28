@@ -43,7 +43,14 @@ namespace {
 
 /// Recover the FuseDriver instance from FUSE's per-mount private_data.
 static inline FuseDriver* self() {
-    return static_cast<FuseDriver*>(fuse_get_context()->private_data);
+    auto* ctx = fuse_get_context();
+    Q_ASSERT_X(ctx && ctx->private_data, "FuseDriver::self",
+               "self() requires a valid FUSE callback context");
+    if (!ctx || !ctx->private_data) {
+        return nullptr;
+    }
+
+    return static_cast<FuseDriver*>(ctx->private_data);
 }
 
 constexpr int FUSE_API_TIMEOUT_MS = 30000;

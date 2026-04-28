@@ -11,12 +11,27 @@
 #include <QLoggingCategory>
 
 #include "sync/SyncDatabase.h"
+#include "utils/PathUtils.h"
 
 namespace {
 
-bool removeEntry(const QFileInfo& entryInfo) {
+bool removeEntry(const QFileInfo& entryInfo, const QString& canonicalCacheRoot) {
     const QString path = entryInfo.absoluteFilePath();
-    return entryInfo.isDir() ? QDir(path).removeRecursively() : QFile::remove(path);
+
+    if (PathUtils::isSymlink(entryInfo)) {
+        return QFile::remove(path);
+    }
+
+    if (!entryInfo.isDir()) {
+        return QFile::remove(path);
+    }
+
+    if (!PathUtils::isCanonicalPathWithinRoot(path, canonicalCacheRoot)) {
+        qWarning() << "CacheMaintenance: refusing to recurse outside cache root:" << path;
+        return false;
+    }
+
+    return QDir(path).removeRecursively();
 }
 
 }  // namespace
@@ -40,10 +55,17 @@ bool purgeFuseRepresentationCache(const QString& evictableCacheRoot, SyncDatabas
         return true;
     }
 
+    const QString canonicalCacheRoot = PathUtils::canonicalPathIfExists(evictableCacheRoot);
+    if (canonicalCacheRoot.isEmpty()) {
+        qWarning() << "CacheMaintenance: failed to resolve cache root boundary:"
+                   << evictableCacheRoot;
+        return false;
+    }
+
     bool diskOk = true;
     const QFileInfoList entries = cacheDir.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
     for (const QFileInfo& entryInfo : entries) {
-        if (!removeEntry(entryInfo)) {
+        if (!removeEntry(entryInfo, canonicalCacheRoot)) {
             qWarning() << "CacheMaintenance: failed to remove" << entryInfo.absoluteFilePath();
             diskOk = false;
         }

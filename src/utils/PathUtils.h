@@ -18,6 +18,19 @@
 
 namespace PathUtils {
 
+enum class RecursiveRootRemovalAction {
+    Refuse,
+    RemoveSymlinkOnly,
+    RemoveRecursively,
+};
+
+struct RecursiveRootRemovalDecision {
+    RecursiveRootRemovalAction action = RecursiveRootRemovalAction::Refuse;
+    QString absolutePath;
+    QString canonicalPath;
+    int depth = 0;
+};
+
 /**
  * @brief Sanitize a remote file/folder name for safe use in local paths.
  *
@@ -145,6 +158,52 @@ inline bool isCanonicalPathWithinRoot(const QString& path, const QString& rootDi
     }
 
     return isPathWithinRootBoundary(canonicalPath, canonicalRoot);
+}
+
+/**
+ * @brief Decide whether a root path may be removed recursively.
+ *
+ * The decision preserves the existing dangerous-path guard (root, home, or
+ * shallow paths are refused) and adds symlink-aware handling: a symlink root is
+ * removed as a leaf only, and any path that resolves outside its lexical root
+ * boundary is refused.
+ *
+ * @param rootPath  Existing root path being considered for recursive removal
+ * @return Removal decision with normalized paths for logging
+ */
+inline RecursiveRootRemovalDecision classifyRecursiveRootRemoval(const QString& rootPath) {
+    RecursiveRootRemovalDecision decision;
+
+    if (rootPath.isEmpty()) {
+        return decision;
+    }
+
+    const QFileInfo rootInfo(rootPath);
+    decision.absolutePath = QDir::cleanPath(rootInfo.absoluteFilePath());
+    decision.canonicalPath = canonicalPathIfExists(rootPath);
+    decision.depth = decision.absolutePath.split('/', Qt::SkipEmptyParts).size();
+
+    const QString homePath = QDir::cleanPath(QDir::homePath());
+    if (decision.absolutePath.isEmpty() || decision.absolutePath == QStringLiteral("/") ||
+        decision.absolutePath == homePath || decision.depth < 3) {
+        return decision;
+    }
+
+    if (isSymlink(rootInfo)) {
+        decision.action = RecursiveRootRemovalAction::RemoveSymlinkOnly;
+        return decision;
+    }
+
+    if (decision.canonicalPath.isEmpty()) {
+        return decision;
+    }
+
+    if (!isPathWithinRootBoundary(decision.canonicalPath, decision.absolutePath)) {
+        return decision;
+    }
+
+    decision.action = RecursiveRootRemovalAction::RemoveRecursively;
+    return decision;
 }
 
 /**

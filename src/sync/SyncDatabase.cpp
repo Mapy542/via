@@ -237,10 +237,20 @@ bool SyncDatabase::migrateDatabase(int currentVersion) {
     }
 
     if (currentVersion < 3) {
+        // TODO: Empty migration block: no schema change is applied for version 3.
+        // If this version was previously associated with a real migration that was later
+        // removed, databases that were left at v3 will be silently promoted to v4 without
+        // the schema actually being in the correct state. Document here what changed in v3,
+        // or add a compensating migration if the original change was lost.
         currentVersion = 3;
     }
 
     if (currentVersion < 4) {
+        // TODO: Empty migration block: same issue as v3 above — no schema change for version 4.
+        // Document the intent or add the missing migration to avoid silent data corruption for
+        // databases at v3 or v4 that are silently advanced to a higher version.
+
+        // TODO:Cleanup DB "Versioning"
         currentVersion = 4;
     }
 

@@ -17,6 +17,7 @@
 #include "api/GoogleDriveClient.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
+#include "utils/PathUtils.h"
 
 namespace {
 QString cacheKeyFor(const QString& fileId, const QString& exportMimeType = QString()) {
@@ -35,6 +36,54 @@ bool cacheKeyBelongsToFile(const QString& cacheKey, const QString& fileId) {
 bool hasUsableExportBytes(const QString& cachePath) {
     QFileInfo info(cachePath);
     return info.exists() && info.size() > 0;
+}
+
+QString cachePermissionError(const QString& path) {
+    return QStringLiteral("Could not restrict cache file permissions for %1").arg(path);
+}
+
+bool restrictCacheFilePermissions(const QString& path, QString* errorMessage = nullptr) {
+    QFile cacheFile(path);
+    if (cacheFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        return true;
+    }
+
+    if (errorMessage) {
+        *errorMessage = cachePermissionError(path);
+    }
+    return false;
+}
+
+bool removePathTreeSafely(const QString& path, const QString& canonicalRoot) {
+    QFileInfo entryInfo(path);
+    if (!entryInfo.exists() && !PathUtils::isSymlink(entryInfo)) {
+        return true;
+    }
+
+    if (PathUtils::isSymlink(entryInfo)) {
+        return QFile::remove(path);
+    }
+
+    if (!entryInfo.isDir()) {
+        return QFile::remove(path);
+    }
+
+    if (!PathUtils::isCanonicalPathWithinRoot(path, canonicalRoot)) {
+        qWarning() << "FileCache: refusing to recurse outside snapshot root:" << path;
+        return false;
+    }
+
+    QDir dir(path);
+    const QFileInfoList children =
+        dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+    for (const QFileInfo& childInfo : children) {
+        if (!removePathTreeSafely(childInfo.absoluteFilePath(), canonicalRoot)) {
+            return false;
+        }
+    }
+
+    QDir parentDir = entryInfo.dir();
+    return parentDir.rmdir(entryInfo.fileName());
 }
 }  // namespace
 
@@ -349,6 +398,15 @@ QString FileCache::getCachedPath(const QString& fileId, qint64 expectedSize) {
     // Verify file was downloaded
     if (!QFile::exists(cachePath)) {
         qWarning() << "FileCache: Downloaded file not found at" << cachePath;
+        return QString();
+    }
+
+    QString permissionError;
+    if (!restrictCacheFilePermissions(cachePath, &permissionError)) {
+        QFile::remove(cachePath);
+        qWarning() << "FileCache:" << permissionError;
+        emit downloadFailedDetailed(fileId, permissionError, 0);
+        emit downloadFailed(fileId, permissionError);
         return QString();
     }
 
@@ -1051,15 +1109,21 @@ void FileCache::onFileDownloaded(const QString& fileId, const QString& localPath
                 QFile::remove(localPath);
                 error = QStringLiteral("Export produced an empty file");
             } else {
-                const qint64 sizeBefore = m_currentSize;
-                emitCacheSize =
-                    recordCacheEntryLocked(cacheKey, request.fileId, localPath, exportedFile.size(),
-                                           QDateTime::currentDateTime());
-                enforceSoftCacheLimitLocked(request.retainOnCompletion ? cacheKey : QString());
-                completedPath = localPath;
-                cacheSizeAfter = m_currentSize;
-                emitCompleted = m_cacheEntries.contains(cacheKey);
-                emitCacheSize = emitCacheSize || cacheSizeAfter != sizeBefore;
+                QString permissionError;
+                if (!restrictCacheFilePermissions(localPath, &permissionError)) {
+                    QFile::remove(localPath);
+                    error = permissionError;
+                } else {
+                    const qint64 sizeBefore = m_currentSize;
+                    emitCacheSize =
+                        recordCacheEntryLocked(cacheKey, request.fileId, localPath,
+                                               exportedFile.size(), QDateTime::currentDateTime());
+                    enforceSoftCacheLimitLocked(request.retainOnCompletion ? cacheKey : QString());
+                    completedPath = localPath;
+                    cacheSizeAfter = m_currentSize;
+                    emitCompleted = m_cacheEntries.contains(cacheKey);
+                    emitCacheSize = emitCacheSize || cacheSizeAfter != sizeBefore;
+                }
             }
 
             if (!error.isEmpty()) {
@@ -1583,8 +1647,13 @@ bool FileCache::recycleAuthoritativeCopyToCacheLocked(const QString& fileId) {
 
 bool FileCache::resetSnapshotDirectoryLocked() {
     const QString snapshotRoot = m_dirtyDirectory + "/snapshots";
-    QDir snapshotDir(snapshotRoot);
-    if (snapshotDir.exists() && !snapshotDir.removeRecursively()) {
+    const QString canonicalDirtyRoot = PathUtils::canonicalPathIfExists(m_dirtyDirectory);
+    if (canonicalDirtyRoot.isEmpty()) {
+        qWarning() << "FileCache: Failed to resolve dirty directory boundary:" << m_dirtyDirectory;
+        return false;
+    }
+
+    if (!removePathTreeSafely(snapshotRoot, canonicalDirtyRoot)) {
         qWarning() << "FileCache: Failed to reset upload snapshot directory:" << snapshotRoot;
         return false;
     }

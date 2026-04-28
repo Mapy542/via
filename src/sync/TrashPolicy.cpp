@@ -8,6 +8,8 @@
 #include <QDir>
 #include <QRegularExpression>
 
+#include "utils/PathUtils.h"
+
 namespace {
 
 // Matches ".Trash-<digits>" as a single path component
@@ -42,7 +44,7 @@ bool TrashPolicy::isTrashPath(const QString& absolutePath, const QString& syncRo
     QString canonical = QDir::cleanPath(absolutePath);
     QString root = QDir::cleanPath(syncRoot);
 
-    if (!canonical.startsWith(root)) {
+    if (!PathUtils::isPathWithinRootBoundary(canonical, root)) {
         return false;
     }
 
@@ -55,10 +57,12 @@ bool TrashPolicy::isTrashPath(const QString& absolutePath, const QString& syncRo
     return isTrashRelativePath(relative);
 }
 
-bool TrashPolicy::isMoveToTrash(const QString& fromAbsolute, const QString& toAbsolute, const QString& syncRoot) {
+bool TrashPolicy::isMoveToTrash(const QString& fromAbsolute, const QString& toAbsolute,
+                                const QString& syncRoot) {
     return !isTrashPath(fromAbsolute, syncRoot) && isTrashPath(toAbsolute, syncRoot);
 }
 
-bool TrashPolicy::isRestoreFromTrash(const QString& fromAbsolute, const QString& toAbsolute, const QString& syncRoot) {
+bool TrashPolicy::isRestoreFromTrash(const QString& fromAbsolute, const QString& toAbsolute,
+                                     const QString& syncRoot) {
     return isTrashPath(fromAbsolute, syncRoot) && !isTrashPath(toAbsolute, syncRoot);
 }
