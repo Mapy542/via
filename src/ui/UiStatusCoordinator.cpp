@@ -35,6 +35,10 @@ bool isStickyMirrorStatus(const QString& status) {
            status.contains(QStringLiteral("Authentication"), Qt::CaseInsensitive);
 }
 
+bool isAuthMirrorStatus(const QString& status) {
+    return status.contains(QStringLiteral("Authentication"), Qt::CaseInsensitive);
+}
+
 bool isMeaningfulStatus(const QString& status) {
     return !status.isEmpty() && status.compare(QStringLiteral("Idle"), Qt::CaseInsensitive) != 0;
 }
@@ -119,10 +123,7 @@ UiStatusPriority UiStatusCoordinator::priorityFromStatusText(const QString& stat
         return UiStatusPriority::Error;
     }
     if (status.contains(QStringLiteral("Not connected"), Qt::CaseInsensitive) ||
-        status.contains(
-            QStringLiteral("Offline"),
-            Qt::CaseInsensitive)) {  // TODO: bug, isOffline stuck after reconnect becuase mirror is
-                                     // disabled, and so never resumed.
+        status.contains(QStringLiteral("Offline"), Qt::CaseInsensitive)) {
         return UiStatusPriority::Offline;
     }
     if (status.contains(QStringLiteral("Warning"), Qt::CaseInsensitive) ||
@@ -375,11 +376,6 @@ void UiStatusCoordinator::recalcGlobalPriority() {
 void UiStatusCoordinator::refreshMirrorStatusInternal() {
     m_pendingActions = m_syncActionQueue ? m_syncActionQueue->count() : 0;
 
-    if (!m_mirrorOverrideStatus.isEmpty()) {
-        setMirrorStatusInternal(m_mirrorOverrideStatus);
-        return;
-    }
-
     if (m_authStateExplicit && !m_authenticated && !m_authExpired) {
         setMirrorStatusInternal(QStringLiteral("Not connected"));
         return;
@@ -390,10 +386,16 @@ void UiStatusCoordinator::refreshMirrorStatusInternal() {
         return;
     }
 
-    if (!m_changeProcessor) {
-        if (m_mirrorStatusText.isEmpty()) {
-            m_mirrorPriority = UiStatusPriority::Idle;
+    if (!m_mirrorOverrideStatus.isEmpty()) {
+        if (isAuthMirrorStatus(m_mirrorOverrideStatus) || m_changeProcessor) {
+            setMirrorStatusInternal(m_mirrorOverrideStatus);
+            return;
         }
+        m_mirrorOverrideStatus.clear();
+    }
+
+    if (!m_changeProcessor) {
+        setMirrorStatusInternal(QString());
         return;
     }
 

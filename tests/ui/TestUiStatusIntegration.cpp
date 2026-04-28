@@ -3,12 +3,14 @@
  * @brief UI integration tests for shared status rendering.
  */
 
+#include <QImage>
 #include <QtTest/QtTest>
 
 #include "sync/ChangeProcessor.h"
 #include "sync/ChangeQueue.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
+#include "utils/ThemeHelper.h"
 
 #define private public
 #include "ui/MainWindow.h"
@@ -25,11 +27,14 @@ class TestUiStatusIntegration : public QObject {
     void cleanup();
 
     void testFuseUploadingStatusPropagatesToTrayAndWindow();
+    void testMirrorStatusPropagatesWhenFuseDisabled();
     void testOfflineStatusPropagatesToTrayAndWindow();
+    void testMirrorDisabledOfflineRecoveryReturnsToFuseStatus();
     void testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled();
     void testAuthExpiredRecoveryPropagatesToTrayAndWindow();
 
    private:
+    QImage trayIconImage(int size = 16) const;
     QString traySummary() const;
     QString trayTooltip() const;
     QString windowSummary() const;
@@ -80,6 +85,10 @@ void TestUiStatusIntegration::cleanup() {
 
 QString TestUiStatusIntegration::traySummary() const { return m_tray->m_statusAction->text(); }
 
+QImage TestUiStatusIntegration::trayIconImage(int size) const {
+    return m_tray->trayIcon()->icon().pixmap(size, size).toImage();
+}
+
 QString TestUiStatusIntegration::trayTooltip() const { return m_tray->trayIcon()->toolTip(); }
 
 QString TestUiStatusIntegration::windowSummary() const { return m_window->m_statusLabel->text(); }
@@ -105,6 +114,18 @@ void TestUiStatusIntegration::testFuseUploadingStatusPropagatesToTrayAndWindow()
     QTRY_COMPARE(traySummary(), expected);
 }
 
+void TestUiStatusIntegration::testMirrorStatusPropagatesWhenFuseDisabled() {
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateMirrorStatus(QStringLiteral("Scanning local files..."));
+
+    const QString expected = QStringLiteral("Scanning local files...");
+    QTRY_COMPARE(windowSummary(), expected);
+    QTRY_COMPARE(traySummary(), expected);
+    QTRY_COMPARE(trayTooltip(), QStringLiteral("Via\n%1").arg(expected));
+    QTRY_COMPARE(trayIconImage(),
+                 ThemeHelper::trayIcon(QStringLiteral("sync-active.svg")).pixmap(16, 16).toImage());
+}
+
 void TestUiStatusIntegration::testOfflineStatusPropagatesToTrayAndWindow() {
     m_changeProcessor->start();
     m_coordinator->updateAuthState(true);
@@ -118,6 +139,37 @@ void TestUiStatusIntegration::testOfflineStatusPropagatesToTrayAndWindow() {
     QTRY_COMPARE(trayTooltip(), QStringLiteral("Via\nOffline"));
     QTRY_COMPARE(m_window->m_pauseSyncButton->text(), QStringLiteral("Resume Sync"));
     QTRY_COMPARE(m_tray->m_pauseSyncAction->text(), QStringLiteral("Resume Sync"));
+}
+
+void TestUiStatusIntegration::testMirrorDisabledOfflineRecoveryReturnsToFuseStatus() {
+    RuntimePauseController pauseController;
+    UiStatusCoordinator coordinator(nullptr, nullptr, nullptr, &pauseController);
+    SystemTrayManager tray(nullptr, nullptr, &pauseController, &coordinator);
+    MainWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &pauseController,
+                      &coordinator, nullptr);
+
+    coordinator.updateAuthState(true);
+    coordinator.updateFuseStatus(QStringLiteral("Mounted"));
+
+    pauseController.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,
+                                             true);
+
+    const QString offlineSummary = QStringLiteral("Mirror: Offline | FUSE: Mounted");
+    QTRY_COMPARE(window.m_statusLabel->text(), offlineSummary);
+    QTRY_COMPARE(tray.m_statusAction->text(), offlineSummary);
+    QTRY_COMPARE(tray.trayIcon()->toolTip(), QStringLiteral("Via\n%1").arg(offlineSummary));
+    QTRY_COMPARE(
+        tray.trayIcon()->icon().pixmap(16, 16).toImage(),
+        ThemeHelper::trayIcon(QStringLiteral("no-connection.svg")).pixmap(16, 16).toImage());
+
+    pauseController.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,
+                                             false);
+
+    QTRY_COMPARE(window.m_statusLabel->text(), QStringLiteral("Mounted"));
+    QTRY_COMPARE(tray.m_statusAction->text(), QStringLiteral("Mounted"));
+    QTRY_COMPARE(tray.trayIcon()->toolTip(), QStringLiteral("Via\nMounted"));
+    QTRY_COMPARE(tray.trayIcon()->icon().pixmap(16, 16).toImage(),
+                 ThemeHelper::trayIcon(QStringLiteral("drive-idle.svg")).pixmap(16, 16).toImage());
 }
 
 void TestUiStatusIntegration::testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled() {

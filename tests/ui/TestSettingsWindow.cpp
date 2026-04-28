@@ -9,6 +9,7 @@
 #include <QTimer>
 #include <QtTest/QtTest>
 
+#include "sync/RuntimePauseController.h"
 #include "ui/SettingsWindow.h"
 
 class FakeCredentialStore : public SettingsCredentialStore {
@@ -34,6 +35,7 @@ class TestSettingsWindow : public QObject {
     void cleanup();
 
     void testReopenShowsStoredIdAndKeepsStoredSecretOnResave();
+    void testAutoPauseCheckboxPersistsAndUpdatesController();
 
    private:
     static void acceptNextMessageBox();
@@ -116,6 +118,46 @@ void TestSettingsWindow::testReopenShowsStoredIdAndKeepsStoredSecretOnResave() {
     QSettings settings;
     QCOMPARE(settings.value("auth/clientIdDisplay").toString(), QStringLiteral("client-id-2"));
     QVERIFY(!settings.contains("auth/clientSecret"));
+}
+
+void TestSettingsWindow::testAutoPauseCheckboxPersistsAndUpdatesController() {
+    RuntimePauseController controller;
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    QVERIFY(controller.isEffectivelyPaused());
+
+    SettingsWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &controller);
+    auto* autoPauseCheck = window.findChild<QCheckBox*>("settingsAutoPauseCheck");
+
+    QVERIFY(autoPauseCheck != nullptr);
+    QVERIFY(autoPauseCheck->isChecked());
+
+    autoPauseCheck->setChecked(false);
+    window.saveSettings();
+
+    {
+        QSettings settings;
+        QCOMPARE(settings.value("advanced/autoPauseEnabled", true).toBool(), false);
+    }
+    QVERIFY(!controller.isAutoPauseEnabled());
+    QVERIFY(controller.isDriveApiAllowed());
+
+    SettingsWindow reopenedWindow(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                  &controller);
+    auto* reopenedAutoPauseCheck = reopenedWindow.findChild<QCheckBox*>("settingsAutoPauseCheck");
+
+    QVERIFY(reopenedAutoPauseCheck != nullptr);
+    QVERIFY(!reopenedAutoPauseCheck->isChecked());
+
+    reopenedAutoPauseCheck->setChecked(true);
+    reopenedWindow.saveSettings();
+
+    {
+        QSettings settings;
+        QCOMPARE(settings.value("advanced/autoPauseEnabled", true).toBool(), true);
+    }
+    QVERIFY(controller.isAutoPauseEnabled());
+    QVERIFY(controller.isEffectivelyPaused());
+    QCOMPARE(controller.effectiveStatusText(), QStringLiteral("Offline"));
 }
 
 QTEST_MAIN(TestSettingsWindow)

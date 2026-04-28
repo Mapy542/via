@@ -29,6 +29,7 @@ class GoogleAuthManager;
 class GoogleDriveClient;
 class SyncActionQueue;
 class ChangeProcessor;
+class RuntimePauseController;
 
 class SettingsCredentialStore {
    public:
@@ -61,7 +62,8 @@ class SettingsWindow : public QDialog {
     explicit SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
                             ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
                             QWidget* parent = nullptr,
-                            SettingsCredentialStore* credentialStore = nullptr);
+                            SettingsCredentialStore* credentialStore = nullptr,
+                            RuntimePauseController* pauseController = nullptr);
 
     ~SettingsWindow() override;
 
@@ -125,6 +127,7 @@ class SettingsWindow : public QDialog {
     SyncActionQueue* m_syncActionQueue;
     ChangeProcessor* m_changeProcessor;
     GoogleDriveClient* m_driveClient;
+    RuntimePauseController* m_pauseController;
     QSettings m_settings;
     std::unique_ptr<SettingsCredentialStore> m_ownedCredentialStore;
     SettingsCredentialStore* m_credentialStore;
@@ -163,6 +166,7 @@ class SettingsWindow : public QDialog {
     QWidget* m_miscTab;
     QCheckBox* m_startOnLoginCheck;
     QCheckBox* m_showNotificationsCheck;
+    QCheckBox* m_autoPauseCheck;
     QComboBox* m_themeOverrideCombo;
     QCheckBox* m_debugModeCheck;
 

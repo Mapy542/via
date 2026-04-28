@@ -19,6 +19,7 @@
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
 #include "sync/ChangeProcessor.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
 #include "utils/AutostartManager.h"
 
@@ -56,12 +57,14 @@ class TokenStorageCredentialStore final : public SettingsCredentialStore {
 
 SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
                                ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
-                               QWidget* parent, SettingsCredentialStore* credentialStore)
+                               QWidget* parent, SettingsCredentialStore* credentialStore,
+                               RuntimePauseController* pauseController)
     : QDialog(parent),
       m_authManager(authManager),
       m_syncActionQueue(syncActionQueue),
       m_changeProcessor(changeProcessor),
       m_driveClient(driveClient),
+      m_pauseController(pauseController),
       m_ownedCredentialStore(
           credentialStore == nullptr ? std::make_unique<TokenStorageCredentialStore>() : nullptr),
       m_credentialStore(credentialStore != nullptr ? credentialStore
@@ -564,6 +567,23 @@ void SettingsWindow::setupMiscTab() {
 
     layout->addWidget(notifyGroup);
 
+    QGroupBox* pauseGroup = new QGroupBox("Runtime Pause", m_miscTab);
+    QVBoxLayout* pauseLayout = new QVBoxLayout(pauseGroup);
+
+    m_autoPauseCheck = new QCheckBox(
+        "Automatically pause sync when offline, on metered networks, or in power saver mode",
+        m_miscTab);
+    m_autoPauseCheck->setObjectName("settingsAutoPauseCheck");
+    m_autoPauseCheck->setChecked(true);
+    pauseLayout->addWidget(m_autoPauseCheck);
+
+    QLabel* pauseInfoLabel = new QLabel(
+        "When disabled, Via keeps syncing even if those runtime conditions are active.", m_miscTab);
+    pauseInfoLabel->setWordWrap(true);
+    pauseLayout->addWidget(pauseInfoLabel);
+
+    layout->addWidget(pauseGroup);
+
     // Debug group
     QGroupBox* debugGroup = new QGroupBox("Debug", m_miscTab);
     QVBoxLayout* debugLayout = new QVBoxLayout(debugGroup);
@@ -672,6 +692,7 @@ void SettingsWindow::loadSettings() {
     m_startOnLoginCheck->setChecked(m_settings.value("advanced/startOnLogin", false).toBool());
     m_showNotificationsCheck->setChecked(
         m_settings.value("advanced/showNotifications", true).toBool());
+    m_autoPauseCheck->setChecked(m_settings.value("advanced/autoPauseEnabled", true).toBool());
 
     // Theme override setting
     int themeOverride = m_settings.value("advanced/themeOverride", 0).toInt();
@@ -735,6 +756,7 @@ void SettingsWindow::saveSettings() {
     m_settings.setValue("advanced/startOnLogin", m_startOnLoginCheck->isChecked());
     AutostartManager::setAutostart(m_startOnLoginCheck->isChecked());
     m_settings.setValue("advanced/showNotifications", m_showNotificationsCheck->isChecked());
+    m_settings.setValue("advanced/autoPauseEnabled", m_autoPauseCheck->isChecked());
     m_settings.setValue("advanced/themeOverride", m_themeOverrideCombo->currentData().toInt());
 
     // Fuse settings
@@ -745,6 +767,10 @@ void SettingsWindow::saveSettings() {
     m_settings.setValue("advanced/debugMode", m_debugModeCheck->isChecked());
 
     m_settings.sync();
+
+    if (m_pauseController) {
+        m_pauseController->setAutoPauseEnabled(m_autoPauseCheck->isChecked());
+    }
 
     emit settingsChanged();
 }

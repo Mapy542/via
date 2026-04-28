@@ -15,6 +15,7 @@ class TestRuntimePauseController : public QObject {
     void testAutoPauseReasonLifecycle();
     void testManualResumeSuppressesActiveAutoReasons();
     void testAdditionalAutoPauseReasonsUseControllerStatusText();
+    void testDisablingAutoPauseIgnoresActiveReasons();
 };
 
 void TestRuntimePauseController::testManualPauseAndResume() {
@@ -85,6 +86,46 @@ void TestRuntimePauseController::testAdditionalAutoPauseReasonsUseControllerStat
     controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::PowerSaver, false);
     QVERIFY(controller.isDriveApiAllowed());
     QVERIFY(controller.effectiveStatusText().isEmpty());
+}
+
+void TestRuntimePauseController::testDisablingAutoPauseIgnoresActiveReasons() {
+    RuntimePauseController controller;
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::PowerSaver, true);
+
+    QVERIFY(controller.isEffectivelyPaused());
+    QCOMPARE(controller.effectiveStatusText(), QStringLiteral("Offline"));
+
+    controller.setAutoPauseEnabled(false);
+
+    QVERIFY(!controller.isAutoPauseEnabled());
+    QVERIFY(controller.isDriveApiAllowed());
+    QVERIFY(controller.activeAutoPauseReasons().testFlag(
+        RuntimePauseController::AutoPauseReason::Offline));
+    QVERIFY(controller.activeAutoPauseReasons().testFlag(
+        RuntimePauseController::AutoPauseReason::PowerSaver));
+    QCOMPARE(controller.effectiveAutoPauseReasons(), RuntimePauseController::AutoPauseReasons());
+    QVERIFY(
+        !controller.hasEffectiveAutoPauseReason(RuntimePauseController::AutoPauseReason::Offline));
+    QVERIFY(controller.effectiveStatusText().isEmpty());
+
+    controller.setAutoPauseEnabled(true);
+
+    QVERIFY(controller.isAutoPauseEnabled());
+    QVERIFY(controller.isEffectivelyPaused());
+    QCOMPARE(controller.effectiveStatusText(), QStringLiteral("Offline"));
+
+    RuntimePauseController manualController;
+    manualController.setAutoPauseEnabled(false);
+
+    manualController.requestManualPause();
+    QVERIFY(manualController.isEffectivelyPaused());
+    QCOMPARE(manualController.effectiveStatusText(), QStringLiteral("Paused"));
+
+    manualController.requestManualResume();
+    QVERIFY(manualController.isDriveApiAllowed());
+    QVERIFY(manualController.effectiveStatusText().isEmpty());
 }
 
 QTEST_MAIN(TestRuntimePauseController)

@@ -196,6 +196,7 @@ To disable notifications:
 
 - **Start on Login** - Launch Via when you log in
 - **Notifications** - Enable/disable desktop notifications
+- **Runtime Pause** - Turn off automatic pausing for offline, metered-network, and power-saver conditions when you want Via to keep syncing anyway
 - **FUSE** - Enable virtual file system
 - **Cache Size** - Maximum local cache size
 - **Debug Mode** - Enable detailed logging (./local/share/Via/logs/)

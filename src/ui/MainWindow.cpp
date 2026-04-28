@@ -494,7 +494,7 @@ void MainWindow::onLogoutClicked() {
 void MainWindow::onSettingsClicked() {
     if (!m_settingsWindow) {
         m_settingsWindow = new SettingsWindow(m_authManager, m_syncActionQueue, m_changeProcessor,
-                                              m_driveClient, this);
+                                              m_driveClient, this, nullptr, m_pauseController);
         connect(m_settingsWindow, &SettingsWindow::clearCacheRequested, this,
                 &MainWindow::clearCacheRequested);
         connect(m_settingsWindow, &SettingsWindow::restartRequested, this,

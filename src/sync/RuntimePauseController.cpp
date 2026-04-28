@@ -13,6 +13,15 @@ bool hasAnyReasons(RuntimePauseController::AutoPauseReasons reasons) {
     return reasons != RuntimePauseController::AutoPauseReasons();
 }
 
+RuntimePauseController::AutoPauseReasons effectiveAutoPauseReasonsFor(
+    const RuntimePauseController::Snapshot& snapshot) {
+    if (!snapshot.autoPauseEnabled) {
+        return RuntimePauseController::AutoPauseReasons();
+    }
+
+    return snapshot.activeAutoPauseReasons & ~snapshot.suppressedAutoPauseReasons;
+}
+
 }  // namespace
 
 RuntimePauseController::RuntimePauseController(QObject* parent) : QObject(parent) {}
@@ -29,6 +38,10 @@ bool RuntimePauseController::isManualPauseRequested() const {
     return snapshotLocked().manualPauseRequested;
 }
 
+bool RuntimePauseController::isAutoPauseEnabled() const {
+    return snapshotLocked().autoPauseEnabled;
+}
+
 bool RuntimePauseController::hasEffectiveAutoPauseReason(AutoPauseReason reason) const {
     return effectiveAutoPauseReasons().testFlag(reason);
 }
@@ -43,8 +56,7 @@ RuntimePauseController::AutoPauseReasons RuntimePauseController::suppressedAutoP
 }
 
 RuntimePauseController::AutoPauseReasons RuntimePauseController::effectiveAutoPauseReasons() const {
-    const Snapshot current = snapshotLocked();
-    return current.activeAutoPauseReasons & ~current.suppressedAutoPauseReasons;
+    return effectiveAutoPauseReasonsFor(snapshotLocked());
 }
 
 QString RuntimePauseController::effectiveStatusText() const {
@@ -53,8 +65,7 @@ QString RuntimePauseController::effectiveStatusText() const {
         return QStringLiteral("Paused");
     }
 
-    const AutoPauseReasons effectiveReasons =
-        current.activeAutoPauseReasons & ~current.suppressedAutoPauseReasons;
+    const AutoPauseReasons effectiveReasons = effectiveAutoPauseReasonsFor(current);
     if (!hasAnyReasons(effectiveReasons)) {
         return QString();
     }
@@ -85,8 +96,10 @@ QString RuntimePauseController::pauseNotificationMessage() const {
             "resume when you unpause.");
     }
 
-    const AutoPauseReasons effectiveReasons =
-        current.activeAutoPauseReasons & ~current.suppressedAutoPauseReasons;
+    const AutoPauseReasons effectiveReasons = effectiveAutoPauseReasonsFor(current);
+    if (!hasAnyReasons(effectiveReasons)) {
+        return QStringLiteral("Drive API access is paused.");
+    }
     if (effectiveReasons.testFlag(AutoPauseReason::Offline)) {
         return QStringLiteral(
             "Network access is unavailable. Via will keep cached content available, but remote "
@@ -140,6 +153,12 @@ void RuntimePauseController::togglePause() {
     }
 }
 
+void RuntimePauseController::setAutoPauseEnabled(bool enabled) {
+    const Snapshot before = snapshotLocked();
+    m_state.autoPauseEnabled = enabled;
+    commitStateChange(before);
+}
+
 void RuntimePauseController::setAutoPauseReasonActive(AutoPauseReason reason, bool active) {
     const Snapshot before = snapshotLocked();
     if (active) {
@@ -169,8 +188,7 @@ QString RuntimePauseController::blockedStatePhrase(const Snapshot& snapshot) {
         return QStringLiteral("sync is paused");
     }
 
-    const AutoPauseReasons effectiveReasons =
-        snapshot.activeAutoPauseReasons & ~snapshot.suppressedAutoPauseReasons;
+    const AutoPauseReasons effectiveReasons = effectiveAutoPauseReasonsFor(snapshot);
     if (effectiveReasons.testFlag(AutoPauseReason::Offline)) {
         return QStringLiteral("Via is offline");
     }
@@ -197,6 +215,7 @@ QString RuntimePauseController::joinedReasonLabels(AutoPauseReasons reasons) {
 
 bool RuntimePauseController::snapshotsEqual(const Snapshot& lhs, const Snapshot& rhs) {
     return lhs.manualPauseRequested == rhs.manualPauseRequested &&
+           lhs.autoPauseEnabled == rhs.autoPauseEnabled &&
            lhs.activeAutoPauseReasons == rhs.activeAutoPauseReasons &&
            lhs.suppressedAutoPauseReasons == rhs.suppressedAutoPauseReasons &&
            lhs.effectivePause == rhs.effectivePause;
@@ -205,8 +224,7 @@ bool RuntimePauseController::snapshotsEqual(const Snapshot& lhs, const Snapshot&
 RuntimePauseController::Snapshot RuntimePauseController::snapshotLocked() const {
     Snapshot current = m_state;
     current.effectivePause =
-        current.manualPauseRequested ||
-        hasAnyReasons(current.activeAutoPauseReasons & ~current.suppressedAutoPauseReasons);
+        current.manualPauseRequested || hasAnyReasons(effectiveAutoPauseReasonsFor(current));
     return current;
 }
 

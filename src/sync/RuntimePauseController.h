@@ -26,6 +26,7 @@ class RuntimePauseController : public QObject {
 
     struct Snapshot {
         bool manualPauseRequested = false;
+        bool autoPauseEnabled = true;
         AutoPauseReasons activeAutoPauseReasons;
         AutoPauseReasons suppressedAutoPauseReasons;
         bool effectivePause = false;
@@ -38,6 +39,7 @@ class RuntimePauseController : public QObject {
     bool isEffectivelyPaused() const;
     bool isDriveApiAllowed() const;
     bool isManualPauseRequested() const;
+    bool isAutoPauseEnabled() const;
     bool hasEffectiveAutoPauseReason(AutoPauseReason reason) const;
     AutoPauseReasons activeAutoPauseReasons() const;
     AutoPauseReasons suppressedAutoPauseReasons() const;
@@ -54,6 +56,7 @@ class RuntimePauseController : public QObject {
     void requestManualPause();
     void requestManualResume();
     void togglePause();
+    void setAutoPauseEnabled(bool enabled);
     void setAutoPauseReasonActive(AutoPauseReason reason, bool active);
 
    signals:

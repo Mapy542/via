@@ -22,6 +22,8 @@ class TestUiStatusCoordinator : public QObject {
     void testMetadataRefreshLifecycleReturnsToMounted();
     void testMetadataRefreshFailureReturnsToMounted();
     void testMetadataRefreshClearsOnLogoutAndAuthExpired();
+    void testMirrorDisabledOfflineRecoveryClearsMirrorStatus();
+    void testDisablingAutoPauseClearsMirrorDisabledOfflineStatus();
     void testStickyMirrorStatusSurvivesRefresh();
     void testLoggedOutAndAuthExpiredStayDistinct();
 
@@ -125,6 +127,58 @@ void TestUiStatusCoordinator::testMetadataRefreshClearsOnLogoutAndAuthExpired() 
     status = m_coordinator->snapshot();
     QCOMPARE(status.fuseStatusText, QStringLiteral("Idle"));
     QVERIFY(status.combinedStatusText.contains(QStringLiteral("Authentication expired")));
+}
+
+void TestUiStatusCoordinator::testMirrorDisabledOfflineRecoveryClearsMirrorStatus() {
+    RuntimePauseController pauseController;
+    UiStatusCoordinator coordinator(nullptr, m_syncActionQueue, nullptr, &pauseController);
+
+    coordinator.updateAuthState(true);
+    coordinator.updateFuseStatus(QStringLiteral("Mounted"));
+
+    pauseController.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,
+                                             true);
+
+    UiStatusSnapshot status = coordinator.snapshot();
+    QCOMPARE(status.mirrorStatusText, QStringLiteral("Offline"));
+    QCOMPARE(status.combinedStatusText, QStringLiteral("Mirror: Offline | FUSE: Mounted"));
+    QCOMPARE(static_cast<int>(status.resolvedPriority),
+             static_cast<int>(UiStatusPriority::Offline));
+
+    pauseController.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,
+                                             false);
+
+    QTRY_VERIFY(coordinator.snapshot().mirrorStatusText.isEmpty());
+    QTRY_COMPARE(coordinator.snapshot().combinedStatusText, QStringLiteral("Mounted"));
+
+    status = coordinator.snapshot();
+    QCOMPARE(status.resolvedStatusText, QStringLiteral("Mounted"));
+    QCOMPARE(static_cast<int>(status.resolvedPriority), static_cast<int>(UiStatusPriority::Idle));
+}
+
+void TestUiStatusCoordinator::testDisablingAutoPauseClearsMirrorDisabledOfflineStatus() {
+    RuntimePauseController pauseController;
+    UiStatusCoordinator coordinator(nullptr, m_syncActionQueue, nullptr, &pauseController);
+
+    coordinator.updateAuthState(true);
+    coordinator.updateFuseStatus(QStringLiteral("Mounted"));
+
+    pauseController.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,
+                                             true);
+
+    UiStatusSnapshot status = coordinator.snapshot();
+    QCOMPARE(status.combinedStatusText, QStringLiteral("Mirror: Offline | FUSE: Mounted"));
+    QCOMPARE(static_cast<int>(status.resolvedPriority),
+             static_cast<int>(UiStatusPriority::Offline));
+
+    pauseController.setAutoPauseEnabled(false);
+
+    QTRY_VERIFY(coordinator.snapshot().mirrorStatusText.isEmpty());
+    QTRY_COMPARE(coordinator.snapshot().combinedStatusText, QStringLiteral("Mounted"));
+
+    status = coordinator.snapshot();
+    QCOMPARE(status.resolvedStatusText, QStringLiteral("Mounted"));
+    QCOMPARE(static_cast<int>(status.resolvedPriority), static_cast<int>(UiStatusPriority::Idle));
 }
 
 void TestUiStatusCoordinator::testStickyMirrorStatusSurvivesRefresh() {

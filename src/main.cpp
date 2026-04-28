@@ -298,6 +298,7 @@ int main(int argc, char* argv[]) {
     updateChecker.checkForUpdates(/* silent = */ true);
 
     QSettings settings;
+    pauseController.setAutoPauseEnabled(settings.value("advanced/autoPauseEnabled", true).toBool());
 
     // Read sync system mode: "mirror-only", "fuse-only", or "both"
     // Migrate from legacy "advanced/enableFuse" boolean if needed
