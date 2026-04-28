@@ -86,6 +86,7 @@ void SyncActionThread::setSyncFolder(const QString& path) {
 QString SyncActionThread::syncFolder() const { return m_syncFolder; }
 
 void SyncActionThread::start() {
+    bool shouldSchedule = false;
     {
         QMutexLocker locker(&m_stateMutex);
         if (m_state == State::Running) {
@@ -93,25 +94,29 @@ void SyncActionThread::start() {
             return;
         }
         m_state = State::Running;
+        if (!m_processingActive) {
+            m_processingActive = true;
+            shouldSchedule = true;
+        }
     }
 
     m_settings = SyncSettings::load();
-    m_processingActive = true;
     emit stateChanged(State::Running);
 
     qInfo() << "SyncActionThread started";
 
     // Start processing immediately if there are items
-    QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
+    if (shouldSchedule) {
+        QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
+    }
 }
 
 void SyncActionThread::stop() {
     {
         QMutexLocker locker(&m_stateMutex);
         m_state = State::Stopped;
+        m_processingActive = false;
     }
-
-    m_processingActive = false;
 
     // Wake up the queue in case we're waiting
     if (m_actionQueue) {
@@ -140,41 +145,70 @@ void SyncActionThread::pause() {
             return;
         }
         m_state = State::Paused;
+        m_processingActive = false;
     }
 
-    m_processingActive = false;
     emit stateChanged(State::Paused);
 
     qInfo() << "SyncActionThread paused";
 }
 
 void SyncActionThread::resume() {
+    bool shouldSchedule = false;
     {
         QMutexLocker locker(&m_stateMutex);
         if (m_state != State::Paused) {
             return;
         }
         m_state = State::Running;
+        if (!m_processingActive) {
+            m_processingActive = true;
+            shouldSchedule = true;
+        }
     }
 
-    m_processingActive = true;
     emit stateChanged(State::Running);
 
     qInfo() << "SyncActionThread resumed";
 
     // Resume processing
-    QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
+    if (shouldSchedule) {
+        QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
+    }
 }
 
 void SyncActionThread::onItemsAvailable() {
     // Jobs Available Wakeup Signal/Slot handler
     qDebug() << "SyncActionThread received items available signal";
 
-    QMutexLocker locker(&m_stateMutex);
-    if (m_state == State::Running && !m_processingActive) {
-        m_processingActive = true;
+    bool shouldSchedule = false;
+    {
+        QMutexLocker locker(&m_stateMutex);
+        if (m_state == State::Running && !m_processingActive) {
+            m_processingActive = true;
+            shouldSchedule = true;
+        }
+    }
+
+    if (shouldSchedule) {
         QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
     }
+}
+
+bool SyncActionThread::disarmIfIdleAndCheckForPendingWork() {
+    QMutexLocker locker(&m_stateMutex);
+    if (m_state != State::Running) {
+        m_processingActive = false;
+        return false;
+    }
+
+    m_processingActive = false;
+    if (m_actionQueue && !m_actionQueue->isEmpty()) {
+        m_processingActive = true;
+        return true;
+    }
+
+    return false;
 }
 
 QString SyncActionThread::actionKeyForFileId(const QString& fileId) const {
@@ -239,18 +273,29 @@ void SyncActionThread::untrackActionInProgress(const SyncActionItem& item) {
 
 void SyncActionThread::processNextAction() {
     // Check if we should continue processing
+    bool isRunning = false;
     {
         QMutexLocker locker(&m_stateMutex);
-        if (m_state != State::Running) {
-            m_processingActive = false;
-            return;
-        }
+        isRunning = (m_state == State::Running);
+    }
+    if (!isRunning) {
+        disarmIfIdleAndCheckForPendingWork();
+        return;
     }
 
-    // Check for items in the queue
+    // Re-arm if work arrived after the empty check but before we fully went idle.
     if (!m_actionQueue || m_actionQueue->isEmpty()) {
-        m_processingActive = false;
-        qDebug() << "SyncActionThread idle - waiting for itemsAvailable signal";
+        if (m_beforeIdleDisarmHook) {
+            auto hook = m_beforeIdleDisarmHook;
+            m_beforeIdleDisarmHook = {};
+            hook();
+        }
+
+        if (disarmIfIdleAndCheckForPendingWork()) {
+            QTimer::singleShot(0, this, &SyncActionThread::processNextAction);
+        } else {
+            qDebug() << "SyncActionThread idle - waiting for itemsAvailable signal";
+        }
         return;
     }
 
@@ -478,48 +523,63 @@ void SyncActionThread::executeDeleteLocal(const SyncActionItem& item) {
 }
 
 bool SyncActionThread::deleteLocalPathRecursive(const QString& localPath, const QString& fileId) {
-    QString absolutePath = toAbsolutePath(localPath);
-
-    qInfo() << "Deleting local:" << localPath;
-
-    QFileInfo fileInfo(absolutePath);
-    bool success = false;
-
-    if (fileInfo.isDir()) {
-        QDir dir(absolutePath);
-        // If recursive delete files, build a list of all db entries to mark deleted
-        QStringList recursiveDeleteChildren =
-            dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
-        // Delete children first
-        for (const QString& child : recursiveDeleteChildren) {
-            QString childRelPath = QDir(localPath).filePath(child);
-            if (!deleteLocalPathRecursive(childRelPath)) {
-                return false;
-            }
-        }
-
-        // Notify local watcher to stop watching this directory before deletion
-        if (m_localWatcher) {
-            qDebug() << "Notifying local watcher to unwatch directory:" << absolutePath;
-            m_localWatcher->unwatchDirectory(absolutePath);
-        }
-
-        success = dir.removeRecursively();
-    } else {
-        success = QFile::remove(absolutePath);
-    }
-
-    if (success) {
-        // Mark in database as deleted
-        if (m_database) {
-            const QString effectiveFileId =
-                fileId.isEmpty() ? m_database->getFileId(localPath) : fileId;
-            m_database->markFileDeleted(localPath, effectiveFileId);
-        }
-        return true;
-    } else {
+    const QString canonicalSyncRoot = PathUtils::canonicalPathIfExists(m_syncFolder);
+    if (canonicalSyncRoot.isEmpty()) {
+        qWarning() << "Refusing to delete local path without a canonical sync root:"
+                   << m_syncFolder;
         return false;
     }
+
+    const auto deleteRecursive = [&](const auto& self, const QString& currentLocalPath,
+                                     const QString& currentFileId) -> bool {
+        const QString absolutePath = toAbsolutePath(currentLocalPath);
+
+        qInfo() << "Deleting local:" << currentLocalPath;
+
+        QFileInfo fileInfo(absolutePath);
+        bool success = false;
+
+        if (PathUtils::isSymlink(fileInfo)) {
+            success = QFile::remove(absolutePath);
+        } else if (fileInfo.isDir()) {
+            if (!PathUtils::isCanonicalPathWithinRoot(absolutePath, canonicalSyncRoot)) {
+                qWarning() << "Refusing to recurse outside sync root:" << absolutePath;
+                return false;
+            }
+
+            QDir dir(absolutePath);
+            const QStringList recursiveDeleteChildren =
+                dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
+            for (const QString& child : recursiveDeleteChildren) {
+                const QString childRelPath = QDir(currentLocalPath).filePath(child);
+                if (!self(self, childRelPath, QString())) {
+                    return false;
+                }
+            }
+
+            if (m_localWatcher) {
+                qDebug() << "Notifying local watcher to unwatch directory:" << absolutePath;
+                m_localWatcher->unwatchDirectory(absolutePath);
+            }
+
+            success = dir.removeRecursively();
+        } else {
+            success = QFile::remove(absolutePath);
+        }
+
+        if (!success) {
+            return false;
+        }
+
+        if (m_database) {
+            const QString effectiveFileId =
+                currentFileId.isEmpty() ? m_database->getFileId(currentLocalPath) : currentFileId;
+            m_database->markFileDeleted(currentLocalPath, effectiveFileId);
+        }
+        return true;
+    };
+
+    return deleteRecursive(deleteRecursive, localPath, fileId);
 }
 
 void SyncActionThread::executeDeleteRemote(const SyncActionItem& item) {

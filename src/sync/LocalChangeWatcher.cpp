@@ -48,7 +48,8 @@ LocalChangeWatcher::LocalChangeWatcher(ChangeQueue* changeQueue, QObject* parent
     m_debounceTimer->setInterval(DEBOUNCE_DELAY_MS);
 
     // Connect signals
-    connect(m_watcher, &QFileSystemWatcher::directoryChanged, this, &LocalChangeWatcher::onDirectoryChanged);
+    connect(m_watcher, &QFileSystemWatcher::directoryChanged, this,
+            &LocalChangeWatcher::onDirectoryChanged);
     connect(m_watcher, &QFileSystemWatcher::fileChanged, this, &LocalChangeWatcher::onFileChanged);
     connect(m_debounceTimer, &QTimer::timeout, this, &LocalChangeWatcher::processDebounceQueue);
 
@@ -74,7 +75,8 @@ void LocalChangeWatcher::setIgnorePatterns(const QStringList& patterns) {
     m_compiledIgnorePatterns.clear();
     m_compiledIgnorePatterns.reserve(patterns.size());
     for (const QString& pattern : patterns) {
-        m_compiledIgnorePatterns.append(QRegularExpression(QRegularExpression::wildcardToRegularExpression(pattern)));
+        m_compiledIgnorePatterns.append(
+            QRegularExpression(QRegularExpression::wildcardToRegularExpression(pattern)));
     }
 }
 
@@ -353,6 +355,11 @@ bool LocalChangeWatcher::isPathWithinDirectory(const QString& path, const QStrin
 }
 
 QString LocalChangeWatcher::getRelativePath(const QString& absolutePath) const {
+    // TODO: Path boundary bug: startsWith(m_syncFolder) without a separator check incorrectly
+    // matches sibling directories whose names share the same prefix as the sync folder.
+    // E.g. m_syncFolder="/home/user/sync" would match "/home/user/syncbackup/file", producing
+    // "backup/file" as the relative path, which is wrong and could cause incorrect change events.
+    // Fix: guard with absolutePath.startsWith(m_syncFolder + '/') or use QDir::relativeFilePath().
     if (absolutePath.startsWith(m_syncFolder)) {
         QString relative = absolutePath.mid(m_syncFolder.length());
         if (relative.startsWith('/')) {
@@ -363,7 +370,8 @@ QString LocalChangeWatcher::getRelativePath(const QString& absolutePath) const {
     return absolutePath;
 }
 
-void LocalChangeWatcher::queueChange(ChangeType type, const QString& absolutePath, const QString& oldPath) {
+void LocalChangeWatcher::queueChange(ChangeType type, const QString& absolutePath,
+                                     const QString& oldPath) {
     if (!m_changeQueue) {
         return;
     }
@@ -373,8 +381,8 @@ void LocalChangeWatcher::queueChange(ChangeType type, const QString& absolutePat
 
     // Skip files that are currently open for writing by another process.
     // They will be re-detected once the write completes and the mtime changes.
-    if ((type == ChangeType::Create || type == ChangeType::Modify) && info.exists() && info.isFile() &&
-        FileInUseChecker::isFileOpenForWriting(absolutePath)) {
+    if ((type == ChangeType::Create || type == ChangeType::Modify) && info.exists() &&
+        info.isFile() && FileInUseChecker::isFileOpenForWriting(absolutePath)) {
         qDebug() << "LocalChangeWatcher: Skipping file open for writing:" << absolutePath;
         return;
     }
@@ -403,7 +411,8 @@ void LocalChangeWatcher::queueChange(ChangeType type, const QString& absolutePat
     emit changeDetected(absolutePath);
 }
 
-void LocalChangeWatcher::queueDelete(const QString& absolutePath, bool isDirectory, const QDateTime& modifiedTime) {
+void LocalChangeWatcher::queueDelete(const QString& absolutePath, bool isDirectory,
+                                     const QDateTime& modifiedTime) {
     if (!m_changeQueue) {
         return;
     }
@@ -420,7 +429,8 @@ void LocalChangeWatcher::queueDelete(const QString& absolutePath, bool isDirecto
     emit changeDetected(absolutePath);
 }
 
-void LocalChangeWatcher::detectMoveOrRename(const QString& deletedPath, const QString& createdPath) {
+void LocalChangeWatcher::detectMoveOrRename(const QString& deletedPath,
+                                            const QString& createdPath) {
     // If the destination is inside a trash subtree, treat as a delete
     // (the delete will become TrashRemote via ChangeProcessor).
     if (!m_syncFolder.isEmpty() && TrashPolicy::isTrashPath(createdPath, m_syncFolder)) {
@@ -474,7 +484,8 @@ void LocalChangeWatcher::onDirectoryChanged(const QString& path) {
     }
 
     // Get current directory contents
-    QFileInfoList currentEntries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+    QFileInfoList currentEntries =
+        dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
     QSet<QString> currentPaths;
 
     for (const QFileInfo& info : currentEntries) {
@@ -539,7 +550,8 @@ void LocalChangeWatcher::onDirectoryChanged(const QString& path) {
     QList<QString> toRemove;
     for (auto it = m_fileState.begin(); it != m_fileState.end(); ++it) {
         // Only check direct children of this directory
-        if (isPathWithinDirectory(it.key(), path) && it.key() != path && !currentPaths.contains(it.key())) {
+        if (isPathWithinDirectory(it.key(), path) && it.key() != path &&
+            !currentPaths.contains(it.key())) {
             // Check if direct child (no "/" in the path relative to parent)
             QString relativePath = it.key().mid(path.length() + 1);
             if (!relativePath.contains('/')) {

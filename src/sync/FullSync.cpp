@@ -444,6 +444,11 @@ void FullSync::buildRemoteFolderStructure() {
 }
 
 QString FullSync::getRelativePath(const QString& absolutePath) const {
+    // TODO: Path boundary bug: startsWith(m_syncFolder) without checking that the next character
+    // is '/' or '\0' allows a sibling directory to match. For example if m_syncFolder is
+    // "/home/user/sync" then "/home/user/syncother/file" passes the check and "other/file" is
+    // returned as the relative path. Fix: check startsWith(m_syncFolder + '/') or use
+    // QDir::relativeFilePath() and verify the result does not start with "..".
     if (absolutePath.startsWith(m_syncFolder)) {
         QString relative = absolutePath.mid(m_syncFolder.length());
         if (relative.startsWith('/')) {

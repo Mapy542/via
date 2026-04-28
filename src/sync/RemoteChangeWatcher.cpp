@@ -245,6 +245,10 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
     emit changeTokenUpdated(newToken);
 
     // Mark request as completed after processing to allow deferred checks to run if needed
+    // TODO: Race condition: m_changesRequestInFlight is written here without holding m_mutex,
+    // but it is read under m_mutex in checkNow(). If checkNow() runs concurrently on another
+    // thread between the unlock above and this assignment, it will observe a stale `true` value
+    // and incorrectly skip polling. Protect this write with a QMutexLocker(&m_mutex) block.
     m_changesRequestInFlight = false;
 
     // If there are more pages to fetch, immediately request them

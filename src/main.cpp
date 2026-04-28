@@ -49,6 +49,7 @@
 #include "utils/LogManager.h"
 #include "utils/NativeDocShortcutHandler.h"
 #include "utils/NotificationManager.h"
+#include "utils/PathUtils.h"
 #include "utils/PowerProfileMonitor.h"
 #include "utils/SuspendMonitor.h"
 #include "utils/ThemeHelper.h"
@@ -401,6 +402,12 @@ int main(int argc, char* argv[]) {
                          notificationManager.showError("FUSE Mount Error", error);
                      });
     // Initialize sync action thread (executes sync actions from queue)
+    // TODO: Mangled wiring / performance bug: despite the "Watcher/Processor/Thread" naming and
+    // class docs that describe dedicated worker threads, RemoteChangeWatcher, ChangeProcessor,
+    // SyncActionThread, and FullSync are all instantiated here on the GUI thread and never moved
+    // to a QThread. Their synchronous queue work, disk I/O, and blocking Drive helpers therefore
+    // run on the UI event loop and can freeze the application during sync bursts or slow network
+    // calls. Either move them to real worker threads or update the design to avoid blocking work.
     SyncActionThread syncActionThread(&syncActionQueue, &syncDatabase, &driveClient,
                                       &changeProcessor, &localWatcher);
     syncActionThread.setSyncFolder(syncFolder);
@@ -435,10 +442,16 @@ int main(int argc, char* argv[]) {
     QObject::connect(&fullSyncLocalTimer, &QTimer::timeout, &fullSync, &FullSync::fullSyncLocal);
 
     // Connect change queue to processor wake-up signal
+    // TODO: Wiring bug: ChangeProcessor already connects ChangeQueue::itemsAvailable to
+    // onItemsAvailable() in its constructor. This second connect causes every queue wake-up to be
+    // delivered twice, which can schedule redundant processing and mask state-machine bugs.
     QObject::connect(&changeQueue, &ChangeQueue::itemsAvailable, &changeProcessor,
                      &ChangeProcessor::onItemsAvailable);
 
     // Connect sync action queue to action thread wake-up signal
+    // TODO: Wiring bug: SyncActionThread already connects SyncActionQueue::itemsAvailable to
+    // onItemsAvailable() in its constructor. This duplicate connection double-delivers wake-up
+    // signals and can trigger redundant processNextAction scheduling.
     QObject::connect(&syncActionQueue, &SyncActionQueue::itemsAvailable, &syncActionThread,
                      &SyncActionThread::onItemsAvailable);
 
@@ -719,19 +732,31 @@ int main(int argc, char* argv[]) {
                     QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
                 if (answer == QMessageBox::Yes) {
-                    // Safety guards before recursive deletion (GPT-3 fix):
-                    // reject "/", home dir, or paths with fewer than 3 components.
-                    const QString canonical =
-                        QDir::cleanPath(QFileInfo(syncFolder).absoluteFilePath());
-                    const QString home = QDir::homePath();
-                    const int depth = canonical.split('/', Qt::SkipEmptyParts).size();
+                    const PathUtils::RecursiveRootRemovalDecision decision =
+                        PathUtils::classifyRecursiveRootRemoval(syncFolder);
 
-                    if (canonical == QStringLiteral("/") || canonical == home || depth < 3) {
-                        qWarning() << "Refusing to delete dangerous path:" << canonical
-                                   << "(depth=" << depth << ")";
+                    if (decision.action ==
+                        PathUtils::RecursiveRootRemovalAction::RemoveRecursively) {
+                        if (QDir(decision.absolutePath).removeRecursively()) {
+                            qInfo()
+                                << "Local sync folder purged on sign-out:" << decision.absolutePath;
+                        } else {
+                            qWarning() << "Failed to purge local sync folder on sign-out:"
+                                       << decision.absolutePath;
+                        }
+                    } else if (decision.action ==
+                               PathUtils::RecursiveRootRemovalAction::RemoveSymlinkOnly) {
+                        if (QFile::remove(decision.absolutePath)) {
+                            qInfo() << "Local sync-folder symlink removed on sign-out:"
+                                    << decision.absolutePath << "->" << decision.canonicalPath;
+                        } else {
+                            qWarning() << "Failed to remove sync-folder symlink on sign-out:"
+                                       << decision.absolutePath;
+                        }
                     } else {
-                        QDir(syncFolder).removeRecursively();
-                        qInfo() << "Local sync folder purged on sign-out:" << syncFolder;
+                        qWarning() << "Refusing to delete dangerous path:" << decision.absolutePath
+                                   << "(depth=" << decision.depth
+                                   << "canonical=" << decision.canonicalPath << ")";
                     }
                 }
             }

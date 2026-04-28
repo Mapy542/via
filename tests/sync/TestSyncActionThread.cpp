@@ -251,6 +251,7 @@ class TestSyncActionThread : public QObject {
     void cleanup();
 
     void testWakeOnItemsAvailable();
+    void testPendingWorkDuringIdleDisarmStaysArmed();
     void testUploadFile();
     void testUploadFolder();
     void testUploadFolder_SkipsCreateWhenDbMappingExists();
@@ -395,6 +396,26 @@ void TestSyncActionThread::testWakeOnItemsAvailable() {
     action.localPath = relPath;
 
     m_queue->enqueue(action);
+
+    QTRY_COMPARE(completedSpy.count(), 1);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(!QFile::exists(absPath));
+}
+
+void TestSyncActionThread::testPendingWorkDuringIdleDisarmStaysArmed() {
+    QString relPath = "idle-disarm.txt";
+    QString absPath = createFile(relPath, "data");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::DeleteLocal;
+    action.localPath = relPath;
+
+    QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
+    QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
+
+    m_thread->m_beforeIdleDisarmHook = [this, action]() { m_queue->enqueue(action); };
+
+    m_thread->start();
 
     QTRY_COMPARE(completedSpy.count(), 1);
     QCOMPARE(failedSpy.count(), 0);

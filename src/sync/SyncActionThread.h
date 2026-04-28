@@ -13,6 +13,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QObject>
+#include <functional>
 
 #include "sync/SyncActionQueue.h"
 #include "sync/SyncSettings.h"
@@ -54,6 +55,8 @@ struct DriveFile;
  */
 class SyncActionThread : public QObject {
     Q_OBJECT
+
+    friend class TestSyncActionThread;
 
    public:
     /**
@@ -275,6 +278,7 @@ class SyncActionThread : public QObject {
     bool deferUntilRemoteParentReady(const QString& parentPath, const SyncActionItem& item);
     bool scheduleRetry(const SyncActionItem& item, const QString& reason, int baseDelayMs = 250);
     void clearRetryState(const SyncActionItem& item);
+    bool disarmIfIdleAndCheckForPendingWork();
 
     /**
      * @brief Update database after successful action completion
@@ -328,7 +332,8 @@ class SyncActionThread : public QObject {
     ChangeProcessor* m_changeProcessor;
     LocalChangeWatcher* m_localWatcher;
 
-    // State
+    // State: m_state and m_processingActive form one synchronized state machine.
+    // Always read and write both while holding m_stateMutex.
     State m_state;
     mutable QMutex m_stateMutex;
     QString m_syncFolder;
@@ -340,6 +345,9 @@ class SyncActionThread : public QObject {
 
     // Processing flag (Start / Stop control)
     bool m_processingActive;
+
+    // Test-only hook to force the empty-queue to idle-disarm interleaving.
+    std::function<void()> m_beforeIdleDisarmHook;
 
     // Retry tracking for transient/auth recoverable failures
     QHash<QString, int> m_retryCounts;
