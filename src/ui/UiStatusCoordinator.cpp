@@ -45,15 +45,13 @@ bool isMeaningfulStatus(const QString& status) {
 
 }  // namespace
 
-UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager,
-                                         SyncActionQueue* syncActionQueue,
-                                         ChangeProcessor* changeProcessor,
+UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager, bool mirrorEnabled,
                                          RuntimePauseController* pauseController, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
-      m_syncActionQueue(syncActionQueue),
-      m_changeProcessor(changeProcessor),
       m_pauseController(pauseController),
+      m_mirrorEnabled(mirrorEnabled),
+      m_changeProcessorState(ChangeProcessor::State::Stopped),
       m_statusTimer(nullptr),
       m_fuseIdleTimer(nullptr),
       m_pendingActions(0),
@@ -72,11 +70,6 @@ UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager,
                 [this]() { updateAuthState(true); });
         connect(m_authManager, &GoogleAuthManager::loggedOut, this,
                 [this]() { updateAuthState(false); });
-    }
-
-    if (m_changeProcessor) {
-        connect(m_changeProcessor, &ChangeProcessor::stateChanged, this,
-                [this](ChangeProcessor::State) { refreshMirrorStatus(); });
     }
 
     if (m_pauseController) {
@@ -207,7 +200,7 @@ void UiStatusCoordinator::updateAuthState(bool authenticated) {
         m_authExpired = false;
         m_authExpiredReason.clear();
         m_mirrorOverrideStatus.clear();
-        if (m_changeProcessor) {
+        if (m_mirrorEnabled) {
             setMirrorStatusInternal(QStringLiteral("Not connected"));
         }
         clearFuseActivityState();
@@ -342,6 +335,24 @@ void UiStatusCoordinator::onMetadataRefreshFailed(const QString& error) {
     onMetadataRefreshFinished();
 }
 
+void UiStatusCoordinator::updatePendingActions(int count) {
+    const UiStatusSnapshot before = snapshot();
+
+    m_pendingActions = std::max(0, count);
+    refreshMirrorStatusInternal();
+
+    emitIfChanged(before);
+}
+
+void UiStatusCoordinator::updateMirrorProcessorState(ChangeProcessor::State state) {
+    const UiStatusSnapshot before = snapshot();
+
+    m_changeProcessorState = state;
+    refreshMirrorStatusInternal();
+
+    emitIfChanged(before);
+}
+
 void UiStatusCoordinator::refreshMirrorStatus() {
     const UiStatusSnapshot before = snapshot();
     refreshMirrorStatusInternal();
@@ -374,8 +385,6 @@ void UiStatusCoordinator::recalcGlobalPriority() {
 }
 
 void UiStatusCoordinator::refreshMirrorStatusInternal() {
-    m_pendingActions = m_syncActionQueue ? m_syncActionQueue->count() : 0;
-
     if (m_authStateExplicit && !m_authenticated && !m_authExpired) {
         setMirrorStatusInternal(QStringLiteral("Not connected"));
         return;
@@ -387,20 +396,20 @@ void UiStatusCoordinator::refreshMirrorStatusInternal() {
     }
 
     if (!m_mirrorOverrideStatus.isEmpty()) {
-        if (isAuthMirrorStatus(m_mirrorOverrideStatus) || m_changeProcessor) {
+        if (isAuthMirrorStatus(m_mirrorOverrideStatus) || m_mirrorEnabled) {
             setMirrorStatusInternal(m_mirrorOverrideStatus);
             return;
         }
         m_mirrorOverrideStatus.clear();
     }
 
-    if (!m_changeProcessor) {
+    if (!m_mirrorEnabled) {
         setMirrorStatusInternal(QString());
         return;
     }
 
     QString status;
-    switch (m_changeProcessor->state()) {
+    switch (m_changeProcessorState) {
         case ChangeProcessor::State::Running:
             if (m_pendingActions > 0) {
                 status = QStringLiteral("Syncing... (%1 pending)").arg(m_pendingActions);

@@ -22,27 +22,19 @@
 #include "UiStatusCoordinator.h"
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
-#include "sync/ChangeProcessor.h"
-#include "sync/FullSync.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
-#include "sync/SyncActionThread.h"
 #include "utils/NotificationManager.h"
 #include "utils/ThemeHelper.h"
 
 MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
-                       SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
-                       SyncActionThread* syncActionThread, FullSync* fullSync,
-                       RuntimePauseController* pauseController,
+                       SyncActionQueue* syncActionQueue, RuntimePauseController* pauseController,
                        UiStatusCoordinator* statusCoordinator,
                        NotificationManager* notificationManager, QWidget* parent)
     : QMainWindow(parent),
       m_authManager(authManager),
       m_driveClient(driveClient),
       m_syncActionQueue(syncActionQueue),
-      m_syncActionThread(syncActionThread),
-      m_changeProcessor(changeProcessor),
-      m_fullSync(fullSync),
       m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_notificationManager(notificationManager),
@@ -327,36 +319,6 @@ void MainWindow::connectSignals() {
         connect(m_syncActionQueue, &SyncActionQueue::queueEmpty, this,
                 [this]() { updatePendingActions(0); });
     }
-
-    if (m_changeProcessor) {
-        connect(m_changeProcessor, &ChangeProcessor::error, this,
-                [this](const QString& error) { addRecentActivity("Error: " + error); });
-        connect(
-            m_changeProcessor, &ChangeProcessor::conflictDetected, this,
-            [this](const ConflictInfo& info) { addRecentActivity("Conflict: " + info.localPath); });
-        connect(m_changeProcessor, &ChangeProcessor::conflictResolved, this,
-                [this](const QString& localPath, ConflictResolutionStrategy) {
-                    addRecentActivity("Conflict resolved: " + localPath);
-                });
-        connect(m_changeProcessor, &ChangeProcessor::changeProcessed, this,
-                [this](const QString& localPath) { addRecentActivity("Processed: " + localPath); });
-    }
-
-    // FullSync connections
-    if (m_fullSync) {
-        connect(m_fullSync, &FullSync::progressUpdated, this,
-                [this](const QString& phase, int current, int total) {
-                    Q_UNUSED(total);
-                    addRecentActivity(QString("%1 (%2 files)").arg(phase).arg(current));
-                });
-        connect(m_fullSync, &FullSync::completed, this, [this](int localCount, int remoteCount) {
-            addRecentActivity(QString("Full sync complete: %1 local, %2 remote files")
-                                  .arg(localCount)
-                                  .arg(remoteCount));
-        });
-        connect(m_fullSync, &FullSync::error, this,
-                [this](const QString& error) { addRecentActivity("Full sync error: " + error); });
-    }
 }
 
 void MainWindow::applyStatusSnapshot() {
@@ -493,8 +455,8 @@ void MainWindow::onLogoutClicked() {
 
 void MainWindow::onSettingsClicked() {
     if (!m_settingsWindow) {
-        m_settingsWindow = new SettingsWindow(m_authManager, m_syncActionQueue, m_changeProcessor,
-                                              m_driveClient, this, nullptr, m_pauseController);
+        m_settingsWindow =
+            new SettingsWindow(m_authManager, m_driveClient, this, nullptr, m_pauseController);
         connect(m_settingsWindow, &SettingsWindow::clearCacheRequested, this,
                 &MainWindow::clearCacheRequested);
         connect(m_settingsWindow, &SettingsWindow::restartRequested, this,
@@ -519,58 +481,21 @@ void MainWindow::onOpenFolderClicked() {
 }
 
 void MainWindow::onPauseSyncClicked() {
-    if (m_pauseController) {
-        m_pauseController->togglePause();
-        addRecentActivity(m_pauseController->isEffectivelyPaused()
-                              ? QStringLiteral("Sync paused")
-                              : QStringLiteral("Sync resumed"));
+    if (!m_pauseController) {
         return;
     }
 
-    if (m_changeProcessor) {
-        if (m_syncPaused) {
-            m_changeProcessor->resume();
-            if (m_syncActionThread) {
-                m_syncActionThread->resume();
-            }
-            updatePauseButton(false);
-            updateSyncStatus("Resuming sync...");
-            addRecentActivity("Sync resumed");
-        } else {
-            m_changeProcessor->pause();
-            if (m_syncActionThread) {
-                m_syncActionThread->pause();
-            }
-            updatePauseButton(true);
-            updateSyncStatus("Paused");
-            addRecentActivity("Sync paused");
-        }
-    }
+    m_pauseController->togglePause();
+    addRecentActivity(m_pauseController->isEffectivelyPaused() ? QStringLiteral("Sync paused")
+                                                               : QStringLiteral("Sync resumed"));
 }
 
 void MainWindow::onRefreshClicked() {
-    // The "Sync Now" button triggers a full resync using FullSync
-    // Per spec: "sync now button in the main UI should also initiate a full resync"
-    if (m_fullSync) {
-        if (m_fullSync->isRunning()) {
-            addRecentActivity("Full sync already in progress...");
-            return;
-        }
-
-        addRecentActivity("Starting full sync...");
-
-        // Ensure change processor is running to process the queued items
-        if (m_changeProcessor && m_changeProcessor->state() != ChangeProcessor::State::Running) {
-            m_changeProcessor->start();
-        }
-
-        // Start the full sync to discover all files
-        m_fullSync->fullSync();
-    } else if (m_changeProcessor) {
-        // Fallback if no FullSync available
-        addRecentActivity("Starting sync...");
-        if (m_changeProcessor->state() != ChangeProcessor::State::Running) {
-            m_changeProcessor->start();
-        }
+    if (m_pauseController && m_pauseController->isEffectivelyPaused()) {
+        addRecentActivity("Sync request ignored while sync is paused");
+        return;
     }
+
+    addRecentActivity("Full sync requested");
+    emit fullSyncRequested();
 }

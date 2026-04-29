@@ -15,17 +15,14 @@
 
 #include "UiStatusCoordinator.h"
 #include "auth/GoogleAuthManager.h"
-#include "sync/ChangeProcessor.h"
 #include "sync/RuntimePauseController.h"
 #include "utils/ThemeHelper.h"
 
 SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
-                                     ChangeProcessor* changeProcessor,
                                      RuntimePauseController* pauseController,
                                      UiStatusCoordinator* statusCoordinator, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
-      m_changeProcessor(changeProcessor),
       m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_syncPaused(false),
@@ -255,22 +252,16 @@ void SystemTrayManager::onOpenFolderClicked() {
 }
 
 void SystemTrayManager::onPauseSyncClicked() {
-    if (m_pauseController) {
-        m_pauseController->togglePause();
+    if (!m_pauseController) {
         return;
     }
 
-    if (m_changeProcessor) {
-        if (m_syncPaused) {
-            m_changeProcessor->resume();
-            updatePauseAction(false);
-            showNotification("Sync Resumed", "Google Drive sync has resumed.");
-        } else {
-            m_changeProcessor->pause();
-            updatePauseAction(true);
-            showNotification("Sync Paused", "Google Drive sync has been paused.");
-        }
-    }
+    m_pauseController->togglePause();
+    showNotification(m_pauseController->isEffectivelyPaused() ? QStringLiteral("Sync Paused")
+                                                              : QStringLiteral("Sync Resumed"),
+                     m_pauseController->isEffectivelyPaused()
+                         ? QStringLiteral("Google Drive sync has been paused.")
+                         : QStringLiteral("Google Drive sync has resumed."));
 }
 
 void SystemTrayManager::onSyncNowClicked() {

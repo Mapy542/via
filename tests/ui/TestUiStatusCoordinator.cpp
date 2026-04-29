@@ -40,8 +40,7 @@ void TestUiStatusCoordinator::init() {
     m_syncActionQueue = new SyncActionQueue();
     m_changeProcessor = new ChangeProcessor(m_changeQueue, m_syncActionQueue, nullptr, nullptr);
     m_pauseController = new RuntimePauseController();
-    m_coordinator =
-        new UiStatusCoordinator(nullptr, m_syncActionQueue, m_changeProcessor, m_pauseController);
+    m_coordinator = new UiStatusCoordinator(nullptr, true, m_pauseController);
 }
 
 void TestUiStatusCoordinator::cleanup() {
@@ -63,6 +62,7 @@ void TestUiStatusCoordinator::cleanup() {
 
 void TestUiStatusCoordinator::testFuseStatusSurvivesMirrorRefresh() {
     m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
     m_coordinator->refreshMirrorStatus();
 
     UiStatusSnapshot status = m_coordinator->snapshot();
@@ -131,7 +131,7 @@ void TestUiStatusCoordinator::testMetadataRefreshClearsOnLogoutAndAuthExpired() 
 
 void TestUiStatusCoordinator::testMirrorDisabledOfflineRecoveryClearsMirrorStatus() {
     RuntimePauseController pauseController;
-    UiStatusCoordinator coordinator(nullptr, m_syncActionQueue, nullptr, &pauseController);
+    UiStatusCoordinator coordinator(nullptr, false, &pauseController);
 
     coordinator.updateAuthState(true);
     coordinator.updateFuseStatus(QStringLiteral("Mounted"));
@@ -158,7 +158,7 @@ void TestUiStatusCoordinator::testMirrorDisabledOfflineRecoveryClearsMirrorStatu
 
 void TestUiStatusCoordinator::testDisablingAutoPauseClearsMirrorDisabledOfflineStatus() {
     RuntimePauseController pauseController;
-    UiStatusCoordinator coordinator(nullptr, m_syncActionQueue, nullptr, &pauseController);
+    UiStatusCoordinator coordinator(nullptr, false, &pauseController);
 
     coordinator.updateAuthState(true);
     coordinator.updateFuseStatus(QStringLiteral("Mounted"));
@@ -183,6 +183,7 @@ void TestUiStatusCoordinator::testDisablingAutoPauseClearsMirrorDisabledOfflineS
 
 void TestUiStatusCoordinator::testStickyMirrorStatusSurvivesRefresh() {
     m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
 
     m_coordinator->updateMirrorStatus(QStringLiteral("Offline"));
     m_coordinator->refreshMirrorStatus();
@@ -202,6 +203,7 @@ void TestUiStatusCoordinator::testStickyMirrorStatusSurvivesRefresh() {
 void TestUiStatusCoordinator::testLoggedOutAndAuthExpiredStayDistinct() {
     m_coordinator->updateAuthState(true);
     m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
     m_coordinator->refreshMirrorStatus();
 
     m_pauseController->setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline,

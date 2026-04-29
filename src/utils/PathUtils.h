@@ -123,6 +123,44 @@ inline bool isPathWithinRootBoundary(const QString& candidatePath, const QString
 }
 
 /**
+ * @brief Convert an absolute path to a root-relative path when it stays inside the root.
+ *
+ * This combines the root-boundary containment check with relative path generation so
+ * callers can share the same safety logic while keeping their own fallback behavior.
+ *
+ * @param candidatePath  Absolute path being converted
+ * @param rootDir        Root directory boundary
+ * @param relativePath   Output for the relative path; cleared on failure
+ * @return true if candidatePath is rootDir itself or nested beneath it
+ */
+inline bool tryGetRelativePathWithinRoot(const QString& candidatePath, const QString& rootDir,
+                                         QString* relativePath) {
+    if (relativePath == nullptr) {
+        return false;
+    }
+
+    relativePath->clear();
+    if (!isPathWithinRootBoundary(candidatePath, rootDir)) {
+        return false;
+    }
+
+    const QString cleanCandidate = QDir::cleanPath(candidatePath);
+    const QString cleanRoot = QDir::cleanPath(rootDir);
+
+    QString relative = QDir(cleanRoot).relativeFilePath(cleanCandidate);
+    if (relative == QStringLiteral(".")) {
+        relative.clear();
+    }
+
+    if (relative == QStringLiteral("..") || relative.startsWith(QStringLiteral("../"))) {
+        return false;
+    }
+
+    *relativePath = relative;
+    return true;
+}
+
+/**
  * @brief Resolve a path to its canonical location if it exists.
  *
  * This resolves symlink targets and normalizes the resulting absolute path.

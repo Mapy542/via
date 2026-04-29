@@ -86,6 +86,8 @@ set(SOURCES
     src/sync/ChangeQueue.cpp
     src/sync/LocalChangeWatcher.cpp
     src/sync/RemoteChangeWatcher.cpp
+    src/sync/MirrorSyncController.cpp
+    src/sync/MirrorSyncRuntime.cpp
     src/sync/ChangeProcessor.cpp
     src/sync/SyncActionQueue.cpp
     src/sync/SyncActionThread.cpp
@@ -124,6 +126,8 @@ set(HEADERS
     src/sync/ChangeQueue.h
     src/sync/LocalChangeWatcher.h
     src/sync/RemoteChangeWatcher.h
+    src/sync/MirrorSyncController.h
+    src/sync/MirrorSyncRuntime.h
     src/sync/ChangeProcessor.h
     src/sync/SyncActionQueue.h
     src/sync/SyncActionThread.h

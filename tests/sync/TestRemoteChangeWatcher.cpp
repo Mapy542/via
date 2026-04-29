@@ -126,6 +126,7 @@ class TestRemoteChangeWatcher : public QObject {
 
     // In-flight dedup
     void testInFlightDedup();
+    void testDeferredCheckDuringProcessing();
 
    private:
     QTemporaryDir* m_tempDir = nullptr;
@@ -600,6 +601,58 @@ void TestRemoteChangeWatcher::testInFlightDedup() {
 
     // Let the first request complete and the deferred one fire
     QTRY_VERIFY_WITH_TIMEOUT(m_driveClient->listChangesCallCount > countAfterFirst, 500);
+}
+
+void TestRemoteChangeWatcher::testDeferredCheckDuringProcessing() {
+    QHash<QString, QString> folderMap;
+    folderMap.insert("root-id", "");
+    m_watcher->setFolderIdToPath(folderMap);
+
+    m_watcher->setChangeToken("old-token");
+    m_driveClient->setNextToken("new-token");
+
+    DriveFile file;
+    file.id = "file-race";
+    file.name = "race.txt";
+    file.mimeType = "text/plain";
+    file.ownedByMe = true;
+    file.parents = {"root-id"};
+    file.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-race";
+    change.fileId = "file-race";
+    change.removed = false;
+    change.file = file;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+
+    bool injectedDeferredCheck = false;
+    bool requestStayedDeferred = false;
+
+    connect(
+        m_watcher, &RemoteChangeWatcher::changeDetected, this,
+        [this, &injectedDeferredCheck, &requestStayedDeferred]() {
+            if (injectedDeferredCheck) {
+                return;
+            }
+
+            injectedDeferredCheck = true;
+            m_driveClient->setPendingChanges({});
+            m_driveClient->setNextToken("new-token");
+            m_watcher->checkNow();
+            requestStayedDeferred = (m_driveClient->listChangesCallCount == 1);
+        },
+        Qt::DirectConnection);
+
+    m_watcher->start();
+
+    QTRY_VERIFY_WITH_TIMEOUT(injectedDeferredCheck, 500);
+    QVERIFY(requestStayedDeferred);
+    QTRY_VERIFY_WITH_TIMEOUT(m_driveClient->listChangesCallCount >= 2, 500);
+    QCOMPARE(m_driveClient->listChangesCallCount, 2);
+    QCOMPARE(m_driveClient->lastListChangesToken, QString("new-token"));
 }
 
 QTEST_MAIN(TestRemoteChangeWatcher)

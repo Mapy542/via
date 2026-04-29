@@ -19,7 +19,6 @@
 #include <QSystemTrayIcon>
 
 class GoogleAuthManager;
-class ChangeProcessor;
 class UiStatusCoordinator;
 class RuntimePauseController;
 
@@ -44,11 +43,10 @@ class SystemTrayManager : public QObject {
     /**
      * @brief Construct the system tray manager
      * @param authManager Pointer to the authentication manager
-     * @param changeProcessor Pointer to the change processor/conflict resolver
      * @param statusCoordinator Pointer to the shared UI status coordinator
      * @param parent Parent object
      */
-    explicit SystemTrayManager(GoogleAuthManager* authManager, ChangeProcessor* changeProcessor,
+    explicit SystemTrayManager(GoogleAuthManager* authManager,
                                RuntimePauseController* pauseController,
                                UiStatusCoordinator* statusCoordinator, QObject* parent = nullptr);
 
@@ -135,7 +133,6 @@ class SystemTrayManager : public QObject {
     void refreshNotificationMenu();
 
     GoogleAuthManager* m_authManager;
-    ChangeProcessor* m_changeProcessor;
     RuntimePauseController* m_pauseController;
     UiStatusCoordinator* m_statusCoordinator;
 

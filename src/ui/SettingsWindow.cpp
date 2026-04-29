@@ -18,9 +18,7 @@
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
-#include "sync/ChangeProcessor.h"
 #include "sync/RuntimePauseController.h"
-#include "sync/SyncActionQueue.h"
 #include "utils/AutostartManager.h"
 
 namespace {
@@ -55,14 +53,11 @@ class TokenStorageCredentialStore final : public SettingsCredentialStore {
 };
 }  // namespace
 
-SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
-                               ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
+SettingsWindow::SettingsWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
                                QWidget* parent, SettingsCredentialStore* credentialStore,
                                RuntimePauseController* pauseController)
     : QDialog(parent),
       m_authManager(authManager),
-      m_syncActionQueue(syncActionQueue),
-      m_changeProcessor(changeProcessor),
       m_driveClient(driveClient),
       m_pauseController(pauseController),
       m_ownedCredentialStore(

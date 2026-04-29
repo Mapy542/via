@@ -27,8 +27,6 @@
 
 class GoogleAuthManager;
 class GoogleDriveClient;
-class SyncActionQueue;
-class ChangeProcessor;
 class RuntimePauseController;
 
 class SettingsCredentialStore {
@@ -54,13 +52,10 @@ class SettingsWindow : public QDialog {
     /**
      * @brief Construct the settings window
      * @param authManager Pointer to the authentication manager
-     * @param syncActionQueue Pointer to the sync action queue
-     * @param changeProcessor Pointer to the change processor/conflict resolver
      * @param driveClient Pointer to the Google Drive client
      * @param parent Parent widget
      */
-    explicit SettingsWindow(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
-                            ChangeProcessor* changeProcessor, GoogleDriveClient* driveClient,
+    explicit SettingsWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
                             QWidget* parent = nullptr,
                             SettingsCredentialStore* credentialStore = nullptr,
                             RuntimePauseController* pauseController = nullptr);
@@ -124,8 +119,6 @@ class SettingsWindow : public QDialog {
     qint64 scanFuseCacheUsageBytes() const;
 
     GoogleAuthManager* m_authManager;
-    SyncActionQueue* m_syncActionQueue;
-    ChangeProcessor* m_changeProcessor;
     GoogleDriveClient* m_driveClient;
     RuntimePauseController* m_pauseController;
     QSettings m_settings;

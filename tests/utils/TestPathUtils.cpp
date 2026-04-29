@@ -30,6 +30,7 @@ class TestPathUtils : public QObject {
    private slots:
     void testIsSymlink();
     void testIsPathWithinRootBoundary();
+    void testTryGetRelativePathWithinRoot();
     void testIsCanonicalPathWithinRootRejectsExternalTarget();
     void testIsCanonicalPathWithinRootAllowsInternalTarget();
     void testClassifyRecursiveRootRemovalAllowsRecursiveDelete();
@@ -63,6 +64,21 @@ void TestPathUtils::testIsPathWithinRootBoundary() {
     QVERIFY(PathUtils::isPathWithinRootBoundary(root + "/child/file.txt", root));
     QVERIFY(!PathUtils::isPathWithinRootBoundary(root + ".Trash-1000/file.txt", root));
     QVERIFY(!PathUtils::isPathWithinRootBoundary(root + "-backup/file.txt", root));
+}
+
+void TestPathUtils::testTryGetRelativePathWithinRoot() {
+    const QString root = QStringLiteral("/tmp/sync");
+    QString relativePath = QStringLiteral("unchanged");
+
+    QVERIFY(PathUtils::tryGetRelativePathWithinRoot(root + "/child/file.txt", root, &relativePath));
+    QCOMPARE(relativePath, QStringLiteral("child/file.txt"));
+
+    QVERIFY(PathUtils::tryGetRelativePathWithinRoot(root, root, &relativePath));
+    QCOMPARE(relativePath, QString());
+
+    QVERIFY(
+        !PathUtils::tryGetRelativePathWithinRoot(root + "backup/file.txt", root, &relativePath));
+    QCOMPARE(relativePath, QString());
 }
 
 void TestPathUtils::testIsCanonicalPathWithinRootRejectsExternalTarget() {

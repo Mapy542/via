@@ -16,6 +16,7 @@
 #include "SyncSettings.h"
 #include "TrashPolicy.h"
 #include "utils/FileInUseChecker.h"
+#include "utils/PathUtils.h"
 
 const int LocalChangeWatcher::DEBOUNCE_DELAY_MS;
 const int LocalChangeWatcher::MOVE_DETECTION_WINDOW_MS;
@@ -355,18 +356,11 @@ bool LocalChangeWatcher::isPathWithinDirectory(const QString& path, const QStrin
 }
 
 QString LocalChangeWatcher::getRelativePath(const QString& absolutePath) const {
-    // TODO: Path boundary bug: startsWith(m_syncFolder) without a separator check incorrectly
-    // matches sibling directories whose names share the same prefix as the sync folder.
-    // E.g. m_syncFolder="/home/user/sync" would match "/home/user/syncbackup/file", producing
-    // "backup/file" as the relative path, which is wrong and could cause incorrect change events.
-    // Fix: guard with absolutePath.startsWith(m_syncFolder + '/') or use QDir::relativeFilePath().
-    if (absolutePath.startsWith(m_syncFolder)) {
-        QString relative = absolutePath.mid(m_syncFolder.length());
-        if (relative.startsWith('/')) {
-            relative = relative.mid(1);
-        }
-        return relative;
+    QString relativePath;
+    if (PathUtils::tryGetRelativePathWithinRoot(absolutePath, m_syncFolder, &relativePath)) {
+        return relativePath;
     }
+
     return absolutePath;
 }
 

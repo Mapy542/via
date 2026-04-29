@@ -69,7 +69,7 @@ void TestSettingsWindow::acceptNextMessageBox() {
 void TestSettingsWindow::testReopenShowsStoredIdAndKeepsStoredSecretOnResave() {
     FakeCredentialStore store;
 
-    SettingsWindow firstWindow(nullptr, nullptr, nullptr, nullptr, nullptr, &store);
+    SettingsWindow firstWindow(nullptr, nullptr, nullptr, &store);
     auto* firstClientIdEdit = firstWindow.findChild<QLineEdit*>("settingsClientIdEdit");
     auto* firstClientSecretEdit = firstWindow.findChild<QLineEdit*>("settingsClientSecretEdit");
     auto* firstSaveButton = firstWindow.findChild<QPushButton*>("settingsSaveCredentialsButton");
@@ -89,7 +89,7 @@ void TestSettingsWindow::testReopenShowsStoredIdAndKeepsStoredSecretOnResave() {
     QCOMPARE(firstClientSecretEdit->text(), QString());
     QCOMPARE(firstClientSecretEdit->placeholderText(), QStringLiteral("••••••••••••••••"));
 
-    SettingsWindow reopenedWindow(nullptr, nullptr, nullptr, nullptr, nullptr, &store);
+    SettingsWindow reopenedWindow(nullptr, nullptr, nullptr, &store);
     auto* reopenedClientIdEdit = reopenedWindow.findChild<QLineEdit*>("settingsClientIdEdit");
     auto* reopenedClientSecretEdit =
         reopenedWindow.findChild<QLineEdit*>("settingsClientSecretEdit");
@@ -125,7 +125,7 @@ void TestSettingsWindow::testAutoPauseCheckboxPersistsAndUpdatesController() {
     controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
     QVERIFY(controller.isEffectivelyPaused());
 
-    SettingsWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &controller);
+    SettingsWindow window(nullptr, nullptr, nullptr, nullptr, &controller);
     auto* autoPauseCheck = window.findChild<QCheckBox*>("settingsAutoPauseCheck");
 
     QVERIFY(autoPauseCheck != nullptr);
@@ -141,8 +141,7 @@ void TestSettingsWindow::testAutoPauseCheckboxPersistsAndUpdatesController() {
     QVERIFY(!controller.isAutoPauseEnabled());
     QVERIFY(controller.isDriveApiAllowed());
 
-    SettingsWindow reopenedWindow(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                  &controller);
+    SettingsWindow reopenedWindow(nullptr, nullptr, nullptr, nullptr, &controller);
     auto* reopenedAutoPauseCheck = reopenedWindow.findChild<QCheckBox*>("settingsAutoPauseCheck");
 
     QVERIFY(reopenedAutoPauseCheck != nullptr);

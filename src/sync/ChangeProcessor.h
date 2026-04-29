@@ -403,4 +403,6 @@ class ChangeProcessor : public QObject {
     static const int MIN_CHANGE_DIFF_SECS = 2;  ///< Change must be 2+ seconds newer than DB
 };
 
+Q_DECLARE_METATYPE(ChangeProcessor::State)
+
 #endif  // CHANGEPROCESSOR_H

@@ -35,6 +35,7 @@
 #include "sync/ChangeQueue.h"
 #include "sync/FullSync.h"
 #include "sync/LocalChangeWatcher.h"
+#include "sync/MirrorSyncRuntime.h"
 #include "sync/RemoteChangeWatcher.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncActionQueue.h"
@@ -200,38 +201,6 @@ void stopFuseComponent(FuseDriver* fuseDriver) {
     }
 }
 
-/**
- * @brief Start all sync components
- * @param localWatcher Local change watcher
- * @param remoteWatcher Remote change watcher
- * @param changeProcessor Change processor/conflict resolver
- * @param syncActionThread Sync action thread
- */
-void startSyncComponents(LocalChangeWatcher* localWatcher, RemoteChangeWatcher* remoteWatcher,
-                         ChangeProcessor* changeProcessor, SyncActionThread* syncActionThread) {
-    qInfo() << "Starting sync components...";
-    localWatcher->start();
-    remoteWatcher->start();
-    changeProcessor->start();
-    syncActionThread->start();
-}
-
-/**
- * @brief Stop all sync components
- * @param localWatcher Local change watcher
- * @param remoteWatcher Remote change watcher
- * @param changeProcessor Change processor/conflict resolver
- * @param syncActionThread Sync action thread
- */
-void stopSyncComponents(LocalChangeWatcher* localWatcher, RemoteChangeWatcher* remoteWatcher,
-                        ChangeProcessor* changeProcessor, SyncActionThread* syncActionThread) {
-    qInfo() << "Stopping sync components...";
-    syncActionThread->stop();
-    changeProcessor->stop();
-    remoteWatcher->stop();
-    localWatcher->stop();
-}
-
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
 
@@ -383,16 +352,9 @@ int main(int argc, char* argv[]) {
     LocalChangeWatcher localWatcher(&changeQueue);
     QString syncFolder =
         settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString();
-    localWatcher.setSyncFolder(syncFolder);
 
     // Initialize remote change watcher
     RemoteChangeWatcher remoteWatcher(&changeQueue, &driveClient, &syncDatabase);
-
-    // Load stored change token if available
-    QString storedToken = syncDatabase.getChangeToken();
-    if (!storedToken.isEmpty()) {
-        remoteWatcher.setChangeToken(storedToken);
-    }
 
     // Initialize change processor/conflict resolver
     ChangeProcessor changeProcessor(&changeQueue, &syncActionQueue, &syncDatabase, &driveClient);
@@ -410,8 +372,19 @@ int main(int argc, char* argv[]) {
     // calls. Either move them to real worker threads or update the design to avoid blocking work.
     SyncActionThread syncActionThread(&syncActionQueue, &syncDatabase, &driveClient,
                                       &changeProcessor, &localWatcher);
-    syncActionThread.setSyncFolder(syncFolder);
-    changeProcessor.setSyncFolder(syncFolder);  // share sync folder with change processor
+
+    // Initialize full sync handler
+    FullSync fullSync(&changeQueue, &syncDatabase, &driveClient, &changeProcessor);
+
+    MirrorSyncRuntime mirrorSyncRuntime(&localWatcher, &remoteWatcher, &changeProcessor,
+                                        &syncActionQueue, &syncActionThread, &fullSync, &app);
+    mirrorSyncRuntime.setSyncFolder(syncFolder);
+
+    // Load stored change token if available
+    QString storedToken = syncDatabase.getChangeToken();
+    if (!storedToken.isEmpty()) {
+        mirrorSyncRuntime.setChangeToken(storedToken);
+    }
 
     // Wire conflict resolution strategy from settings to ChangeProcessor
     {
@@ -428,43 +401,44 @@ int main(int argc, char* argv[]) {
         } else if (syncSettings.conflictStrategy == "ask-user") {
             strategy = ConflictResolutionStrategy::AskUser;
         }
-        changeProcessor.setConflictResolutionStrategy(strategy);
+        mirrorSyncRuntime.setConflictResolutionStrategy(strategy);
     }
 
-    // Initialize full sync handler
-    FullSync fullSync(&changeQueue, &syncDatabase, &driveClient, &changeProcessor);
-    fullSync.setSyncFolder(syncFolder);
-
-    // Periodic local-only full sync (every 5 minutes)
-    QTimer fullSyncLocalTimer(&app);
-    fullSyncLocalTimer.setInterval(5 * 60 * 1000);
-    fullSyncLocalTimer.setSingleShot(false);
-    QObject::connect(&fullSyncLocalTimer, &QTimer::timeout, &fullSync, &FullSync::fullSyncLocal);
-
-    // Connect change queue to processor wake-up signal
-    // TODO: Wiring bug: ChangeProcessor already connects ChangeQueue::itemsAvailable to
-    // onItemsAvailable() in its constructor. This second connect causes every queue wake-up to be
-    // delivered twice, which can schedule redundant processing and mask state-machine bugs.
-    QObject::connect(&changeQueue, &ChangeQueue::itemsAvailable, &changeProcessor,
-                     &ChangeProcessor::onItemsAvailable);
-
-    // Connect sync action queue to action thread wake-up signal
-    // TODO: Wiring bug: SyncActionThread already connects SyncActionQueue::itemsAvailable to
-    // onItemsAvailable() in its constructor. This duplicate connection double-delivers wake-up
-    // signals and can trigger redundant processNextAction scheduling.
-    QObject::connect(&syncActionQueue, &SyncActionQueue::itemsAvailable, &syncActionThread,
-                     &SyncActionThread::onItemsAvailable);
+    const auto queueMirrorPause = [&mirrorSyncRuntime]() {
+        QMetaObject::invokeMethod(&mirrorSyncRuntime, "pause", Qt::QueuedConnection);
+    };
+    const auto queueMirrorResume = [&mirrorSyncRuntime]() {
+        QMetaObject::invokeMethod(&mirrorSyncRuntime, "resume", Qt::QueuedConnection);
+    };
+    const auto queueMirrorStartAndScheduleInitialSync = [&mirrorSyncRuntime](int delayMs = 500) {
+        QMetaObject::invokeMethod(&mirrorSyncRuntime, "startAndScheduleInitialSync",
+                                  Qt::QueuedConnection, Q_ARG(int, delayMs));
+    };
+    const auto queueMirrorRestartAfterWake = [&mirrorSyncRuntime](int fullSyncDelayMs = 2000) {
+        QMetaObject::invokeMethod(&mirrorSyncRuntime, "restartAfterWake", Qt::QueuedConnection,
+                                  Q_ARG(int, fullSyncDelayMs));
+    };
+    const auto queueMirrorRequestFullSync = [&mirrorSyncRuntime]() {
+        QMetaObject::invokeMethod(&mirrorSyncRuntime, "requestFullSync", Qt::QueuedConnection,
+                                  Q_ARG(int, 0));
+    };
 
     // Connect remote watcher to save change tokens to database
     QObject::connect(&remoteWatcher, &RemoteChangeWatcher::changeTokenUpdated, &syncDatabase,
                      &SyncDatabase::setChangeToken);
 
     // Initialize shared UI status coordination and UI surfaces.
-    UiStatusCoordinator statusCoordinator(&authManager, mirrorEnabled ? &syncActionQueue : nullptr,
-                                          mirrorEnabled ? &changeProcessor : nullptr,
-                                          &pauseController);
-    SystemTrayManager trayManager(&authManager, mirrorEnabled ? &changeProcessor : nullptr,
-                                  &pauseController, &statusCoordinator);
+    UiStatusCoordinator statusCoordinator(&authManager, mirrorEnabled, &pauseController);
+    if (mirrorEnabled) {
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::pendingActionsChanged,
+                         &statusCoordinator, &UiStatusCoordinator::updatePendingActions);
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorStateChanged,
+                         &statusCoordinator, &UiStatusCoordinator::updateMirrorProcessorState);
+        statusCoordinator.updatePendingActions(syncActionQueue.count());
+        statusCoordinator.updateMirrorProcessorState(changeProcessor.state());
+    }
+
+    SystemTrayManager trayManager(&authManager, &pauseController, &statusCoordinator);
     trayManager.show();
     notificationManager.setTrayIcon(trayManager.trayIcon());
     QObject::connect(&notificationManager, &NotificationManager::notificationShown, &trayManager,
@@ -497,10 +471,43 @@ int main(int argc, char* argv[]) {
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
     MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &syncActionQueue : nullptr,
-                          mirrorEnabled ? &changeProcessor : nullptr,
-                          mirrorEnabled ? &syncActionThread : nullptr,
-                          mirrorEnabled ? &fullSync : nullptr, &pauseController, &statusCoordinator,
-                          &notificationManager);
+                          &pauseController, &statusCoordinator, &notificationManager);
+
+    if (mirrorEnabled) {
+        QObject::connect(&changeProcessor, &ChangeProcessor::error, &mainWindow,
+                         [&mainWindow](const QString& error) {
+                             mainWindow.addRecentActivity("Error: " + error);
+                         });
+        QObject::connect(&changeProcessor, &ChangeProcessor::conflictDetected, &mainWindow,
+                         [&mainWindow](const ConflictInfo& info) {
+                             mainWindow.addRecentActivity("Conflict: " + info.localPath);
+                         });
+        QObject::connect(&changeProcessor, &ChangeProcessor::conflictResolved, &mainWindow,
+                         [&mainWindow](const QString& localPath, ConflictResolutionStrategy) {
+                             mainWindow.addRecentActivity("Conflict resolved: " + localPath);
+                         });
+        QObject::connect(&changeProcessor, &ChangeProcessor::changeProcessed, &mainWindow,
+                         [&mainWindow](const QString& localPath) {
+                             mainWindow.addRecentActivity("Processed: " + localPath);
+                         });
+        QObject::connect(
+            &fullSync, &FullSync::progressUpdated, &mainWindow,
+            [&mainWindow](const QString& phase, int current, int total) {
+                Q_UNUSED(total);
+                mainWindow.addRecentActivity(QString("%1 (%2 files)").arg(phase).arg(current));
+            });
+        QObject::connect(&fullSync, &FullSync::completed, &mainWindow,
+                         [&mainWindow](int localCount, int remoteCount) {
+                             mainWindow.addRecentActivity(
+                                 QString("Full sync complete: %1 local, %2 remote files")
+                                     .arg(localCount)
+                                     .arg(remoteCount));
+                         });
+        QObject::connect(&fullSync, &FullSync::error, &mainWindow,
+                         [&mainWindow](const QString& error) {
+                             mainWindow.addRecentActivity("Full sync error: " + error);
+                         });
+    }
 
     // Initialize auto-pause sources that can safely feed the shared runtime policy.
     if (QNetworkInformation::loadDefaultBackend()) {
@@ -551,9 +558,8 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(
         &pauseController, &RuntimePauseController::stateChanged, &app,
-        [&pauseController, &notificationManager, &localWatcher, &remoteWatcher, &changeProcessor,
-         &syncActionThread, &fullSync, &fullSyncLocalTimer, &fuseDriver, &authManager,
-         mirrorEnabled, fuseEnabled, pauseState]() {
+        [&pauseController, &notificationManager, &fuseDriver, &authManager, mirrorEnabled,
+         fuseEnabled, pauseState, queueMirrorPause, queueMirrorResume]() {
             const RuntimePauseController::Snapshot previous = *pauseState;
             const RuntimePauseController::Snapshot current = pauseController.snapshot();
             *pauseState = current;
@@ -565,12 +571,7 @@ int main(int argc, char* argv[]) {
             if (current.effectivePause) {
                 qInfo() << "Runtime pause engaged:" << pauseController.effectiveStatusText();
                 if (mirrorEnabled) {
-                    fullSync.cancel();
-                    fullSyncLocalTimer.stop();
-                    localWatcher.pause();
-                    remoteWatcher.pause();
-                    changeProcessor.pause();
-                    syncActionThread.pause();
+                    queueMirrorPause();
                 }
                 if (fuseEnabled) {
                     fuseDriver.pauseSync();
@@ -584,11 +585,7 @@ int main(int argc, char* argv[]) {
 
             qInfo() << "Runtime pause cleared";
             if (mirrorEnabled && authManager.isAuthenticated()) {
-                localWatcher.resume();
-                remoteWatcher.resume();
-                changeProcessor.resume();
-                syncActionThread.resume();
-                fullSyncLocalTimer.start();
+                queueMirrorResume();
             }
             if (fuseEnabled) {
                 fuseDriver.resumeSync();
@@ -605,10 +602,9 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(
         &suspendMonitor, &SuspendMonitor::resumed, &app,
-        [&authManager, &remoteWatcher, &localWatcher, &changeProcessor, &syncActionThread,
-         &fullSync, &fullSyncLocalTimer, &fuseDriver, &trayManager, &notificationManager,
-         &statusCoordinator, &wakeRefreshNotificationGate, &pauseController, mirrorEnabled,
-         fuseEnabled]() {
+        [&authManager, &fuseDriver, &trayManager, &notificationManager, &statusCoordinator,
+         &wakeRefreshNotificationGate, &pauseController, mirrorEnabled, fuseEnabled,
+         queueMirrorRestartAfterWake]() {
             qInfo() << "Resume handler: refreshing auth and restarting components";
             statusCoordinator.updateMirrorStatus("Recovering from sleep...");
 
@@ -636,12 +632,7 @@ int main(int argc, char* argv[]) {
                     // 3. Restart mirror sync components — they may be waiting on
                     //    dead network sockets inside polling loops.
                     if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
-                        remoteWatcher.stop();
-                        remoteWatcher.start();
-                        fullSyncLocalTimer.start();
-                        // Schedule a full sync to reconcile any changes that
-                        // happened while we were asleep.
-                        QTimer::singleShot(2000, &fullSync, &FullSync::fullSync);
+                        queueMirrorRestartAfterWake();
                     }
 
                     // 4. Kick FUSE background workers.  Stopping and starting them
@@ -672,16 +663,10 @@ int main(int argc, char* argv[]) {
 
     // When authenticated, start sync components based on configured mode
     QObject::connect(&authManager, &GoogleAuthManager::authenticated, &app,
-                     [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
-                      &fullSyncLocalTimer, &fuseDriver, &pauseController, fuseEnabled,
-                      mirrorEnabled, &syncFolder]() {
+                     [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled, &syncFolder,
+                      queueMirrorStartAndScheduleInitialSync]() {
                          if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
-                             startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
-                                                 &syncActionThread);
-                             fullSyncLocalTimer.start();
-                             // Trigger full sync after authentication to ensure drive is fully
-                             // synced
-                             QTimer::singleShot(500, &fullSync, &FullSync::fullSync);
+                             queueMirrorStartAndScheduleInitialSync();
                          }
                          if (fuseEnabled) {
                              startFuseComponent(&fuseDriver, syncFolder);
@@ -694,15 +679,11 @@ int main(int argc, char* argv[]) {
     // When logged out, stop sync components and purge session state
     QObject::connect(
         &authManager, &GoogleAuthManager::loggedOut, &app,
-        [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
-         &fullSyncLocalTimer, &fuseDriver, mirrorEnabled, fuseEnabled, &changeQueue,
+        [&mirrorSyncRuntime, &fuseDriver, mirrorEnabled, fuseEnabled, &changeQueue,
          &syncActionQueue, &syncDatabase, &syncFolder]() {
             // --- 1. Cancel / stop running components ---
             if (mirrorEnabled) {
-                fullSync.cancel();
-                fullSyncLocalTimer.stop();
-                stopSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
-                                   &syncActionThread);
+                mirrorSyncRuntime.cancelAndStop();
             }
             if (fuseEnabled) {
                 stopFuseComponent(&fuseDriver);
@@ -713,10 +694,7 @@ int main(int argc, char* argv[]) {
             syncActionQueue.clear();
 
             // --- 3. Clear per-component in-memory state ---
-            changeProcessor.clearState();
-            syncActionThread.clearInProgressActions();
-            remoteWatcher.clearChangeToken();
-            fullSync.clearPendingState();
+            mirrorSyncRuntime.clearSessionState();
 
             // --- 4. Wipe the sync database ---
             syncDatabase.clearAllData();
@@ -841,12 +819,17 @@ int main(int argc, char* argv[]) {
 
     // Connect tray "Sync Now" to full sync (only when mirror sync is enabled)
     if (mirrorEnabled) {
-        QObject::connect(&trayManager, &SystemTrayManager::fullSyncRequested, &fullSync,
-                         [&fullSync, &pauseController]() {
-                             if (!pauseController.isEffectivelyPaused()) {
-                                 fullSync.fullSync();
-                             }
-                         });
+        const auto queueFullSyncRequest = [&pauseController, queueMirrorRequestFullSync]() {
+            if (pauseController.isEffectivelyPaused()) {
+                return;
+            }
+
+            queueMirrorRequestFullSync();
+        };
+
+        QObject::connect(&trayManager, &SystemTrayManager::fullSyncRequested, &app,
+                         queueFullSyncRequest);
+        QObject::connect(&mainWindow, &MainWindow::fullSyncRequested, &app, queueFullSyncRequest);
     }
 
     // Connect storage info to shared UI status coordinator
@@ -1094,35 +1077,31 @@ int main(int argc, char* argv[]) {
             notificationManager.showWarning("Authentication Warning", error);
         });
 
-    QObject::connect(
-        &authManager, &GoogleAuthManager::authExpired, &app,
-        [&refreshInFlight, &localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread,
-         &fullSync, &fullSyncLocalTimer, &trayManager, &mainWindow, &notificationManager,
-         &statusCoordinator, &fuseDriver, &wakeRefreshNotificationGate,
-         &app](const QString& reason) {
-            refreshInFlight = false;
-            wakeRefreshNotificationGate.markAuthExpired();
-            fullSync.cancel();
-            fullSyncLocalTimer.stop();
-            stopFuseComponent(&fuseDriver);
-            stopSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread);
+    QObject::connect(&authManager, &GoogleAuthManager::authExpired, &app,
+                     [&refreshInFlight, &mirrorSyncRuntime, &trayManager, &mainWindow,
+                      &notificationManager, &statusCoordinator, &fuseDriver,
+                      &wakeRefreshNotificationGate, &app](const QString& reason) {
+                         refreshInFlight = false;
+                         wakeRefreshNotificationGate.markAuthExpired();
+                         mirrorSyncRuntime.cancelAndStop();
+                         stopFuseComponent(&fuseDriver);
 
-            statusCoordinator.setAuthExpired(reason);
-            mainWindow.setAuthExpired(reason);
-            trayManager.updateAuthState(false);
-            trayManager.showNotification("Session Expired",
-                                         "Google Drive session expired. Sign in again.",
-                                         QSystemTrayIcon::Warning);
-            notificationManager.showWarning(
-                "Authentication Expired",
-                "Session expired. Re-authentication is required to resume sync.");
+                         statusCoordinator.setAuthExpired(reason);
+                         mainWindow.setAuthExpired(reason);
+                         trayManager.updateAuthState(false);
+                         trayManager.showNotification(
+                             "Session Expired", "Google Drive session expired. Sign in again.",
+                             QSystemTrayIcon::Warning);
+                         notificationManager.showWarning(
+                             "Authentication Expired",
+                             "Session expired. Re-authentication is required to resume sync.");
 
-            QTimer::singleShot(0, &app, [&wakeRefreshNotificationGate]() {
-                if (wakeRefreshNotificationGate.sawWakeAuthExpired()) {
-                    wakeRefreshNotificationGate.reset();
-                }
-            });
-        });
+                         QTimer::singleShot(0, &app, [&wakeRefreshNotificationGate]() {
+                             if (wakeRefreshNotificationGate.sawWakeAuthExpired()) {
+                                 wakeRefreshNotificationGate.reset();
+                             }
+                         });
+                     });
 
     // Auto-login if tokens are available - check after connections are established
     if (tokenStorage.hasValidTokens()) {
@@ -1141,15 +1120,10 @@ int main(int argc, char* argv[]) {
             // Use QTimer::singleShot to ensure event loop is running
             QTimer::singleShot(
                 100, &app,
-                [&localWatcher, &remoteWatcher, &changeProcessor, &syncActionThread, &fullSync,
-                 &fullSyncLocalTimer, &fuseDriver, &pauseController, fuseEnabled, mirrorEnabled,
-                 &syncFolder, &trayManager, &statusCoordinator]() {
+                [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled, &syncFolder,
+                 &trayManager, &statusCoordinator, queueMirrorStartAndScheduleInitialSync]() {
                     if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
-                        startSyncComponents(&localWatcher, &remoteWatcher, &changeProcessor,
-                                            &syncActionThread);
-                        fullSyncLocalTimer.start();
-                        // Trigger full sync after starting components
-                        QTimer::singleShot(500, &fullSync, &FullSync::fullSync);
+                        queueMirrorStartAndScheduleInitialSync();
                     }
                     if (fuseEnabled) {
                         startFuseComponent(&fuseDriver, syncFolder);

@@ -222,34 +222,26 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
         }
     }
 
-    // Mark the request as no longer in flight, but defer token update
-    // until after processing to avoid advancing past unprocessed changes
-    // if a crash occurs mid-processing.
-    QMutexLocker locker(&m_mutex);
-    const bool runDeferredCheck = m_pendingCheckRequested;
-    const bool tokenUpdated = (m_changeToken != newToken);
-    m_pendingCheckRequested = false;
-    locker.unlock();
-
     // Process each change
     for (const DriveChange& change : changes) {
         processChange(change);
     }
 
-    // Commit the new token only after all changes have been processed
+    bool runDeferredCheck = false;
+    bool tokenUpdated = false;
+
+    // Commit the new token and clear in-flight state only after all changes
+    // have been processed so late checkNow() calls are preserved.
     {
-        QMutexLocker locker2(&m_mutex);
+        QMutexLocker locker(&m_mutex);
+        tokenUpdated = (m_changeToken != newToken);
         m_changeToken = newToken;
+        m_changesRequestInFlight = false;
+        runDeferredCheck = m_pendingCheckRequested;
+        m_pendingCheckRequested = false;
     }
 
     emit changeTokenUpdated(newToken);
-
-    // Mark request as completed after processing to allow deferred checks to run if needed
-    // TODO: Race condition: m_changesRequestInFlight is written here without holding m_mutex,
-    // but it is read under m_mutex in checkNow(). If checkNow() runs concurrently on another
-    // thread between the unlock above and this assignment, it will observe a stale `true` value
-    // and incorrectly skip polling. Protect this write with a QMutexLocker(&m_mutex) block.
-    m_changesRequestInFlight = false;
 
     // If there are more pages to fetch, immediately request them
     // Otherwise, wait for the next poll interval

@@ -83,13 +83,16 @@ void SyncActionQueue::enqueue(const SyncActionItem& item) {
     }
 
     bool wasEmpty = false;
+    int currentCount = 0;
     {
         QMutexLocker locker(&m_mutex);
         wasEmpty = m_queue.isEmpty();
         m_queue.enqueue(item);
+        currentCount = m_queue.count();
     }
 
     emit itemEnqueued(item);
+    emit countChanged(currentCount);
 
     // Signal that items are available (the "Jobs Available Wakeup Signal")
     if (wasEmpty) {
@@ -113,6 +116,7 @@ bool SyncActionQueue::enqueueIfNotDuplicate(const SyncActionItem& item) {
     }
 
     bool wasEmpty = false;
+    int currentCount = 0;
     {
         QMutexLocker locker(&m_mutex);
         for (const SyncActionItem& pending : m_queue) {
@@ -125,9 +129,11 @@ bool SyncActionQueue::enqueueIfNotDuplicate(const SyncActionItem& item) {
 
         wasEmpty = m_queue.isEmpty();
         m_queue.enqueue(item);
+        currentCount = m_queue.count();
     }
 
     emit itemEnqueued(item);
+    emit countChanged(currentCount);
 
     if (wasEmpty) {
         emit itemsAvailable();
@@ -156,6 +162,7 @@ bool SyncActionQueue::containsDuplicatePending(const SyncActionItem& item) const
 
 SyncActionItem SyncActionQueue::dequeue() {
     bool shouldEmitEmpty = false;
+    int currentCount = 0;
     SyncActionItem item;
 
     {
@@ -167,7 +174,10 @@ SyncActionItem SyncActionQueue::dequeue() {
 
         item = m_queue.dequeue();
         shouldEmitEmpty = m_queue.isEmpty();
+        currentCount = m_queue.count();
     }
+
+    emit countChanged(currentCount);
 
     if (shouldEmitEmpty) {
         emit queueEmpty();
@@ -213,12 +223,14 @@ void SyncActionQueue::clear() {
         m_queue.clear();
     }
 
+    emit countChanged(0);
     emit queueEmpty();
 }
 
 int SyncActionQueue::removeByPath(const QString& localPath) {
     int removed = 0;
     bool shouldEmitEmpty = false;
+    int currentCount = 0;
 
     {
         QMutexLocker locker(&m_mutex);
@@ -236,6 +248,11 @@ int SyncActionQueue::removeByPath(const QString& localPath) {
 
         m_queue = newQueue;
         shouldEmitEmpty = m_queue.isEmpty() && removed > 0;
+        currentCount = m_queue.count();
+    }
+
+    if (removed > 0) {
+        emit countChanged(currentCount);
     }
 
     if (shouldEmitEmpty) {
@@ -248,6 +265,7 @@ int SyncActionQueue::removeByPath(const QString& localPath) {
 int SyncActionQueue::removeByFileId(const QString& fileId) {
     int removed = 0;
     bool shouldEmitEmpty = false;
+    int currentCount = 0;
 
     {
         QMutexLocker locker(&m_mutex);
@@ -265,6 +283,11 @@ int SyncActionQueue::removeByFileId(const QString& fileId) {
 
         m_queue = newQueue;
         shouldEmitEmpty = m_queue.isEmpty() && removed > 0;
+        currentCount = m_queue.count();
+    }
+
+    if (removed > 0) {
+        emit countChanged(currentCount);
     }
 
     if (shouldEmitEmpty) {

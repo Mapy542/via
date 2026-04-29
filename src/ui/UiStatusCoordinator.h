@@ -9,11 +9,11 @@
 #include <QObject>
 #include <QString>
 
+#include "sync/ChangeProcessor.h"
+
 class QTimer;
 
 class GoogleAuthManager;
-class SyncActionQueue;
-class ChangeProcessor;
 class RuntimePauseController;
 
 enum class UiStatusPriority {
@@ -43,8 +43,7 @@ class UiStatusCoordinator : public QObject {
     Q_OBJECT
 
    public:
-    explicit UiStatusCoordinator(GoogleAuthManager* authManager, SyncActionQueue* syncActionQueue,
-                                 ChangeProcessor* changeProcessor,
+    explicit UiStatusCoordinator(GoogleAuthManager* authManager, bool mirrorEnabled,
                                  RuntimePauseController* pauseController = nullptr,
                                  QObject* parent = nullptr);
 
@@ -71,6 +70,8 @@ class UiStatusCoordinator : public QObject {
     void onMetadataRefreshStarted();
     void onMetadataRefreshFinished();
     void onMetadataRefreshFailed(const QString& error);
+    void updatePendingActions(int count);
+    void updateMirrorProcessorState(ChangeProcessor::State state);
     void refreshMirrorStatus();
 
    private:
@@ -85,9 +86,9 @@ class UiStatusCoordinator : public QObject {
     QString effectiveStatusText() const;
 
     GoogleAuthManager* m_authManager;
-    SyncActionQueue* m_syncActionQueue;
-    ChangeProcessor* m_changeProcessor;
     RuntimePauseController* m_pauseController;
+    bool m_mirrorEnabled;
+    ChangeProcessor::State m_changeProcessorState;
 
     QTimer* m_statusTimer;
     QTimer* m_fuseIdleTimer;

@@ -23,9 +23,6 @@ class GoogleDriveClient;
 class NotificationManager;
 class SettingsWindow;
 class SyncActionQueue;
-class SyncActionThread;
-class ChangeProcessor;
-class FullSync;
 class UiStatusCoordinator;
 class RuntimePauseController;
 
@@ -45,15 +42,11 @@ class MainWindow : public QMainWindow {
      * @param authManager Pointer to the authentication manager
      * @param driveClient Pointer to the Google Drive API client
      * @param syncActionQueue Pointer to the sync action queue
-     * @param changeProcessor Pointer to the change processor/conflict resolver
-     * @param fullSync Pointer to the full sync handler
      * @param notificationManager Pointer to the notification manager
      * @param parent Parent widget
      */
     explicit MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
-                        SyncActionQueue* syncActionQueue, ChangeProcessor* changeProcessor,
-                        SyncActionThread* syncActionThread, FullSync* fullSync,
-                        RuntimePauseController* pauseController,
+                        SyncActionQueue* syncActionQueue, RuntimePauseController* pauseController,
                         UiStatusCoordinator* statusCoordinator,
                         NotificationManager* notificationManager, QWidget* parent = nullptr);
 
@@ -122,6 +115,11 @@ class MainWindow : public QMainWindow {
      */
     void restartRequested();
 
+    /**
+     * @brief Emitted when the user requests a full mirror sync
+     */
+    void fullSyncRequested();
+
    protected:
     /**
      * @brief Handle window close event
@@ -148,9 +146,6 @@ class MainWindow : public QMainWindow {
     GoogleAuthManager* m_authManager;
     GoogleDriveClient* m_driveClient;
     SyncActionQueue* m_syncActionQueue;
-    SyncActionThread* m_syncActionThread;
-    ChangeProcessor* m_changeProcessor;
-    FullSync* m_fullSync;
     RuntimePauseController* m_pauseController;
     UiStatusCoordinator* m_statusCoordinator;
     NotificationManager* m_notificationManager;

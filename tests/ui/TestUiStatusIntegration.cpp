@@ -4,6 +4,7 @@
  */
 
 #include <QImage>
+#include <QSignalSpy>
 #include <QtTest/QtTest>
 
 #include "sync/ChangeProcessor.h"
@@ -32,6 +33,8 @@ class TestUiStatusIntegration : public QObject {
     void testMirrorDisabledOfflineRecoveryReturnsToFuseStatus();
     void testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled();
     void testAuthExpiredRecoveryPropagatesToTrayAndWindow();
+    void testMainWindowSyncNowEmitsRequestSignal();
+    void testPauseActionsTogglePauseController();
 
    private:
     QImage trayIconImage(int size = 16) const;
@@ -53,11 +56,10 @@ void TestUiStatusIntegration::init() {
     m_syncActionQueue = new SyncActionQueue();
     m_changeProcessor = new ChangeProcessor(m_changeQueue, m_syncActionQueue, nullptr, nullptr);
     m_pauseController = new RuntimePauseController();
-    m_coordinator =
-        new UiStatusCoordinator(nullptr, m_syncActionQueue, m_changeProcessor, m_pauseController);
-    m_tray = new SystemTrayManager(nullptr, m_changeProcessor, m_pauseController, m_coordinator);
-    m_window = new MainWindow(nullptr, nullptr, m_syncActionQueue, m_changeProcessor, nullptr,
-                              nullptr, m_pauseController, m_coordinator, nullptr);
+    m_coordinator = new UiStatusCoordinator(nullptr, true, m_pauseController);
+    m_tray = new SystemTrayManager(nullptr, m_pauseController, m_coordinator);
+    m_window = new MainWindow(nullptr, nullptr, m_syncActionQueue, m_pauseController, m_coordinator,
+                              nullptr);
 }
 
 void TestUiStatusIntegration::cleanup() {
@@ -95,6 +97,7 @@ QString TestUiStatusIntegration::windowSummary() const { return m_window->m_stat
 
 void TestUiStatusIntegration::testFuseUploadingStatusPropagatesToTrayAndWindow() {
     m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
     m_coordinator->updateAuthState(true);
     m_coordinator->refreshMirrorStatus();
 
@@ -128,6 +131,7 @@ void TestUiStatusIntegration::testMirrorStatusPropagatesWhenFuseDisabled() {
 
 void TestUiStatusIntegration::testOfflineStatusPropagatesToTrayAndWindow() {
     m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
     m_coordinator->updateAuthState(true);
     m_coordinator->refreshMirrorStatus();
 
@@ -143,10 +147,9 @@ void TestUiStatusIntegration::testOfflineStatusPropagatesToTrayAndWindow() {
 
 void TestUiStatusIntegration::testMirrorDisabledOfflineRecoveryReturnsToFuseStatus() {
     RuntimePauseController pauseController;
-    UiStatusCoordinator coordinator(nullptr, nullptr, nullptr, &pauseController);
-    SystemTrayManager tray(nullptr, nullptr, &pauseController, &coordinator);
-    MainWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &pauseController,
-                      &coordinator, nullptr);
+    UiStatusCoordinator coordinator(nullptr, false, &pauseController);
+    SystemTrayManager tray(nullptr, &pauseController, &coordinator);
+    MainWindow window(nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr);
 
     coordinator.updateAuthState(true);
     coordinator.updateFuseStatus(QStringLiteral("Mounted"));
@@ -174,10 +177,9 @@ void TestUiStatusIntegration::testMirrorDisabledOfflineRecoveryReturnsToFuseStat
 
 void TestUiStatusIntegration::testMetadataRefreshLifecyclePropagatesWhenMirrorDisabled() {
     RuntimePauseController pauseController;
-    UiStatusCoordinator coordinator(nullptr, nullptr, nullptr, &pauseController);
-    SystemTrayManager tray(nullptr, nullptr, &pauseController, &coordinator);
-    MainWindow window(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &pauseController,
-                      &coordinator, nullptr);
+    UiStatusCoordinator coordinator(nullptr, false, &pauseController);
+    SystemTrayManager tray(nullptr, &pauseController, &coordinator);
+    MainWindow window(nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr);
 
     coordinator.onMetadataRefreshStarted();
 
@@ -194,6 +196,7 @@ void TestUiStatusIntegration::testMetadataRefreshLifecyclePropagatesWhenMirrorDi
 
 void TestUiStatusIntegration::testAuthExpiredRecoveryPropagatesToTrayAndWindow() {
     m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
     m_coordinator->updateAuthState(true);
     m_coordinator->refreshMirrorStatus();
 
@@ -209,6 +212,30 @@ void TestUiStatusIntegration::testAuthExpiredRecoveryPropagatesToTrayAndWindow()
 
     QTRY_COMPARE(windowSummary(), QStringLiteral("Up to date"));
     QTRY_COMPARE(traySummary(), QStringLiteral("Up to date"));
+}
+
+void TestUiStatusIntegration::testMainWindowSyncNowEmitsRequestSignal() {
+    QSignalSpy spy(m_window, &MainWindow::fullSyncRequested);
+
+    m_window->onRefreshClicked();
+
+    QCOMPARE(spy.count(), 1);
+}
+
+void TestUiStatusIntegration::testPauseActionsTogglePauseController() {
+    QVERIFY(!m_pauseController->isEffectivelyPaused());
+
+    m_window->onPauseSyncClicked();
+
+    QTRY_VERIFY(m_pauseController->isEffectivelyPaused());
+    QTRY_COMPARE(m_window->m_pauseSyncButton->text(), QStringLiteral("Resume Sync"));
+    QTRY_COMPARE(m_tray->m_pauseSyncAction->text(), QStringLiteral("Resume Sync"));
+
+    m_tray->onPauseSyncClicked();
+
+    QTRY_VERIFY(!m_pauseController->isEffectivelyPaused());
+    QTRY_COMPARE(m_window->m_pauseSyncButton->text(), QStringLiteral("Pause Sync"));
+    QTRY_COMPARE(m_tray->m_pauseSyncAction->text(), QStringLiteral("Pause Sync"));
 }
 
 QTEST_MAIN(TestUiStatusIntegration)

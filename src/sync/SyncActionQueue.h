@@ -84,7 +84,8 @@ struct SyncActionItem {
      * @return true if items represent the same action
      */
     bool operator==(const SyncActionItem& other) const {
-        return actionType == other.actionType && localPath == other.localPath && fileId == other.fileId;
+        return actionType == other.actionType && localPath == other.localPath &&
+               fileId == other.fileId;
     }
 };
 
@@ -232,6 +233,12 @@ class SyncActionQueue : public QObject {
      * @brief Emitted when queue becomes empty
      */
     void queueEmpty();
+
+    /**
+     * @brief Emitted when the queue item count changes
+     * @param count Current queue item count
+     */
+    void countChanged(int count);
 
     /**
      * @brief Emitted when an item is enqueued
