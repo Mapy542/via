@@ -90,6 +90,12 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         m_injectedErrors.insert(operation, injected);
     }
 
+    void emitDetailedError(const QString& operation, const QString& errorMsg, int httpStatus,
+                           const QString& fileId = QString(),
+                           const QString& localPath = QString()) {
+        emit errorDetailed(operation, errorMsg, httpStatus, fileId, localPath);
+    }
+
     QString lastUploadedFileId() const { return m_lastUploadedFileId; }
     UploadCall lastUploadCall() const { return m_lastUploadCall; }
     MoveCall lastMoveCall() const { return m_lastMoveCall; }
@@ -259,6 +265,7 @@ class TestSyncActionThread : public QObject {
     void testUploadFolder_RecoversFromStaleParentId();
     void testUploadFile_DeferredParentDeduplicatesPendingParentCreate();
     void testUploadFile_RetriesAfterAuthFailure();
+    void testUnmatchedAuthFailureDoesNotEmitUserError();
     void testUploadFile_RetriesTransientFailure();
     void testUploadFile_StopsAfterRetryBudget();
     void testDownloadFile();
@@ -558,6 +565,20 @@ void TestSyncActionThread::testUploadFile_RetriesAfterAuthFailure() {
     QCOMPARE(failedSpy.count(), 0);
     QVERIFY(refreshSpy.count() >= 1);
     QCOMPARE(m_drive->uploadCallCount(), 2);
+}
+
+void TestSyncActionThread::testUnmatchedAuthFailureDoesNotEmitUserError() {
+    QSignalSpy errorSpy(m_thread, &SyncActionThread::error);
+    QSignalSpy refreshSpy(m_thread, &SyncActionThread::tokenRefreshRequested);
+
+    m_drive->emitDetailedError(
+        "listChanges",
+        "Request had invalid authentication credentials. Expected OAuth 2 access token.", 401);
+
+    QCoreApplication::processEvents();
+
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(refreshSpy.count(), 0);
 }
 
 void TestSyncActionThread::testUploadFile_RetriesTransientFailure() {

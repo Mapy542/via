@@ -1428,6 +1428,7 @@ void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QStr
     SyncActionItem currentAction;
     bool found = false;
     QString normalizedPath = normalizeLocalPath(localPath);
+    const bool isAuthFailure = (httpStatus == 401);
 
     {
         QMutexLocker locker(&m_driveActionsMutex);
@@ -1452,13 +1453,18 @@ void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QStr
     }
 
     if (!found) {
+        if (isAuthFailure) {
+            qInfo() << "Suppressing unmatched auth failure in SyncActionThread:" << operation
+                    << errorMsg;
+            return;
+        }
+
         qWarning() << "Drive error without matching action:" << operation << errorMsg;
         emit error(operation + ": " + errorMsg);
         return;
     }
 
     const QString errorLower = errorMsg.toLower();
-    const bool isAuthFailure = (httpStatus == 401);
     const bool isStaleParent = (httpStatus == 404) &&
                                (operation == "createFolder" || operation == "uploadFile") &&
                                errorLower.contains("file not found");
