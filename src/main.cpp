@@ -6,6 +6,9 @@
  * a Google Drive desktop client for Linux.
  */
 
+// TODO: Actions aarm runner stalls, out of resources, fails to build.
+//  Investigate other options such as docker on x86 or qemu emulation.
+
 #include <QApplication>
 #include <QDateTime>
 #include <QDebug>

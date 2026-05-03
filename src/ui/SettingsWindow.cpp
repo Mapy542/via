@@ -3,6 +3,7 @@
  * @brief Implementation of the settings window
  */
 
+// TODO: UI bug: settings window fails to open if API for drive storage info fails.
 #include "SettingsWindow.h"
 
 #include <QDialogButtonBox>

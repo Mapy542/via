@@ -12,6 +12,10 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkReply>
+#include <QQueue>
 #include <QSignalSpy>
 #include <QTimer>
 #include <QtTest/QtTest>
@@ -63,6 +67,139 @@ class FakeTokenStorage : public TokenStorage {
     QString m_clientId;
     QString m_clientSecret;
 };
+
+namespace {
+class PlannedRefreshReply final : public QNetworkReply {
+    Q_OBJECT
+
+   public:
+    enum class Kind { HangUntilAbort, ImmediateJson, ImmediateError };
+
+    struct Plan {
+        Kind kind = Kind::ImmediateError;
+        QByteArray body;
+        QNetworkReply::NetworkError error = QNetworkReply::NoError;
+        QString errorString;
+        int httpStatus = 200;
+    };
+
+    PlannedRefreshReply(const QNetworkRequest& request, const Plan& plan, QObject* parent = nullptr)
+        : QNetworkReply(parent), m_plan(plan), m_body(plan.body) {
+        setRequest(request);
+        setUrl(request.url());
+        setOperation(QNetworkAccessManager::PostOperation);
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, plan.httpStatus);
+        open(QIODevice::ReadOnly | QIODevice::Unbuffered);
+
+        if (m_plan.kind != Kind::HangUntilAbort) {
+            QTimer::singleShot(0, this, &PlannedRefreshReply::finishReply);
+        }
+    }
+
+    void abort() override {
+        if (m_finished) {
+            return;
+        }
+
+        if (error() == QNetworkReply::NoError) {
+            setError(QNetworkReply::OperationCanceledError, QStringLiteral("Operation canceled"));
+        }
+
+        finishReply();
+    }
+
+    qint64 bytesAvailable() const override {
+        return m_body.size() - m_offset + QIODevice::bytesAvailable();
+    }
+
+    bool isSequential() const override { return true; }
+
+   protected:
+    qint64 readData(char* data, qint64 maxSize) override {
+        if (m_offset >= m_body.size()) {
+            return -1;
+        }
+
+        const qint64 bytesToRead = qMin(maxSize, m_body.size() - m_offset);
+        memcpy(data, m_body.constData() + m_offset, static_cast<size_t>(bytesToRead));
+        m_offset += bytesToRead;
+        return bytesToRead;
+    }
+
+   private:
+    void finishReply() {
+        if (m_finished) {
+            return;
+        }
+
+        m_finished = true;
+        if (m_plan.kind == Kind::ImmediateError && error() == QNetworkReply::NoError) {
+            setError(m_plan.error, m_plan.errorString.isEmpty()
+                                       ? QStringLiteral("Injected network error")
+                                       : m_plan.errorString);
+        }
+
+        setFinished(true);
+        if (!m_body.isEmpty()) {
+            emit readyRead();
+        }
+        emit finished();
+    }
+
+    Plan m_plan;
+    QByteArray m_body;
+    qint64 m_offset = 0;
+    bool m_finished = false;
+};
+
+class ControlledRefreshAuthManager final : public GoogleAuthManager {
+    Q_OBJECT
+
+   public:
+    ControlledRefreshAuthManager(TokenStorage* tokenStorage, int timeoutMs,
+                                 QObject* parent = nullptr)
+        : GoogleAuthManager(tokenStorage, parent), m_timeoutMs(timeoutMs) {}
+
+    void enqueueHangingRefresh() {
+        m_plans.enqueue(PlannedRefreshReply::Plan{PlannedRefreshReply::Kind::HangUntilAbort});
+    }
+
+    void enqueueSuccessfulRefresh(const QString& accessToken, int expiresInSecs = 3600) {
+        m_plans.enqueue(PlannedRefreshReply::Plan{
+            PlannedRefreshReply::Kind::ImmediateJson,
+            QJsonDocument(QJsonObject{{QStringLiteral("access_token"), accessToken},
+                                      {QStringLiteral("expires_in"), expiresInSecs}})
+                .toJson(QJsonDocument::Compact)});
+    }
+
+    int refreshRequestCount() const { return m_refreshRequestCount; }
+
+   protected:
+    QNetworkReply* createRefreshReply(const QNetworkRequest& request,
+                                      const QByteArray& payload) override {
+        Q_UNUSED(payload)
+
+        ++m_refreshRequestCount;
+        if (m_plans.isEmpty()) {
+            return new PlannedRefreshReply(
+                request,
+                PlannedRefreshReply::Plan{PlannedRefreshReply::Kind::ImmediateError, QByteArray(),
+                                          QNetworkReply::UnknownNetworkError,
+                                          QStringLiteral("Missing planned refresh reply"), 500},
+                this);
+        }
+
+        return new PlannedRefreshReply(request, m_plans.dequeue(), this);
+    }
+
+    int refreshRequestTimeoutMs() const override { return m_timeoutMs; }
+
+   private:
+    QQueue<PlannedRefreshReply::Plan> m_plans;
+    int m_timeoutMs;
+    int m_refreshRequestCount = 0;
+};
+}  // namespace
 
 // ===========================================================================
 //  Testable GoogleAuthManager subclass
@@ -209,6 +346,7 @@ class TestTokenRefresh : public QObject {
     void testEnsureValidToken_AlreadyFresh();
     void testEnsureValidToken_TriggersRefresh();
     void testEnsureValidToken_FailsWithoutRefreshToken();
+    void testRefreshTimeoutClearsInFlightAndAllowsRetry();
 
     // handleNetworkError signal suppression
     void testAuthFailureSuppressesErrorSignal();
@@ -313,6 +451,35 @@ void TestTokenRefresh::testEnsureValidToken_FailsWithoutRefreshToken() {
 
     bool ok = m_authManager->ensureValidToken(1000);
     QVERIFY(!ok);
+}
+
+void TestTokenRefresh::testRefreshTimeoutClearsInFlightAndAllowsRetry() {
+    ControlledRefreshAuthManager authManager(nullptr, 25);
+    authManager.setCredentials(QStringLiteral("client-id"), QStringLiteral("client-secret"));
+    QVERIFY(QMetaObject::invokeMethod(&authManager, "onTokenChanged", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("expired-access-token"))));
+    QVERIFY(QMetaObject::invokeMethod(&authManager, "onRefreshTokenChanged", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("refresh-token"))));
+
+    authManager.enqueueHangingRefresh();
+    authManager.enqueueSuccessfulRefresh(QStringLiteral("recovered-access-token"));
+
+    QSignalSpy refreshErrorSpy(&authManager, &GoogleAuthManager::tokenRefreshError);
+    QSignalSpy refreshedSpy(&authManager, &GoogleAuthManager::tokenRefreshed);
+
+    QVERIFY(!authManager.ensureValidToken(250));
+    QCOMPARE(refreshErrorSpy.count(), 1);
+    QCOMPARE(authManager.refreshRequestCount(), 1);
+    QVERIFY(refreshErrorSpy.at(0).at(0).toString().contains(QStringLiteral("canceled"),
+                                                            Qt::CaseInsensitive));
+
+    QVERIFY(authManager.isTokenExpiringSoon());
+
+    QVERIFY(authManager.ensureValidToken(250));
+    QCOMPARE(refreshedSpy.count(), 1);
+    QCOMPARE(authManager.refreshRequestCount(), 2);
+    QCOMPARE(authManager.accessToken(), QStringLiteral("recovered-access-token"));
+    QVERIFY(!authManager.isTokenExpiringSoon());
 }
 
 // ---------------------------------------------------------------------------

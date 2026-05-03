@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QSet>
 #include <QUrlQuery>
 #include <QUuid>
@@ -18,6 +19,10 @@
 #include <climits>
 
 #include "TokenStorage.h"
+
+namespace {
+constexpr int kRefreshRequestTimeoutMs = 15000;
+}
 
 // Google OAuth endpoints
 const QString GoogleAuthManager::AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -35,6 +40,7 @@ GoogleAuthManager::GoogleAuthManager(TokenStorage* tokenStorage, QObject* parent
       m_replyHandler(nullptr),
       m_networkManager(new QNetworkAccessManager(this)),
       m_refreshTimer(new QTimer(this)),
+      m_refreshReplyTimeoutTimer(new QTimer(this)),
       m_forceConsentPrompt(false),
       m_authenticated(false) {
     // Load stored credentials or use empty values
@@ -55,10 +61,14 @@ GoogleAuthManager::GoogleAuthManager(TokenStorage* tokenStorage, QObject* parent
     loadStoredTokens();
 
     connect(m_refreshTimer, &QTimer::timeout, this, &GoogleAuthManager::onTokenRefreshTimerExpired);
+    m_refreshReplyTimeoutTimer->setSingleShot(true);
+    connect(m_refreshReplyTimeoutTimer, &QTimer::timeout, this,
+            &GoogleAuthManager::onRefreshReplyTimeout);
 }
 
 GoogleAuthManager::~GoogleAuthManager() {
     m_refreshTimer->stop();
+    m_refreshReplyTimeoutTimer->stop();
     // Don't call logout() on destruction - this was clearing tokens on every app close
     // Tokens should persist so the user stays logged in between sessions
 }
@@ -274,17 +284,23 @@ void GoogleAuthManager::refreshTokens() {
     }
 
     if (m_refreshInFlight) {
-        qInfo() << "Token refresh already in flight, skipping duplicate request";
-        return;
+        if (!m_activeRefreshReply || m_activeRefreshReply->isFinished()) {
+            qWarning() << "Clearing stale token refresh state before retry";
+            clearRefreshRequestState(m_activeRefreshReply.data());
+        } else {
+            qInfo() << "Token refresh already in flight, skipping duplicate request";
+            return;
+        }
     }
-    m_refreshInFlight = true;
 
     qInfo() << "Refreshing access token";
+    const int refreshTimeoutMs = qMax(1, refreshRequestTimeoutMs());
 
     // Manual token refresh using QNetworkAccessManager
     QUrl tokenUrl(TOKEN_URL);
     QNetworkRequest request(tokenUrl);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    request.setTransferTimeout(refreshTimeoutMs);
 
     QUrlQuery query;
     query.addQueryItem("client_id", m_clientId);
@@ -292,98 +308,157 @@ void GoogleAuthManager::refreshTokens() {
     query.addQueryItem("refresh_token", m_refreshTokenValue);
     query.addQueryItem("grant_type", "refresh_token");
 
-    QNetworkReply* reply =
-        m_networkManager->post(request, query.toString(QUrl::FullyEncoded).toUtf8());
+    QNetworkReply* reply = createRefreshReply(request, query.toString(QUrl::FullyEncoded).toUtf8());
+    if (!reply) {
+        emit tokenRefreshError("Failed to start token refresh request");
+        return;
+    }
+
+    m_refreshInFlight = true;
+    m_activeRefreshReply = reply;
+    m_refreshReplyTimeoutTimer->start(refreshTimeoutMs);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
+        const QNetworkReply::NetworkError networkError = reply->error();
+        const QString networkErrorString = reply->errorString();
+        const QByteArray data = reply->readAll();
 
-        if (reply->error() != QNetworkReply::NoError) {
-            m_refreshInFlight = false;
-            qWarning() << "Token refresh failed:" << reply->errorString();
-            emit tokenRefreshError(reply->errorString());
+        clearRefreshRequestState(reply);
+
+        if (networkError != QNetworkReply::NoError) {
+            qWarning() << "Token refresh failed:" << networkErrorString;
+            emit tokenRefreshError(networkErrorString);
             return;
         }
 
-        QByteArray data = reply->readAll();
-        QJsonDocument doc = QJsonDocument::fromJson(data);
-        QJsonObject obj = doc.object();
+        const QJsonDocument doc = QJsonDocument::fromJson(data);
+        const QJsonObject obj = doc.object();
 
         if (obj.contains("access_token")) {
-            m_refreshInFlight = false;
-            const bool wasAuthenticated = m_authenticated;
-            m_accessToken = obj["access_token"].toString();
-            m_oauth->setToken(m_accessToken);
-
-            int expiresIn = obj["expires_in"].toInt(3600);
-            if (expiresIn <= 0) {
-                expiresIn = 3600;
-            }
-            m_accessTokenExpiry = QDateTime::currentDateTimeUtc().addSecs(expiresIn);
-
-            // Refresh token might also be returned
-            if (obj.contains("refresh_token")) {
-                const QString refreshedToken = obj["refresh_token"].toString();
-                if (!refreshedToken.isEmpty()) {
-                    m_refreshTokenValue = refreshedToken;
-                    m_oauth->setRefreshToken(m_refreshTokenValue);
-                }
-            }
-
-            saveTokens();
-            m_authenticated = true;
-            scheduleTokenRefresh();
-
-            qInfo() << "Access token refreshed successfully";
-            emit tokenRefreshed();
-            if (!wasAuthenticated) {
-                emit authenticated();
-            }
-        } else {
-            const QString errorCode = obj["error"].toString();
-            QString error = obj["error_description"].toString();
-            if (error.isEmpty()) {
-                error = errorCode;
-            }
-            if (error.isEmpty()) {
-                error = "Unknown error";
-            }
-            m_refreshInFlight = false;
-            qWarning() << "Token refresh error:" << error;
-
-            if (errorCode == "invalid_grant" || errorCode == "invalid_client" ||
-                errorCode == "unauthorized_client") {
-                m_accessToken.clear();
-                m_refreshTokenValue.clear();
-                m_accessTokenExpiry = QDateTime();
-                m_authenticated = false;
-                m_forceConsentPrompt = true;
-
-                if (m_oauth) {
-                    m_oauth->setToken(QString());
-                    m_oauth->setRefreshToken(QString());
-                }
-
-                if (m_tokenStorage) {
-                    m_tokenStorage->clearTokens();
-                }
-
-                emit authExpired(error);
-            }
-
-            emit tokenRefreshError(error);
+            handleRefreshSuccess(obj);
+            return;
         }
+
+        const QString errorCode = obj["error"].toString();
+        QString error = obj["error_description"].toString();
+        if (error.isEmpty()) {
+            error = errorCode;
+        }
+        if (error.isEmpty()) {
+            error = "Unknown error";
+        }
+
+        qWarning() << "Token refresh error:" << error;
+        handleRefreshFailure(error, errorCode);
     });
+}
+
+QNetworkReply* GoogleAuthManager::createRefreshReply(const QNetworkRequest& request,
+                                                     const QByteArray& payload) {
+    return m_networkManager->post(request, payload);
+}
+
+int GoogleAuthManager::refreshRequestTimeoutMs() const { return kRefreshRequestTimeoutMs; }
+
+void GoogleAuthManager::clearRefreshRequestState(QNetworkReply* reply) {
+    m_refreshReplyTimeoutTimer->stop();
+    m_refreshInFlight = false;
+
+    if (reply) {
+        disconnect(reply, nullptr, this, nullptr);
+        if (m_activeRefreshReply == reply) {
+            m_activeRefreshReply = nullptr;
+        }
+        reply->deleteLater();
+        return;
+    }
+
+    if (m_activeRefreshReply) {
+        disconnect(m_activeRefreshReply, nullptr, this, nullptr);
+        m_activeRefreshReply->deleteLater();
+        m_activeRefreshReply = nullptr;
+    }
+}
+
+void GoogleAuthManager::handleRefreshSuccess(const QJsonObject& obj) {
+    const bool wasAuthenticated = m_authenticated;
+    m_accessToken = obj["access_token"].toString();
+    m_oauth->setToken(m_accessToken);
+
+    int expiresIn = obj["expires_in"].toInt(3600);
+    if (expiresIn <= 0) {
+        expiresIn = 3600;
+    }
+    m_accessTokenExpiry = QDateTime::currentDateTimeUtc().addSecs(expiresIn);
+
+    if (obj.contains("refresh_token")) {
+        const QString refreshedToken = obj["refresh_token"].toString();
+        if (!refreshedToken.isEmpty()) {
+            m_refreshTokenValue = refreshedToken;
+            m_oauth->setRefreshToken(m_refreshTokenValue);
+        }
+    }
+
+    saveTokens();
+    m_authenticated = true;
+    scheduleTokenRefresh();
+
+    qInfo() << "Access token refreshed successfully";
+    emit tokenRefreshed();
+    if (!wasAuthenticated) {
+        emit authenticated();
+    }
+}
+
+void GoogleAuthManager::handleRefreshFailure(const QString& error, const QString& errorCode) {
+    if (errorCode == "invalid_grant" || errorCode == "invalid_client" ||
+        errorCode == "unauthorized_client") {
+        m_accessToken.clear();
+        m_refreshTokenValue.clear();
+        m_accessTokenExpiry = QDateTime();
+        m_authenticated = false;
+        m_forceConsentPrompt = true;
+
+        if (m_oauth) {
+            m_oauth->setToken(QString());
+            m_oauth->setRefreshToken(QString());
+        }
+
+        if (m_tokenStorage) {
+            m_tokenStorage->clearTokens();
+        }
+
+        emit authExpired(error);
+    }
+
+    emit tokenRefreshError(error);
+}
+
+void GoogleAuthManager::onRefreshReplyTimeout() {
+    if (!m_activeRefreshReply || m_activeRefreshReply->isFinished()) {
+        return;
+    }
+
+    qWarning() << "Token refresh timed out, aborting stalled reply";
+    m_activeRefreshReply->abort();
 }
 
 void GoogleAuthManager::logout() {
     qInfo() << "Logging out";
 
     m_refreshTimer->stop();
+    m_refreshReplyTimeoutTimer->stop();
+
+    if (m_activeRefreshReply) {
+        if (!m_activeRefreshReply->isFinished()) {
+            m_activeRefreshReply->abort();
+        }
+        clearRefreshRequestState(m_activeRefreshReply.data());
+    }
 
     // Emit loggedOut BEFORE clearing the access token so that the cleanup
     // handler (connected in main.cpp) can call flushDirtyFiles() while the
-    // bearer token is still valid.  Tokens are cleared after the handler
+    // bearer token is still valid. Tokens are cleared after the handler
     // returns so every upload in the flush succeeds.
     emit loggedOut();
 

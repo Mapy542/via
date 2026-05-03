@@ -16,10 +16,14 @@
 #include <QOAuth2AuthorizationCodeFlow>
 #include <QOAuthHttpServerReplyHandler>
 #include <QObject>
+#include <QPointer>
 #include <QTimer>
 #include <QUrl>
 
 class TokenStorage;
+class QJsonObject;
+class QNetworkReply;
+class QNetworkRequest;
 
 /**
  * @class GoogleAuthManager
@@ -156,6 +160,12 @@ class GoogleAuthManager : public QObject {
     void onRefreshTokenChanged(const QString& token);
     void onError(const QString& error, const QString& errorDescription, const QUrl& uri);
     void onTokenRefreshTimerExpired();
+    void onRefreshReplyTimeout();
+
+   protected:
+    virtual QNetworkReply* createRefreshReply(const QNetworkRequest& request,
+                                              const QByteArray& payload);
+    virtual int refreshRequestTimeoutMs() const;
 
    private:
     void setupOAuth();
@@ -163,12 +173,16 @@ class GoogleAuthManager : public QObject {
     void loadStoredTokens();
     void saveTokens();
     void scheduleTokenRefresh();
+    void clearRefreshRequestState(QNetworkReply* reply = nullptr);
+    void handleRefreshSuccess(const QJsonObject& response);
+    void handleRefreshFailure(const QString& error, const QString& errorCode = QString());
 
     TokenStorage* m_tokenStorage;
     QOAuth2AuthorizationCodeFlow* m_oauth;
     QOAuthHttpServerReplyHandler* m_replyHandler;
     QNetworkAccessManager* m_networkManager;
     QTimer* m_refreshTimer;
+    QTimer* m_refreshReplyTimeoutTimer;
 
     QString m_clientId;
     QString m_clientSecret;
@@ -180,6 +194,7 @@ class GoogleAuthManager : public QObject {
     bool m_authenticated;
     bool m_refreshInFlight = false;  ///< Guards against concurrent token refreshes
     QString m_expectedState;         ///< CSRF state token for in-flight auth
+    QPointer<QNetworkReply> m_activeRefreshReply;
 
     // Google OAuth endpoints
     static const QString AUTH_URL;
