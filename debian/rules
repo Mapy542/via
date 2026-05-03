@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+UPSTREAM_VERSION := $(shell dpkg-parsechangelog -SVersion | sed 's/-[^-]*$$//')
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_TESTS=OFF \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DVIA_VERSION_OVERRIDE=$(UPSTREAM_VERSION)

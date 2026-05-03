@@ -18,6 +18,20 @@ ctest --test-dir build --output-on-failure
 
 Or use the VS Code tasks (Ctrl+Shift+B for the default build).
 
+### Debian Packaging Prerequisites
+
+Local Debian package builds use `scripts/make-deb.sh`, which stages a clean source copy under `build-deb/` and runs `dpkg-buildpackage` without mutating the working tree.
+
+```bash
+sudo apt-get install build-essential cmake debhelper desktop-file-utils \
+    dpkg-dev lintian pkgconf qt6-base-dev qt6-networkauth-dev \
+    libqt6sql6-sqlite libfuse3-dev libgl1-mesa-dev qtkeychain-qt6-dev
+
+./scripts/make-deb.sh
+```
+
+The script validates the desktop entry, runs `lintian`, inspects the resulting package with `dpkg-deb`, and writes `.deb`, `.changes`, and `.buildinfo` artifacts to `build-deb/artifacts/`.
+
 ---
 
 ## Project Layout
@@ -28,7 +42,8 @@ via/
 ├── VERSION                     # Checked-in application/release version
 ├── CTestCustom.cmake           # CTest output settings (disables truncation)
 ├── scripts/
-│   └── make-appimage.sh        # Local AppImage builder
+│   ├── make-appimage.sh        # Local AppImage builder
+│   └── make-deb.sh             # Local Debian package builder
 ├── src/
 │   ├── main.cpp                # Application entry point
 │   ├── api/                    # Google Drive REST API layer
@@ -192,6 +207,7 @@ The build produces:
 - The resolved version is written to `build/via-version.txt` and injected into the binary via `build/generated/ViaVersion.h`
 - Normal local builds need no extra flags
 - `-DVIA_VERSION_OVERRIDE=<x.y.z>` is available for one-off source builds and CI experiments, but releases should update `VERSION` in a normal commit instead of overriding it in the workflow
+- Release packaging derives the generated Debian changelog body and GitHub release notes from non-merge commit subjects since the previous `v*` tag
 
 ### CMake Conventions
 
@@ -231,6 +247,7 @@ Run via **Terminal → Run Task** or **Ctrl+Shift+B** (build):
 | Run All Tests (Verbose) | —                | Same with `-V` flag                                    |
 | List Available Tests    | —                | Shows registered CTest tests                           |
 | Make AppImage           | —                | Builds a local AppImage via `scripts/make-appimage.sh` |
+| Make Debian Package     | —                | Builds a local `.deb` via `scripts/make-deb.sh`        |
 
 ### Debug Configurations (`launch.json`)
 

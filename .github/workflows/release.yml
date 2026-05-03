@@ -27,6 +27,8 @@ jobs:
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
             - name: Validate checked-in version against release ref
               id: version
@@ -105,6 +107,8 @@ jobs:
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
             - name: Install system dependencies
               run: |
@@ -197,11 +201,80 @@ jobs:
               run: |
                   mv Via*.AppImage Via-${{ steps.version.outputs.resolved_version }}-${{ matrix.arch }}.AppImage
 
+            - name: Generate release notes
+              run: |
+                  bash ./scripts/generate-release-notes.sh github --version "${{ steps.version.outputs.resolved_version }}" > release-notes.md
+
             - name: Create Release
               uses: softprops/action-gh-release@v1
               with:
                   tag_name: ${{ needs.validate.outputs.release_tag }}
                   name: Via ${{ steps.version.outputs.resolved_version }}
+                  body_path: release-notes.md
                   files: Via-*.AppImage
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    package-deb:
+        needs: validate
+        strategy:
+            matrix:
+                include:
+                    - arch: amd64
+                      runner: ubuntu-latest
+                    - arch: arm64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
+        container:
+            image: debian:stable
+
+        steps:
+            - name: Install Debian packaging dependencies
+              env:
+                  DEBIAN_FRONTEND: noninteractive
+              run: |
+                  set -euo pipefail
+                  apt-get update
+                  apt-get install -y --no-install-recommends \
+                    build-essential \
+                    ca-certificates \
+                    cmake \
+                    debhelper \
+                    desktop-file-utils \
+                    dpkg-dev \
+                    git \
+                    libfuse3-dev \
+                    libgl1-mesa-dev \
+                    libqt6sql6-sqlite \
+                    lintian \
+                    pkgconf \
+                    qt6-base-dev \
+                    qt6-networkauth-dev \
+                    qtkeychain-qt6-dev
+
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Build Debian package
+              run: ./scripts/make-deb.sh
+
+            - name: Verify Debian artifact name
+              run: |
+                  set -euo pipefail
+                  test -f "build-deb/artifacts/via_${{ needs.validate.outputs.resolved_version }}-1_${{ matrix.arch }}.deb"
+
+            - name: Generate release notes
+              run: |
+                  bash ./scripts/generate-release-notes.sh github --version "${{ needs.validate.outputs.resolved_version }}" > release-notes.md
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ needs.validate.outputs.release_tag }}
+                  name: Via ${{ needs.validate.outputs.resolved_version }}
+                  body_path: release-notes.md
+                  files: build-deb/artifacts/via_${{ needs.validate.outputs.resolved_version }}-1_${{ matrix.arch }}.deb
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

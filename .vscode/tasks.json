@@ -83,6 +83,18 @@
                 "panel": "dedicated",
                 "clear": true
             }
+        },
+        {
+            "label": "Make Debian Package",
+            "type": "shell",
+            "command": "${workspaceFolder}/scripts/make-deb.sh",
+            "group": "build",
+            "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
         }
     ]
 }

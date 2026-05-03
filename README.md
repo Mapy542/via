@@ -25,6 +25,13 @@ Not affiliated with Google or Google Drive.
 3. Make it executable: `chmod +x Via-*.AppImage`
 4. Run: `./Via-*.AppImage` (Will install .desktop file)
 
+### Debian Package
+
+When release packaging is enabled for your target version, Releases also include `.deb` assets for `amd64` and `arm64`.
+
+1. Download the matching `via_<version>-1_<arch>.deb` asset
+2. Install it with `sudo apt install ./via_<version>-1_<arch>.deb`
+
 ### Building from Source
 
 #### Prerequisites
@@ -51,6 +58,22 @@ cd Via
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
+
+#### Building a Local Debian Package
+
+Replace any remaining `MAINTAINER` placeholders in the Debian metadata before the first packaging build. The packaging entrypoint stops immediately until those placeholders are replaced.
+
+```bash
+sudo apt-get install build-essential cmake debhelper desktop-file-utils \
+    dpkg-dev lintian pkgconf qt6-base-dev qt6-networkauth-dev \
+    libqt6sql6-sqlite libfuse3-dev libgl1-mesa-dev qtkeychain-qt6-dev
+
+./scripts/make-deb.sh
+```
+
+Artifacts are written to `build-deb/artifacts/` as `.deb`, `.changes`, and `.buildinfo` files.
+
+Release builds also derive the Debian changelog entry and GitHub release description from non-merge commit subjects since the previous `v*` tag.
 
 ## Configuration
 

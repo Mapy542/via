@@ -26,6 +26,15 @@ via
 AppDir/
 *-appimage/
 
+# Debian packaging
+build-deb/
+*.deb
+*.buildinfo
+*.changes
+*.ddeb
+*.dsc
+*.tar.*
+
 # CodeQL
 _codeql*/
 _codeql_detected_source_root

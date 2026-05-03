@@ -1,0 +1,29 @@
+Source: via
+Section: utils
+Priority: optional
+Maintainer: Eli Bukoski <eli@bukoski.dev>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ pkgconf,
+ libfuse3-dev,
+ libgl1-mesa-dev,
+ qt6-base-dev,
+ qt6-networkauth-dev,
+ qtkeychain-qt6-dev
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/Mapy542/Via
+Vcs-Browser: https://github.com/Mapy542/Via
+Vcs-Git: https://github.com/Mapy542/Via.git
+
+Package: via
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ libqt6sql6-sqlite,
+ qt6-image-formats-plugins
+Description: Google Drive desktop client for Linux
+ Via is a Google Drive desktop client for Linux that provides bidirectional
+ synchronization, a FUSE-backed virtual filesystem, and a Qt desktop UI.

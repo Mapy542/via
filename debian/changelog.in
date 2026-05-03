@@ -1,0 +1,5 @@
+via (@DEB_VERSION@) unstable; urgency=low
+
+@CHANGELOG_BODY@
+
+ -- Eli Bukoski <eli@bukoski.dev>  @CHANGELOG_DATE@
