@@ -7,6 +7,7 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlRecord>
@@ -15,13 +16,15 @@
 #include <stdexcept>
 
 const QString SyncDatabase::DB_NAME = "via_sync.db";
+const QString SyncDatabase::SCHEMA_EPOCH_KEY = "sync_schema_epoch";
 const int SyncDatabase::DB_VERSION = 6;
+const int SyncDatabase::CURRENT_SCHEMA_EPOCH = 1;
 
 namespace {
 
 static std::atomic<int> s_connectionCounter{0};
 
-bool tableExists(QSqlDatabase& db, const QString& tableName) {
+bool tableExists(const QSqlDatabase& db, const QString& tableName) {
     return db.tables().contains(tableName, Qt::CaseInsensitive);
 }
 
@@ -99,18 +102,15 @@ SyncDatabase::SyncDatabase(QObject* parent) : QObject(parent), m_concurrentAcces
     m_dbPath = dataPath + "/" + DB_NAME;
 }
 
-SyncDatabase::~SyncDatabase() { close(); }
+SyncDatabase::~SyncDatabase() {
+    close();
+}
 
-bool SyncDatabase::initialize() {
-    QMutexLocker locker(&m_mutex);
-    // Ensure data directory exists
-    QDir dir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
-    if (!dir.exists()) {
-        dir.mkpath(".");
+bool SyncDatabase::openConnectionUnlocked() {
+    if (m_db.isOpen()) {
+        return true;
     }
 
-    // Open database — use a unique connection name per instance to avoid
-    // clashes when multiple SyncDatabase objects exist (e.g. in tests).
     const QString connectionName =
         QStringLiteral("sync_connection_%1").arg(s_connectionCounter.fetch_add(1));
     m_db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
@@ -121,38 +121,56 @@ bool SyncDatabase::initialize() {
         return false;
     }
 
-    // Enable WAL mode for better concurrent read/write performance
-    {
-        QSqlQuery walQuery(m_db);
-        if (!walQuery.exec("PRAGMA journal_mode=WAL")) {
-            qWarning() << "Failed to enable WAL mode:" << walQuery.lastError().text();
-        }
+    QSqlQuery walQuery(m_db);
+    if (!walQuery.exec("PRAGMA journal_mode=WAL")) {
+        qWarning() << "Failed to enable WAL mode:" << walQuery.lastError().text();
+    }
+
+    return true;
+}
+
+bool SyncDatabase::initialize() {
+    QMutexLocker locker(&m_mutex);
+    m_lastSchemaCompatibility = SchemaCompatibility::Current;
+
+    // Ensure data directory exists
+    QDir dir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    if (!dir.exists()) {
+        dir.mkpath(".");
+    }
+
+    closeUnlocked();
+    if (!openConnectionUnlocked()) {
+        return false;
     }
 
     if (!ensureSettingsTable()) {
         return false;
     }
 
-    int currentVersion = getStoredVersion();
-    if (currentVersion > DB_VERSION) {
-        logError("initialize", QString("Database version %1 is newer than supported %2")
-                                   .arg(currentVersion)
-                                   .arg(DB_VERSION));
+    m_lastSchemaCompatibility = detectSchemaCompatibility();
+    if (m_lastSchemaCompatibility == SchemaCompatibility::UnsupportedFutureSchema) {
+        logError("initialize",
+                 QString("Database schema is newer than supported (epoch=%1, legacy=%2)")
+                     .arg(getStoredSchemaEpoch())
+                     .arg(getStoredVersion()));
         return false;
     }
 
-    if (currentVersion < DB_VERSION) {
-        if (!migrateDatabase(currentVersion)) {
-            return false;
-        }
+    if (m_lastSchemaCompatibility == SchemaCompatibility::ResetRequired) {
+        logError("initialize",
+                 QStringLiteral("Database schema is incompatible and must be recreated"));
+        return false;
+    }
+
+    if (m_lastSchemaCompatibility == SchemaCompatibility::ResetBlockedByDirtyState) {
+        logError("initialize", QStringLiteral("Database schema is incompatible and pending "
+                                              "dirty uploads must be discarded explicitly"));
+        return false;
     }
 
     // Ensure all tables/indexes exist for the current schema.
     if (!createTables()) {
-        return false;
-    }
-
-    if (!setStoredVersion(DB_VERSION)) {
         return false;
     }
 
@@ -161,12 +179,35 @@ bool SyncDatabase::initialize() {
         return false;
     }
 
+    if (!setStoredSchemaEpoch(CURRENT_SCHEMA_EPOCH)) {
+        return false;
+    }
+
+    if (!setStoredVersion(DB_VERSION)) {
+        return false;
+    }
+
+    m_lastSchemaCompatibility = SchemaCompatibility::Current;
+
     qInfo() << "Sync database initialized at:" << m_dbPath;
     return true;
 }
 
+bool SyncDatabase::recreateCurrentSchema() {
+    QMutexLocker locker(&m_mutex);
+    if (!m_db.isOpen() && !openConnectionUnlocked()) {
+        return false;
+    }
+
+    return recreateDatabaseUnlocked();
+}
+
 void SyncDatabase::close() {
     QMutexLocker locker(&m_mutex);
+    closeUnlocked();
+}
+
+void SyncDatabase::closeUnlocked() {
     if (m_db.isOpen()) {
         m_db.close();
     }
@@ -183,6 +224,11 @@ bool SyncDatabase::isOpen() const {
     return m_db.isOpen();
 }
 
+SyncDatabase::SchemaCompatibility SyncDatabase::lastSchemaCompatibility() const {
+    QMutexLocker locker(&m_mutex);
+    return m_lastSchemaCompatibility;
+}
+
 bool SyncDatabase::ensureSettingsTable() {
     QSqlQuery query(m_db);
     QString createSettingsTable = R"(
@@ -194,6 +240,32 @@ bool SyncDatabase::ensureSettingsTable() {
 
     if (!query.exec(createSettingsTable)) {
         logError("ensureSettingsTable", query.lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+int SyncDatabase::getStoredSchemaEpoch() const {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("SELECT value FROM settings WHERE key = ?"));
+    query.addBindValue(SCHEMA_EPOCH_KEY);
+    if (query.exec() && query.next()) {
+        bool ok = false;
+        const int epoch = query.value(0).toInt(&ok);
+        return ok ? epoch : 0;
+    }
+
+    return 0;
+}
+
+bool SyncDatabase::setStoredSchemaEpoch(int epoch) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)"));
+    query.addBindValue(SCHEMA_EPOCH_KEY);
+    query.addBindValue(epoch);
+    if (!query.exec()) {
+        logError("setStoredSchemaEpoch", query.lastError().text());
         return false;
     }
 
@@ -224,166 +296,79 @@ bool SyncDatabase::setStoredVersion(int version) {
     return true;
 }
 
-bool SyncDatabase::migrateDatabase(int currentVersion) {
-    if (currentVersion == 0) {
-        return true;
+SyncDatabase::SchemaCompatibility SyncDatabase::detectSchemaCompatibility() const {
+    const int schemaEpoch = getStoredSchemaEpoch();
+    if (schemaEpoch > CURRENT_SCHEMA_EPOCH) {
+        return SchemaCompatibility::UnsupportedFutureSchema;
+    }
+    if (schemaEpoch == CURRENT_SCHEMA_EPOCH) {
+        return SchemaCompatibility::Current;
     }
 
-    if (currentVersion < 2) {
-        if (!migrateFromV1ToV2()) {
-            return false;
-        }
-        currentVersion = 2;
+    const int legacyVersion = getStoredVersion();
+    if (legacyVersion > DB_VERSION) {
+        return SchemaCompatibility::UnsupportedFutureSchema;
+    }
+    if (legacyVersion == DB_VERSION) {
+        return SchemaCompatibility::Current;
+    }
+    if (legacyVersion > 0) {
+        return hasPendingDirtyUploads() ? SchemaCompatibility::ResetBlockedByDirtyState
+                                        : SchemaCompatibility::ResetRequired;
     }
 
-    if (currentVersion < 3) {
-        // TODO: Empty migration block: no schema change is applied for version 3.
-        // If this version was previously associated with a real migration that was later
-        // removed, databases that were left at v3 will be silently promoted to v4 without
-        // the schema actually being in the correct state. Document here what changed in v3,
-        // or add a compensating migration if the original change was lost.
-        currentVersion = 3;
-    }
-
-    if (currentVersion < 4) {
-        // TODO: Empty migration block: same issue as v3 above — no schema change for version 4.
-        // Document the intent or add the missing migration to avoid silent data corruption for
-        // databases at v3 or v4 that are silently advanced to a higher version.
-
-        // TODO:Cleanup DB "Versioning"
-        currentVersion = 4;
-    }
-
-    if (currentVersion < 5) {
-        if (!addColumnIfMissing(m_db, "files", "remote_md5_at_sync TEXT")) {
-            logError("migrateDatabase (add remote_md5_at_sync)", m_db.lastError().text());
-            return false;
-        }
-        if (!addColumnIfMissing(m_db, "files", "local_hash_at_sync TEXT")) {
-            logError("migrateDatabase (add local_hash_at_sync)", m_db.lastError().text());
-            return false;
-        }
-        currentVersion = 5;
-    }
-
-    if (currentVersion < 6) {
-        if (tableExists(m_db, QStringLiteral("fuse_dirty_files"))) {
-            if (!addColumnIfMissing(m_db, "fuse_dirty_files",
-                                    "generation INTEGER NOT NULL DEFAULT 1")) {
-                logError("migrateDatabase (add fuse_dirty_files.generation)",
-                         m_db.lastError().text());
-                return false;
-            }
-            if (!addColumnIfMissing(m_db, "fuse_dirty_files",
-                                    "uploaded_generation INTEGER NOT NULL DEFAULT 0")) {
-                logError("migrateDatabase (add fuse_dirty_files.uploaded_generation)",
-                         m_db.lastError().text());
-                return false;
-            }
-        }
-        currentVersion = 6;
-    }
-
-    if (currentVersion == DB_VERSION) {
-        return true;
-    }
-
-    logError(
-        "migrateDatabase",
-        QString("No migration path from version %1 to %2").arg(currentVersion).arg(DB_VERSION));
-    return false;
+    QStringList tables = m_db.tables();
+    tables.removeIf([](const QString& tableName) {
+        return tableName == QStringLiteral("settings") || tableName.startsWith("sqlite_");
+    });
+    return tables.isEmpty() ? SchemaCompatibility::Current : SchemaCompatibility::ResetRequired;
 }
 
-bool SyncDatabase::migrateFromV1ToV2() {
-    QSqlQuery query(m_db);
-
-    if (!query.exec("BEGIN")) {
-        logError("migrateFromV1ToV2 (begin)", query.lastError().text());
-        return false;
-    }
-
-    if (!query.exec(R"(
-        CREATE TABLE IF NOT EXISTS files_new (
-            file_id TEXT PRIMARY KEY,
-            local_path TEXT UNIQUE NOT NULL,
-            modified_time_at_sync TEXT,
-            is_folder INTEGER DEFAULT 0
-        )
-    )")) {
-        logError("migrateFromV1ToV2 (create files_new)", query.lastError().text());
-        query.exec("ROLLBACK");
-        return false;
-    }
-
-    QSqlQuery selectQuery(m_db);
-    if (!selectQuery.exec(
-            "SELECT file_id, local_path, modified_time_at_sync, is_folder FROM files")) {
-        logError("migrateFromV1ToV2 (select files)", selectQuery.lastError().text());
-        query.exec("ROLLBACK");
-        return false;
-    }
-
-    int skippedEmptyIds = 0;
-    int duplicateIds = 0;
-
-    while (selectQuery.next()) {
-        const QString fileId = selectQuery.value(0).toString();
-        const QString localPath = selectQuery.value(1).toString();
-        const QString modifiedTime = selectQuery.value(2).toString();
-        const int isFolder = selectQuery.value(3).toInt();
-
-        if (fileId.isEmpty()) {
-            skippedEmptyIds++;
-            continue;
-        }
-
-        QSqlQuery insertQuery(m_db);
-        insertQuery.prepare(
-            "INSERT OR IGNORE INTO files_new (file_id, local_path, modified_time_at_sync, "
-            "is_folder) "
-            "VALUES (?, ?, ?, ?)");
-        insertQuery.addBindValue(fileId);
-        insertQuery.addBindValue(localPath);
-        insertQuery.addBindValue(modifiedTime);
-        insertQuery.addBindValue(isFolder);
-
-        if (!insertQuery.exec()) {
-            logError("migrateFromV1ToV2 (insert files_new)", insertQuery.lastError().text());
-            query.exec("ROLLBACK");
+bool SyncDatabase::removeDatabaseFiles(const QString& dbPath) {
+    const QStringList suffixes = {QString(), QStringLiteral("-wal"), QStringLiteral("-shm")};
+    for (const QString& suffix : suffixes) {
+        const QString candidatePath = dbPath + suffix;
+        if (QFile::exists(candidatePath) && !QFile::remove(candidatePath)) {
             return false;
         }
-
-        if (insertQuery.numRowsAffected() == 0) {
-            duplicateIds++;
-        }
     }
 
-    if (!query.exec("DROP TABLE files")) {
-        logError("migrateFromV1ToV2 (drop files)", query.lastError().text());
-        query.exec("ROLLBACK");
+    return true;
+}
+
+bool SyncDatabase::recreateDatabaseUnlocked() {
+    closeUnlocked();
+
+    if (!removeDatabaseFiles(m_dbPath)) {
+        logError("recreateCurrentSchema", QStringLiteral("Failed to remove existing DB files"));
         return false;
     }
 
-    if (!query.exec("ALTER TABLE files_new RENAME TO files")) {
-        logError("migrateFromV1ToV2 (rename files_new)", query.lastError().text());
-        query.exec("ROLLBACK");
+    if (!openConnectionUnlocked()) {
         return false;
     }
 
-    if (!query.exec("COMMIT")) {
-        logError("migrateFromV1ToV2 (commit)", query.lastError().text());
-        query.exec("ROLLBACK");
+    if (!ensureSettingsTable()) {
         return false;
     }
 
-    if (skippedEmptyIds > 0) {
-        qWarning() << "Migration skipped" << skippedEmptyIds << "file rows without file_id";
+    if (!createTables()) {
+        return false;
     }
 
-    if (duplicateIds > 0) {
-        qWarning() << "Migration skipped" << duplicateIds << "duplicate file_id rows";
+    if (!createFuseTables()) {
+        return false;
     }
 
+    if (!setStoredSchemaEpoch(CURRENT_SCHEMA_EPOCH)) {
+        return false;
+    }
+
+    if (!setStoredVersion(DB_VERSION)) {
+        return false;
+    }
+
+    m_lastSchemaCompatibility = SchemaCompatibility::Current;
     return true;
 }
 
@@ -1480,6 +1465,20 @@ QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
     return dirtyFiles;
 }
 
+bool SyncDatabase::hasPendingDirtyUploads() const {
+    QMutexLocker locker(&m_mutex);
+    if (!m_db.isOpen() || !tableExists(m_db, QStringLiteral("fuse_dirty_files"))) {
+        return false;
+    }
+
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT 1 FROM fuse_dirty_files LIMIT 1"))) {
+        return false;
+    }
+
+    return query.next();
+}
+
 bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path, quint64 generation,
                                  quint64 uploadedGeneration) {
     QMutexLocker locker(&m_mutex);
@@ -1717,9 +1716,10 @@ bool SyncDatabase::clearAllData() {
     for (const char* table : tables) {
         QString sql;
         if (QLatin1String(table) == QLatin1String("settings")) {
-            // Preserve the schema version key so initialize() doesn't
-            // re-run migrations on the next startup (DAT-01 fix).
-            sql = QStringLiteral("DELETE FROM settings WHERE key != 'version'");
+            // Preserve schema metadata so initialize() can reopen the cleared
+            // database without treating sign-out as an incompatible reset.
+            sql = QStringLiteral("DELETE FROM settings WHERE key NOT IN ('version', '%1')")
+                      .arg(SCHEMA_EPOCH_KEY);
         } else {
             sql = QStringLiteral("DELETE FROM %1").arg(QLatin1String(table));
         }

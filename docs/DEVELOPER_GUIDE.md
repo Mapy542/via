@@ -54,7 +54,8 @@ via/
 │   └── utils/                  # Cross-cutting utilities
 ├── tests/
 │   ├── sync/                   # Sync subsystem unit tests
-│   └── fuse/                   # FUSE subsystem unit tests
+│   ├── fuse/                   # FUSE subsystem unit tests
+│   └── utils/                  # Utility and startup-policy tests
 ├── res/                        # Qt resources, icons, .desktop file
 ├── docs/                       # Documentation
 └── .github/workflows/          # CI/CD pipelines
@@ -85,18 +86,18 @@ The API client is a `QObject` that uses `QNetworkAccessManager` for HTTP request
 
 ### `src/sync/` — Synchronization Engine
 
-| File                         | Purpose                                                                                                                                                           |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SyncDatabase.h/.cpp`        | SQLite database for tracking file sync state, FUSE metadata, cache entries, dirty files, and conflicts. Thread-safe via `QRecursiveMutex`. Uses WAL journal mode. |
-| `ChangeQueue.h/.cpp`         | Thread-safe queue for pending changes                                                                                                                             |
-| `ChangeProcessor.h/.cpp`     | Classifies changes and detects conflicts                                                                                                                          |
-| `LocalChangeWatcher.h/.cpp`  | Monitors local filesystem for changes via `QFileSystemWatcher`                                                                                                    |
-| `RemoteChangeWatcher.h/.cpp` | Polls Google Drive changes API                                                                                                                                    |
-| `SyncActionQueue.h/.cpp`     | Prioritized queue of sync actions                                                                                                                                 |
-| `SyncActionThread.h/.cpp`    | Worker thread that executes sync actions                                                                                                                          |
-| `FullSync.h/.cpp`            | Full reconciliation pass (initial sync)                                                                                                                           |
-| `FileFilter.h/.cpp`          | File/folder ignore rules                                                                                                                                          |
-| `SyncSettings.h/.cpp`        | Sync configuration (bandwidth, selective sync, etc.)                                                                                                              |
+| File                         | Purpose                                                                                                                                                                                       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SyncDatabase.h/.cpp`        | SQLite database for tracking file sync state, FUSE metadata, cache entries, dirty files, conflicts, and schema compatibility state. Thread-safe via `QRecursiveMutex`. Uses WAL journal mode. |
+| `ChangeQueue.h/.cpp`         | Thread-safe queue for pending changes                                                                                                                                                         |
+| `ChangeProcessor.h/.cpp`     | Classifies changes and detects conflicts                                                                                                                                                      |
+| `LocalChangeWatcher.h/.cpp`  | Monitors local filesystem for changes via `QFileSystemWatcher`                                                                                                                                |
+| `RemoteChangeWatcher.h/.cpp` | Polls Google Drive changes API                                                                                                                                                                |
+| `SyncActionQueue.h/.cpp`     | Prioritized queue of sync actions                                                                                                                                                             |
+| `SyncActionThread.h/.cpp`    | Worker thread that executes sync actions                                                                                                                                                      |
+| `FullSync.h/.cpp`            | Full reconciliation pass (initial sync)                                                                                                                                                       |
+| `FileFilter.h/.cpp`          | File/folder ignore rules                                                                                                                                                                      |
+| `SyncSettings.h/.cpp`        | Sync configuration (bandwidth, selective sync, etc.)                                                                                                                                          |
 
 ### `src/fuse/` — Virtual Filesystem
 
@@ -124,6 +125,7 @@ The API client is a `QObject` that uses `QNetworkAccessManager` for HTTP request
 | ---------------------------- | ------------------------------------------------------------------ |
 | `LogManager.h/.cpp`          | Application logging to `~/.local/share/Via/logs/`                  |
 | `NotificationManager.h/.cpp` | Desktop notifications via DBus                                     |
+| `StartupMaintenance.h/.cpp`  | Startup compatibility policy helpers for sync-state and FUSE cache |
 | `FileInUseChecker.h/.cpp`    | Checks if files are open by other processes                        |
 | `AutostartManager.h`         | Header-only — manages XDG autostart `.desktop` entries             |
 | `UpdateChecker.h`            | Header-only — checks GitHub Releases API for new versions          |
@@ -277,16 +279,18 @@ tests/
 ├── sync/
 │   ├── TestChangeQueue.cpp         # Queue thread safety
 │   ├── TestChangeProcessor.cpp     # Change classification, conflict detection
-│   ├── TestSyncDatabase.cpp        # Database CRUD, migrations, concurrent access
+│   ├── TestSyncDatabase.cpp        # Database CRUD, compatibility/reset policy, concurrent access
 │   ├── TestSyncActionQueue.cpp     # Action queue management
 │   ├── TestSyncActionThread.cpp    # Action thread wake/execution
 │   ├── TestLocalChangeWatcher.cpp  # Filesystem event detection
 │   ├── TestRemoteChangeWatcher.cpp # Drive API change polling
 │   └── TestFullSync.cpp            # Full sync reconciliation
-└── fuse/
-    ├── TestFileCache.cpp           # LRU cache operations
-    ├── TestDirtySyncWorker.cpp     # Dirty file upload logic
-    └── TestMetadataCache.cpp       # Metadata cache CRUD + persistence
+├── fuse/
+│   ├── TestFileCache.cpp           # LRU cache operations
+│   ├── TestDirtySyncWorker.cpp     # Dirty file upload logic
+│   └── TestMetadataCache.cpp       # Metadata cache CRUD + persistence
+└── utils/
+    └── TestStartupMaintenance.cpp  # Startup compatibility policy decisions
 ```
 
 ### Running Tests
@@ -309,6 +313,11 @@ ctest --test-dir build -N
 ```
 
 All tests run with `QT_QPA_PLATFORM=offscreen` (set automatically in CMakeLists.txt).
+
+Compatibility-policy coverage lives in:
+
+- `tests/sync/TestSyncDatabase.cpp` — current schema adoption, incompatible legacy DB detection, dirty-state reset guard, explicit rebuild path
+- `tests/utils/TestStartupMaintenance.cpp` — startup policy decisions so normal app-version changes do not trigger destructive resets while explicit epoch changes do
 
 ### Writing a New Test
 
@@ -472,17 +481,84 @@ git push origin v1.0.0
 
 `SyncDatabase` manages a single SQLite database with WAL mode enabled. Key tables:
 
-| Table                | Purpose                                                        |
-| -------------------- | -------------------------------------------------------------- |
-| `files`              | Local path ↔ Drive file ID mapping, checksums, sync timestamps |
-| `deleted_files`      | Tracks recently deleted files to avoid re-downloading          |
-| `conflicts`          | Conflict records with versions                                 |
-| `fuse_metadata`      | FUSE file/folder metadata cache                                |
-| `fuse_cache_entries` | File cache tracking (path, size, last access)                  |
-| `fuse_dirty_files`   | Files modified via FUSE pending upload                         |
-| `settings`           | Key-value settings (change token, DB version, etc.)            |
+| Table                | Purpose                                                         |
+| -------------------- | --------------------------------------------------------------- |
+| `files`              | Local path ↔ Drive file ID mapping, checksums, sync timestamps  |
+| `deleted_files`      | Tracks recently deleted files to avoid re-downloading           |
+| `conflicts`          | Conflict records with versions                                  |
+| `fuse_metadata`      | FUSE file/folder metadata cache                                 |
+| `fuse_cache_entries` | File cache tracking (path, size, last access)                   |
+| `fuse_dirty_files`   | Files modified via FUSE pending upload                          |
+| `settings`           | Key-value settings (change token, schema epoch, legacy version) |
 
-The database auto-migrates between schema versions (currently v3). See `SyncDatabase::createTables()` and the `migrate*` methods.
+### Compatibility Policy
+
+Via now separates three different kinds of versioning:
+
+- **Application version** comes from the repository-root `VERSION` file and is used for runtime metadata, update checks, and release packaging.
+- **Sync-state schema compatibility** is tracked inside the SQLite `settings` table as `sync_schema_epoch`.
+- **FUSE representation/cache compatibility** is tracked in `QSettings` as `advanced/lastAppliedFuseRepresentationEpoch`.
+
+These values are intentionally independent. A normal app update should not wipe sync state just because the binary version changed.
+
+### Current Sync-State Keys
+
+- `settings.sync_schema_epoch` — authoritative compatibility epoch for destructive sync-state decisions. Current value in code: `1`.
+- `settings.version` — legacy numeric schema version. Current value in code: `6`.
+
+`settings.version` is still written so current databases can be recognized and older installations can be adopted, but destructive startup decisions should key off `sync_schema_epoch`, not the app version.
+
+### Startup Flow
+
+`SyncDatabase::initialize()` follows this process:
+
+1. Open the DB, enable WAL mode, and ensure the `settings` table exists.
+2. Read `settings.sync_schema_epoch`.
+3. If the stored epoch matches the code constant, startup proceeds normally.
+4. If the epoch is missing, fall back to `settings.version`.
+5. If the fallback version is the current baseline (`6`), Via adopts that DB as current and writes `sync_schema_epoch=1` on successful startup.
+6. If the stored epoch or fallback legacy version is newer than the code supports, startup fails with a future-schema error.
+7. If the stored schema is older than the current compatibility epoch, `initialize()` reports an incompatible schema instead of walking a migration ladder.
+
+### Incompatible Reset Behavior
+
+The pre-1.0 migration ladder was removed. Incompatible legacy schemas are handled through an explicit rebuild flow instead:
+
+- `SyncDatabase` reports a `SchemaCompatibility` state.
+- `main.cpp` maps that state through `StartupMaintenance::classifySyncReset()`.
+- If the DB is incompatible and there are no pending dirty uploads, Via prompts the user to rebuild local sync metadata.
+- If `fuse_dirty_files` still contains pending uploads, Via requires an explicit **Discard And Rebuild** choice and will not silently reset.
+- The rebuild path uses `SyncDatabase::recreateCurrentSchema()` rather than `clearAllData()`.
+- Rebuilding preserves the local sync folder, recreates the current schema baseline, and then triggers an immediate mirror full sync so local disk state and Google Drive are re-indexed together.
+
+### Sign-Out vs Incompatible Upgrade
+
+These flows are different on purpose:
+
+- `clearAllData()` is for sign-out cleanup. It clears user/sync rows but preserves `settings.version` and `settings.sync_schema_epoch` so sign-out does not look like a schema break.
+- `recreateCurrentSchema()` is for incompatible startup recovery. It recreates the database file and writes the current schema metadata from scratch.
+
+### FUSE Representation Epoch
+
+FUSE representation/cache compatibility is tracked separately from sync-state compatibility.
+
+- Code constant: `kCurrentFuseRepresentationEpoch` in `main.cpp`
+- Stored value: `advanced/lastAppliedFuseRepresentationEpoch` in `QSettings`
+
+At startup, Via purges FUSE representation state when any of the following are true:
+
+- native-doc mode changed
+- `advanced/pendingFuseRepresentationReset` is set
+- `advanced/pendingCachePurge` is set
+- the stored FUSE representation epoch is older than the current code constant
+
+That purge goes through `CacheMaintenance::purgeFuseRepresentationCache()`, which clears FUSE representation tables and evictable cache files but preserves pending dirty uploads.
+
+### When To Bump An Epoch
+
+- Bump `sync_schema_epoch` only when existing DB contents are no longer safe or meaningful to reuse and Via must rebuild sync state.
+- Bump `kCurrentFuseRepresentationEpoch` when cached FUSE metadata/exported representations become incompatible but the core mirror-sync state is still safe to keep.
+- Do **not** bump either epoch for ordinary app releases that do not change compatibility.
 
 ---
 

@@ -42,8 +42,9 @@ class TestSyncDatabase : public QObject {
     void testInitialize_CreatesRequiredTables();
     void testInitialize_IdempotentMultipleCalls();
     void testInitialize_RejectsNewerVersion();
-    void testMigration_V1ToV3();
-    void testMigration_V2ToV3();
+    void testInitialize_RequiresResetForLegacySchema();
+    void testInitialize_AdoptsCurrentLegacyVersionMetadata();
+    void testInitialize_RequiresExplicitDiscardForDirtyLegacySchema();
     void testClose_ClosesCleanly();
     void testIsOpen_ReflectsState();
 
@@ -209,15 +210,20 @@ void TestSyncDatabase::cleanupTestDatabase() {
 }
 
 bool TestSyncDatabase::looksAbsolute(const QString& path) {
-    if (path.isEmpty()) return false;
+    if (path.isEmpty())
+        return false;
     // Linux absolute
-    if (path.startsWith('/')) return true;
+    if (path.startsWith('/'))
+        return true;
     // Windows absolute
-    if (path.length() >= 2 && path[1] == ':') return true;
+    if (path.length() >= 2 && path[1] == ':')
+        return true;
     // Windows UNC
-    if (path.startsWith("\\\\")) return true;
+    if (path.startsWith("\\\\"))
+        return true;
     // Home expansion
-    if (path.startsWith("~/")) return true;
+    if (path.startsWith("~/"))
+        return true;
     return false;
 }
 
@@ -287,12 +293,14 @@ void TestSyncDatabase::testInitialize_RejectsNewerVersion() {
 
     m_db = new SyncDatabase();
     QVERIFY(!m_db->initialize());
+    QCOMPARE(m_db->lastSchemaCompatibility(),
+             SyncDatabase::SchemaCompatibility::UnsupportedFutureSchema);
     m_db->close();
     delete m_db;
     m_db = nullptr;
 }
 
-void TestSyncDatabase::testMigration_V1ToV3() {
+void TestSyncDatabase::testInitialize_RequiresResetForLegacySchema() {
     cleanupTestDatabase();
 
     QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -370,21 +378,42 @@ void TestSyncDatabase::testMigration_V1ToV3() {
     QSqlDatabase::removeDatabase("migration_setup_v1");
 
     m_db = new SyncDatabase();
-    QVERIFY(m_db->initialize());
+    QVERIFY(!m_db->initialize());
+    QCOMPARE(m_db->lastSchemaCompatibility(), SyncDatabase::SchemaCompatibility::ResetRequired);
+    QVERIFY(!m_db->hasPendingDirtyUploads());
 
-    QCOMPARE(m_db->getLocalPath("file-1"), QString("migrate/file.txt"));
+    QVERIFY(m_db->recreateCurrentSchema());
+    QCOMPARE(m_db->fileCount(), 0);
+    QVERIFY(m_db->getLocalPath("file-1").isEmpty());
 
-    // Verify the version was updated by querying the DB file directly
+    FileSyncState rebuiltState;
+    rebuiltState.localPath = "rebuilt/file.txt";
+    rebuiltState.fileId = "rebuilt-id";
+    rebuiltState.remoteMd5AtSync = "remote-md5";
+    rebuiltState.localHashAtSync = "local-hash";
+    m_db->saveFileState(rebuiltState);
+
+    const FileSyncState persisted = m_db->getFileState("rebuilt/file.txt");
+    QCOMPARE(persisted.fileId, QString("rebuilt-id"));
+    QCOMPARE(persisted.remoteMd5AtSync, QString("remote-md5"));
+    QCOMPARE(persisted.localHashAtSync, QString("local-hash"));
+
     {
         const QString checkConn = QStringLiteral("migration_check_v1");
         {
             QSqlDatabase dbCheck = QSqlDatabase::addDatabase("QSQLITE", checkConn);
             dbCheck.setDatabaseName(dbPath);
             QVERIFY(dbCheck.open());
-            QSqlQuery versionQuery(dbCheck);
-            QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
-            QVERIFY(versionQuery.next());
-            QCOMPARE(versionQuery.value(0).toInt(), 6);
+            QSqlQuery settingsQuery(dbCheck);
+            QVERIFY(settingsQuery.exec(
+                "SELECT key, value FROM settings WHERE key IN ('version', 'sync_schema_epoch') "
+                "ORDER BY key"));
+            QVERIFY(settingsQuery.next());
+            QCOMPARE(settingsQuery.value(0).toString(), QString("sync_schema_epoch"));
+            QCOMPARE(settingsQuery.value(1).toInt(), 1);
+            QVERIFY(settingsQuery.next());
+            QCOMPARE(settingsQuery.value(0).toString(), QString("version"));
+            QCOMPARE(settingsQuery.value(1).toInt(), 6);
             dbCheck.close();
         }
         QSqlDatabase::removeDatabase(checkConn);
@@ -395,7 +424,7 @@ void TestSyncDatabase::testMigration_V1ToV3() {
     m_db = nullptr;
 }
 
-void TestSyncDatabase::testMigration_V2ToV3() {
+void TestSyncDatabase::testInitialize_AdoptsCurrentLegacyVersionMetadata() {
     cleanupTestDatabase();
 
     QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -416,7 +445,9 @@ void TestSyncDatabase::testMigration_V2ToV3() {
                 file_id TEXT PRIMARY KEY,
                 local_path TEXT UNIQUE NOT NULL,
                 modified_time_at_sync TEXT,
-                is_folder INTEGER DEFAULT 0
+                is_folder INTEGER DEFAULT 0,
+                remote_md5_at_sync TEXT,
+                local_hash_at_sync TEXT
             )
         )"));
         QVERIFY(query.exec(R"(
@@ -457,15 +488,17 @@ void TestSyncDatabase::testMigration_V2ToV3() {
 
         QDateTime mtime(QDate(2026, 1, 25), QTime(12, 0, 0));
         query.prepare(
-            "INSERT INTO files (file_id, local_path, modified_time_at_sync, is_folder) "
-            "VALUES (?, ?, ?, ?)");
+            "INSERT INTO files (file_id, local_path, modified_time_at_sync, is_folder, "
+            "remote_md5_at_sync, local_hash_at_sync) VALUES (?, ?, ?, ?, ?, ?)");
         query.addBindValue("file-2");
         query.addBindValue("migrate2/file.txt");
         query.addBindValue(mtime.toString(Qt::ISODate));
         query.addBindValue(0);
+        query.addBindValue("legacy-md5");
+        query.addBindValue("legacy-hash");
         QVERIFY(query.exec());
 
-        QVERIFY(query.exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', 2)"));
+        QVERIFY(query.exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', 6)"));
 
         setupDb.close();
     }
@@ -475,22 +508,88 @@ void TestSyncDatabase::testMigration_V2ToV3() {
     QVERIFY(m_db->initialize());
 
     QCOMPARE(m_db->getLocalPath("file-2"), QString("migrate2/file.txt"));
+    const FileSyncState migrated = m_db->getFileState("migrate2/file.txt");
+    QCOMPARE(migrated.remoteMd5AtSync, QString("legacy-md5"));
+    QCOMPARE(migrated.localHashAtSync, QString("legacy-hash"));
 
-    // Verify the version was updated by querying the DB file directly
     {
         const QString checkConn = QStringLiteral("migration_check_v2");
         {
             QSqlDatabase dbCheck = QSqlDatabase::addDatabase("QSQLITE", checkConn);
             dbCheck.setDatabaseName(dbPath);
             QVERIFY(dbCheck.open());
-            QSqlQuery versionQuery(dbCheck);
-            QVERIFY(versionQuery.exec("SELECT value FROM settings WHERE key = 'version'"));
-            QVERIFY(versionQuery.next());
-            QCOMPARE(versionQuery.value(0).toInt(), 6);
+            QSqlQuery schemaQuery(dbCheck);
+            QVERIFY(schemaQuery.exec("SELECT value FROM settings WHERE key = 'sync_schema_epoch'"));
+            QVERIFY(schemaQuery.next());
+            QCOMPARE(schemaQuery.value(0).toInt(), 1);
             dbCheck.close();
         }
         QSqlDatabase::removeDatabase(checkConn);
     }
+
+    m_db->close();
+    delete m_db;
+    m_db = nullptr;
+}
+
+void TestSyncDatabase::testInitialize_RequiresExplicitDiscardForDirtyLegacySchema() {
+    cleanupTestDatabase();
+
+    QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dataPath);
+    QString dbPath = dataPath + "/via_sync.db";
+
+    {
+        QFile::remove(dbPath);
+        const QString connectionName = "migration_setup_dirty_legacy";
+        QSqlDatabase::removeDatabase(connectionName);
+        QSqlDatabase setupDb = QSqlDatabase::addDatabase("QSQLITE", connectionName);
+        setupDb.setDatabaseName(dbPath);
+        QVERIFY(setupDb.open());
+
+        QSqlQuery query(setupDb);
+        QVERIFY(query.exec(R"(
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        )"));
+        QVERIFY(query.exec(R"(
+            CREATE TABLE IF NOT EXISTS fuse_dirty_files (
+                file_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                marked_dirty_at TEXT NOT NULL,
+                last_upload_attempt TEXT,
+                upload_failed INTEGER NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 1,
+                uploaded_generation INTEGER NOT NULL DEFAULT 0
+            )
+        )"));
+        QVERIFY(query.exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', 5)"));
+
+        query.prepare(
+            "INSERT INTO fuse_dirty_files (file_id, path, marked_dirty_at, generation, "
+            "uploaded_generation) VALUES (?, ?, ?, ?, ?)");
+        query.addBindValue("dirty-file");
+        query.addBindValue("/dirty/file.txt");
+        query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+        query.addBindValue(4);
+        query.addBindValue(2);
+        QVERIFY(query.exec());
+
+        setupDb.close();
+    }
+    QSqlDatabase::removeDatabase("migration_setup_dirty_legacy");
+
+    m_db = new SyncDatabase();
+    QVERIFY(!m_db->initialize());
+    QCOMPARE(m_db->lastSchemaCompatibility(),
+             SyncDatabase::SchemaCompatibility::ResetBlockedByDirtyState);
+    QVERIFY(m_db->hasPendingDirtyUploads());
+
+    QVERIFY(m_db->recreateCurrentSchema());
+    QVERIFY(!m_db->hasPendingDirtyUploads());
+    QCOMPARE(m_db->fileCount(), 0);
 
     m_db->close();
     delete m_db;
@@ -552,8 +651,10 @@ void TestSyncDatabase::testSaveFileState_UpdateExisting() {
     int oldPathCount = 0;
     int newPathCount = 0;
     for (const auto& f : m_db->getAllFiles()) {
-        if (f.localPath == "update/test.txt") oldPathCount++;
-        if (f.localPath == "update/renamed.txt") newPathCount++;
+        if (f.localPath == "update/test.txt")
+            oldPathCount++;
+        if (f.localPath == "update/renamed.txt")
+            newPathCount++;
     }
     QCOMPARE(oldPathCount, 0);
     QCOMPARE(newPathCount, 1);
@@ -697,7 +798,8 @@ void TestSyncDatabase::testGetAllFiles_Multiple() {
     // Should contain at least our 3 files
     int foundCount = 0;
     for (const auto& f : all) {
-        if (f.localPath.startsWith("multi/")) foundCount++;
+        if (f.localPath.startsWith("multi/"))
+            foundCount++;
     }
     QCOMPARE(foundCount, 3);
 }
@@ -1233,7 +1335,8 @@ void TestSyncDatabase::testFuseDirtyFiles_Basic() {
     QList<FuseDirtyFile> dirty = m_db->getFuseDirtyFiles();
     bool found = false;
     for (const auto& f : dirty) {
-        if (f.fileId == "DIRTY_FILE_ID") found = true;
+        if (f.fileId == "DIRTY_FILE_ID")
+            found = true;
     }
     QVERIFY(found);
 

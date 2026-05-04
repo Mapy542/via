@@ -126,6 +126,13 @@ class SyncDatabase : public QObject {
     Q_OBJECT
 
    public:
+    enum class SchemaCompatibility {
+        Current,
+        ResetRequired,
+        ResetBlockedByDirtyState,
+        UnsupportedFutureSchema,
+    };
+
     /**
      * @brief Construct the sync database
      * @param parent Parent object
@@ -141,6 +148,12 @@ class SyncDatabase : public QObject {
     bool initialize();
 
     /**
+     * @brief Recreate the database file with the current schema baseline
+     * @return true if the database was recreated successfully
+     */
+    bool recreateCurrentSchema();
+
+    /**
      * @brief Close the database connection
      */
     void close();
@@ -150,6 +163,18 @@ class SyncDatabase : public QObject {
      * @return true if database is open
      */
     bool isOpen() const;
+
+    /**
+     * @brief Get the last detected schema compatibility state
+     * @return Compatibility state from the most recent initialize attempt
+     */
+    SchemaCompatibility lastSchemaCompatibility() const;
+
+    /**
+     * @brief Check whether pending dirty uploads are still tracked in the DB
+     * @return true when destructive reset could discard pending upload state
+     */
+    bool hasPendingDirtyUploads() const;
 
     /**
      * @brief Get the peak concurrent access count (thread-safety telemetry)
@@ -544,13 +569,18 @@ class SyncDatabase : public QObject {
     void databaseError(const QString& error) const;
 
    private:
+    bool openConnectionUnlocked();
+    void closeUnlocked();
     bool createTables();
     bool createFuseTables();  ///< Create FUSE-specific tables
     bool ensureSettingsTable();
-    bool migrateDatabase(int currentVersion);
-    bool migrateFromV1ToV2();
+    int getStoredSchemaEpoch() const;
+    bool setStoredSchemaEpoch(int epoch);
     int getStoredVersion() const;
     bool setStoredVersion(int version);
+    SchemaCompatibility detectSchemaCompatibility() const;
+    bool recreateDatabaseUnlocked();
+    static bool removeDatabaseFiles(const QString& dbPath);
     void logError(const QString& operation, const QString& error) const;
 
     static bool isRelativePath(const QString& path);
@@ -561,8 +591,11 @@ class SyncDatabase : public QObject {
     QString m_dbPath;
     mutable QRecursiveMutex m_mutex;                      ///< Thread-safe access to database
     mutable QAtomicInteger<int> m_concurrentAccessCount;  ///< Track concurrent access attempts
+    SchemaCompatibility m_lastSchemaCompatibility = SchemaCompatibility::Current;
     static const QString DB_NAME;
+    static const QString SCHEMA_EPOCH_KEY;
     static const int DB_VERSION;
+    static const int CURRENT_SCHEMA_EPOCH;
 };
 
 #endif  // SYNCDATABASE_H

@@ -104,6 +104,7 @@ set(VIA_CORE_SOURCES
     src/utils/NotificationManager.cpp
     src/utils/LogManager.cpp
     src/utils/CacheMaintenance.cpp
+    src/utils/StartupMaintenance.cpp
     src/utils/FileInUseChecker.cpp
     src/utils/PowerProfileMonitor.cpp
     src/utils/SuspendMonitor.cpp
@@ -148,6 +149,7 @@ set(HEADERS
     src/utils/NotificationManager.h
     src/utils/LogManager.h
     src/utils/CacheMaintenance.h
+    src/utils/StartupMaintenance.h
     src/utils/FileInUseChecker.h
     src/utils/PowerProfileMonitor.h
     src/utils/AutostartManager.h
@@ -302,6 +304,7 @@ if(BUILD_TESTS)
 
     # Utility tests
     add_qt_test(test_PathUtils tests/utils/TestPathUtils.cpp)
+    add_qt_test(test_StartupMaintenance tests/utils/TestStartupMaintenance.cpp)
 
     # UI tests
     add_qt_test(test_AutostartManager tests/ui/TestAutostartManager.cpp)

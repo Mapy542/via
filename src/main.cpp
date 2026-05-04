@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QNetworkInformation>
 #include <QProcess>
+#include <QPushButton>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
@@ -52,6 +53,7 @@
 #include "utils/NotificationManager.h"
 #include "utils/PathUtils.h"
 #include "utils/PowerProfileMonitor.h"
+#include "utils/StartupMaintenance.h"
 #include "utils/SuspendMonitor.h"
 #include "utils/ThemeHelper.h"
 #include "utils/UpdateChecker.h"
@@ -201,6 +203,8 @@ void stopFuseComponent(FuseDriver* fuseDriver) {
     }
 }
 
+constexpr int kCurrentFuseRepresentationEpoch = 1;
+
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
 
@@ -251,10 +255,70 @@ int main(int argc, char* argv[]) {
 
     // Initialize sync database
     SyncDatabase syncDatabase;
-    if (!syncDatabase.initialize()) {
-        QMessageBox::critical(nullptr, "Database Error",
-                              "Failed to initialize the sync database.\n"
-                              "Please check permissions and try again.");
+    bool forceImmediateMirrorRebuild = false;
+    const auto initializeSyncDatabase = [&syncDatabase, &forceImmediateMirrorRebuild]() {
+        if (syncDatabase.initialize()) {
+            return true;
+        }
+
+        const StartupMaintenance::SyncResetDecision resetDecision =
+            StartupMaintenance::classifySyncReset(syncDatabase.lastSchemaCompatibility());
+        if (resetDecision.unsupportedFutureSchema) {
+            QMessageBox::critical(nullptr, QStringLiteral("Database Error"),
+                                  QStringLiteral("The sync database was created by a newer, "
+                                                 "incompatible Via build.\n"
+                                                 "Install a newer version or remove the local "
+                                                 "sync database manually."));
+            return false;
+        }
+
+        if (!resetDecision.requiresReset) {
+            QMessageBox::critical(nullptr, QStringLiteral("Database Error"),
+                                  QStringLiteral("Failed to initialize the sync database.\n"
+                                                 "Please check permissions and try again."));
+            return false;
+        }
+
+        QMessageBox prompt;
+        prompt.setIcon(QMessageBox::Warning);
+        prompt.setWindowTitle(QStringLiteral("Rebuild sync state"));
+        prompt.setText(resetDecision.requiresExplicitDiscard
+                           ? QStringLiteral("Via found an incompatible sync database with "
+                                            "pending local uploads.")
+                           : QStringLiteral("Via found an incompatible sync database."));
+        prompt.setInformativeText(
+            resetDecision.requiresExplicitDiscard
+                ? QStringLiteral("Rebuilding will discard pending upload state that has not yet "
+                                 "been confirmed on Google Drive.\n\n"
+                                 "The local sync folder will be preserved. Choose Discard And "
+                                 "Rebuild to recreate local sync metadata, or Exit to stop now.")
+                : QStringLiteral("Via can recreate its local sync metadata and rebuild it from "
+                                 "disk plus Google Drive.\n\n"
+                                 "The local sync folder will be preserved."));
+        QPushButton* rebuildButton = prompt.addButton(resetDecision.requiresExplicitDiscard
+                                                          ? QStringLiteral("Discard And Rebuild")
+                                                          : QStringLiteral("Rebuild"),
+                                                      QMessageBox::AcceptRole);
+        prompt.addButton(QStringLiteral("Exit"), QMessageBox::RejectRole);
+        prompt.setDefaultButton(rebuildButton);
+        prompt.exec();
+
+        if (prompt.clickedButton() != rebuildButton) {
+            return false;
+        }
+
+        if (!syncDatabase.recreateCurrentSchema()) {
+            QMessageBox::critical(nullptr, QStringLiteral("Database Error"),
+                                  QStringLiteral("Failed to rebuild the local sync database."));
+            return false;
+        }
+
+        forceImmediateMirrorRebuild = resetDecision.requestFullSyncAfterReset;
+        qWarning() << "Sync database recreated after incompatible schema detection";
+        return true;
+    };
+
+    if (!initializeSyncDatabase()) {
         return 1;
     }
 
@@ -313,10 +377,29 @@ int main(int argc, char* argv[]) {
         const bool pendingRepresentationReset =
             settings.value("advanced/pendingFuseRepresentationReset", false).toBool();
         const bool pendingCachePurge = settings.value("advanced/pendingCachePurge", false).toBool();
+        const int storedRepresentationEpoch =
+            settings
+                .value("advanced/lastAppliedFuseRepresentationEpoch",
+                       kCurrentFuseRepresentationEpoch)
+                .toInt();
         const bool modeChanged = (currentMode != previousMode);
+        const bool representationEpochChanged =
+            kCurrentFuseRepresentationEpoch > storedRepresentationEpoch;
+        const StartupMaintenance::FuseMaintenanceInputs maintenanceInputs{
+            .currentNativeDocMode = currentMode,
+            .previousNativeDocMode = previousMode,
+            .pendingRepresentationReset = pendingRepresentationReset,
+            .pendingCachePurge = pendingCachePurge,
+            .storedRepresentationEpoch = storedRepresentationEpoch,
+            .currentRepresentationEpoch = kCurrentFuseRepresentationEpoch,
+        };
 
-        if (modeChanged || pendingRepresentationReset || pendingCachePurge) {
-            if (modeChanged) {
+        if (StartupMaintenance::shouldPurgeFuseRepresentationCache(maintenanceInputs)) {
+            if (representationEpochChanged) {
+                qInfo() << "FUSE representation epoch changed from" << storedRepresentationEpoch
+                        << "to" << kCurrentFuseRepresentationEpoch
+                        << "- purging FUSE representation caches";
+            } else if (modeChanged) {
                 qInfo() << "Native-doc mode changed from" << previousMode << "to" << currentMode
                         << "- purging FUSE representation caches";
             } else if (pendingCachePurge) {
@@ -335,12 +418,18 @@ int main(int argc, char* argv[]) {
             // pending flag will trigger a retry on the next launch.
             if (purgeOk) {
                 settings.setValue("advanced/previousNativeDocMode", currentMode);
+                settings.setValue("advanced/lastAppliedFuseRepresentationEpoch",
+                                  kCurrentFuseRepresentationEpoch);
                 settings.remove("advanced/pendingFuseRepresentationReset");
                 settings.remove("advanced/pendingCachePurge");
                 settings.sync();
             } else {
                 qWarning() << "FUSE cache purge failed - will retry on next launch";
             }
+        } else if (!settings.contains("advanced/lastAppliedFuseRepresentationEpoch")) {
+            settings.setValue("advanced/lastAppliedFuseRepresentationEpoch",
+                              kCurrentFuseRepresentationEpoch);
+            settings.sync();
         }
     }
 
@@ -413,6 +502,16 @@ int main(int argc, char* argv[]) {
     const auto queueMirrorStartAndScheduleInitialSync = [&mirrorSyncRuntime](int delayMs = 500) {
         QMetaObject::invokeMethod(&mirrorSyncRuntime, "startAndScheduleInitialSync",
                                   Qt::QueuedConnection, Q_ARG(int, delayMs));
+    };
+    const auto queueMirrorStartupSync = [&pauseController, mirrorEnabled,
+                                         &forceImmediateMirrorRebuild,
+                                         queueMirrorStartAndScheduleInitialSync]() {
+        if (!mirrorEnabled || pauseController.isEffectivelyPaused()) {
+            return;
+        }
+
+        queueMirrorStartAndScheduleInitialSync(forceImmediateMirrorRebuild ? 0 : 500);
+        forceImmediateMirrorRebuild = false;
     };
     const auto queueMirrorRestartAfterWake = [&mirrorSyncRuntime](int fullSyncDelayMs = 2000) {
         QMetaObject::invokeMethod(&mirrorSyncRuntime, "restartAfterWake", Qt::QueuedConnection,
@@ -665,10 +764,10 @@ int main(int argc, char* argv[]) {
     // When authenticated, start sync components based on configured mode
     QObject::connect(&authManager, &GoogleAuthManager::authenticated, &app,
                      [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled, &syncFolder,
-                      queueMirrorStartAndScheduleInitialSync]() {
-                         if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
-                             queueMirrorStartAndScheduleInitialSync();
-                         }
+                      queueMirrorStartupSync]() {
+                         Q_UNUSED(mirrorEnabled);
+                         Q_UNUSED(pauseController);
+                         queueMirrorStartupSync();
                          if (fuseEnabled) {
                              startFuseComponent(&fuseDriver, syncFolder);
                              if (pauseController.isEffectivelyPaused()) {
@@ -1122,10 +1221,10 @@ int main(int argc, char* argv[]) {
             QTimer::singleShot(
                 100, &app,
                 [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled, &syncFolder,
-                 &trayManager, &statusCoordinator, queueMirrorStartAndScheduleInitialSync]() {
-                    if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
-                        queueMirrorStartAndScheduleInitialSync();
-                    }
+                 &trayManager, &statusCoordinator, queueMirrorStartupSync]() {
+                    Q_UNUSED(mirrorEnabled);
+                    Q_UNUSED(pauseController);
+                    queueMirrorStartupSync();
                     if (fuseEnabled) {
                         startFuseComponent(&fuseDriver, syncFolder);
                         if (pauseController.isEffectivelyPaused()) {
