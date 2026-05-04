@@ -142,7 +142,6 @@ jobs:
                   dir: ${{ env.QT_INSTALL_DIR }}
                   cache: 'true'
                   cache-key-prefix: "${{ format('qt-{0}-{1}-{2}-{3}', env.QT_VERSION, matrix.qt_host, matrix.qt_arch != '' && matrix.qt_arch || 'default', env.QT_MODULES) }}"
-                  install-deps: 'false'
 
             - name: Log Qt install details
               run: |
@@ -150,6 +149,84 @@ jobs:
                   echo "Qt install dir: ${{ env.QT_INSTALL_DIR }}"
                   echo "QT_ROOT_DIR=$QT_ROOT_DIR"
                   du -sh "${{ env.QT_INSTALL_DIR }}" || true
+
+            - name: Preflight Qt packaging prerequisites
+              run: |
+                  set -euo pipefail
+
+                  resolve_qmake() {
+                    if [ -n "${QMAKE:-}" ] && [ -x "${QMAKE}" ]; then
+                      printf '%s\n' "${QMAKE}"
+                      return 0
+                    fi
+
+                    for candidate in "${QT_ROOT_DIR:-}/bin/qmake6" "${QT_ROOT_DIR:-}/bin/qmake"; do
+                      if [ -x "${candidate}" ]; then
+                        printf '%s\n' "${candidate}"
+                        return 0
+                      fi
+                    done
+
+                    command -v qmake6 2>/dev/null || command -v qmake 2>/dev/null || true
+                  }
+
+                  print_dir() {
+                    label="$1"
+                    dir_path="$2"
+                    echo "Qt plugin directory (${label}): ${dir_path}"
+                    if [ ! -d "${dir_path}" ]; then
+                      echo "  (missing)"
+                      return 0
+                    fi
+
+                    find "${dir_path}" -maxdepth 1 -type f -printf '  %f\n' | sort
+                  }
+
+                  qmake_path="$(resolve_qmake)"
+                  if [ -z "${qmake_path}" ]; then
+                    echo "Cannot find qmake for AppImage packaging" >&2
+                    exit 1
+                  fi
+
+                  plugin_root="$("${qmake_path}" -query QT_INSTALL_PLUGINS)"
+                  if [ -z "${plugin_root}" ] || [ ! -d "${plugin_root}" ]; then
+                    echo "qmake did not resolve a usable Qt plugin root" >&2
+                    echo "Resolved QMAKE: ${qmake_path}" >&2
+                    exit 1
+                  fi
+
+                  echo "Resolved QMAKE: ${qmake_path}"
+                  echo "Qt plugin root: ${plugin_root}"
+                  print_dir iconengines "${plugin_root}/iconengines"
+                  print_dir imageformats "${plugin_root}/imageformats"
+                  print_dir platforms "${plugin_root}/platforms"
+
+                  printf 'QMAKE=%s\n' "${qmake_path}" >> "$GITHUB_ENV"
+                  printf 'QT_PLUGIN_ROOT=%s\n' "${plugin_root}" >> "$GITHUB_ENV"
+
+                  missing_plugin=false
+                  for relative_path in \
+                    iconengines/libqsvgicon.so \
+                    imageformats/libqsvg.so \
+                    platforms/libqxcb.so; do
+                    if [ ! -f "${plugin_root}/${relative_path}" ]; then
+                      echo "Missing required Qt plugin: ${plugin_root}/${relative_path}" >&2
+                      missing_plugin=true
+                    fi
+                  done
+
+                  if [ "${missing_plugin}" = true ]; then
+                    echo "AppImage packaging requires QtSvg plugins and the XCB platform plugin in the active Qt tree." >&2
+                    exit 1
+                  fi
+
+                  missing_xcb_deps="$(ldd "${plugin_root}/platforms/libqxcb.so" | awk '/not found/ { print $1 }')"
+                  if [ -n "${missing_xcb_deps}" ]; then
+                    echo "Qt platform plugin libqxcb.so has unresolved runtime dependencies:" >&2
+                    printf '  - %s\n' ${missing_xcb_deps} >&2
+                    echo "Install the matching XCB runtime libraries before packaging." >&2
+                    exit 1
+                  fi
 
             - name: Download build artifacts
               uses: actions/download-artifact@v4
@@ -203,7 +280,6 @@ jobs:
             - name: Create AppImage
               run: |
                   export APPIMAGE_EXTRACT_AND_RUN=1
-                  export QMAKE=$(which qmake6 2>/dev/null || which qmake)
                   export EXTRA_QT_PLUGINS="svg;"
                   ./linuxdeploy-${{ matrix.linuxdeploy_arch }}.AppImage --appdir AppDir --plugin qt --output appimage
 
