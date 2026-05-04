@@ -28,69 +28,9 @@ jobs:
         with:
             build_type: Release
             build_tests: true
+            run_tests: true
             artifact_name: ${{ matrix.artifact_name }}
+            upload_artifact: false
             runner: ${{ matrix.runner }}
             qt_host: ${{ matrix.qt_host }}
             qt_arch: ${{ matrix.qt_arch }}
-
-    test:
-        needs: build
-        strategy:
-            matrix:
-                include:
-                    - arch: x86_64
-                      runner: ubuntu-latest
-                      qt_host: linux
-                      qt_arch: ''
-                      artifact_name: via-build-x86_64
-                    - arch: aarch64
-                      runner: ubuntu-24.04-arm
-                      qt_host: linux_arm64
-                      qt_arch: linux_gcc_arm64
-                      artifact_name: via-build-aarch64
-        runs-on: ${{ matrix.runner }}
-
-        env:
-            FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-        steps:
-            - name: Install runtime dependencies
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y \
-                    libfuse3-dev \
-                    libsecret-1-dev \
-                    libdbus-1-dev \
-                    libgl1-mesa-dev
-
-            - name: Install Qt
-              uses: jurplel/install-qt-action@v4
-              with:
-                  version: '6.7.3'
-                  modules: 'qtnetworkauth'
-                  host: ${{ matrix.qt_host }}
-                  arch: ${{ matrix.qt_arch }}
-
-            - name: Install Qt6Keychain
-              run: |
-                  git clone https://github.com/frankosterfeld/qtkeychain.git --depth 1
-                  cmake -B qtkeychain/build -S qtkeychain \
-                    -DBUILD_WITH_QT6=ON \
-                    -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-                    -DCMAKE_INSTALL_PREFIX=/usr
-                  cmake --build qtkeychain/build --parallel
-                  sudo cmake --install qtkeychain/build
-
-            - name: Download build artifacts
-              uses: actions/download-artifact@v4
-              with:
-                  name: ${{ matrix.artifact_name }}
-                  path: build/
-
-            - name: Make test binaries executable
-              run: |
-                  find build/ -name 'test_*' -exec chmod +x {} \;
-
-            - name: Run tests
-              run: |
-                  ctest --test-dir build --output-on-failure

@@ -13,11 +13,21 @@ on:
                 required: false
                 type: boolean
                 default: false
+            run_tests:
+                description: 'Whether to run tests after the build completes'
+                required: false
+                type: boolean
+                default: false
             artifact_name:
                 description: 'Name for the uploaded build artifact'
                 required: false
                 type: string
                 default: 'via-build'
+            upload_artifact:
+                description: 'Whether to upload the build directory as an artifact'
+                required: false
+                type: boolean
+                default: true
             cmake_install_prefix:
                 description: 'CMAKE_INSTALL_PREFIX value'
                 required: false
@@ -46,6 +56,9 @@ on:
 
 env:
     FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    QT_VERSION: '6.7.3'
+    QT_MODULES: 'qtnetworkauth'
+    QT_INSTALL_DIR: ${{ github.workspace }}/.qt
 
 jobs:
     build:
@@ -65,25 +78,27 @@ jobs:
                     libfuse3-dev \
                     libsecret-1-dev \
                     libdbus-1-dev \
-                    libgl1-mesa-dev
+                                        libgl1-mesa-dev \
+                                        qtkeychain-qt6-dev
 
             - name: Install Qt
               uses: jurplel/install-qt-action@v4
               with:
-                  version: '6.7.3'
-                  modules: 'qtnetworkauth'
+                  version: ${{ env.QT_VERSION }}
+                  modules: ${{ env.QT_MODULES }}
                   host: ${{ inputs.qt_host }}
                   arch: ${{ inputs.qt_arch }}
+                  dir: ${{ env.QT_INSTALL_DIR }}
+                  cache: 'true'
+                  cache-key-prefix: "${{ format('qt-{0}-{1}-{2}-{3}', env.QT_VERSION, inputs.qt_host, inputs.qt_arch != '' && inputs.qt_arch || 'default', env.QT_MODULES) }}"
+                  install-deps: 'false'
 
-            - name: Install Qt6Keychain
+            - name: Log Qt install details
               run: |
-                  git clone https://github.com/frankosterfeld/qtkeychain.git --depth 1
-                  cmake -B qtkeychain/build -S qtkeychain \
-                    -DBUILD_WITH_QT6=ON \
-                    -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-                    -DCMAKE_INSTALL_PREFIX=/usr
-                  cmake --build qtkeychain/build --parallel
-                  sudo cmake --install qtkeychain/build
+                  echo "Qt cache prefix: ${{ format('qt-{0}-{1}-{2}-{3}', env.QT_VERSION, inputs.qt_host, inputs.qt_arch != '' && inputs.qt_arch || 'default', env.QT_MODULES) }}"
+                  echo "Qt install dir: ${{ env.QT_INSTALL_DIR }}"
+                  echo "QT_ROOT_DIR=$QT_ROOT_DIR"
+                  du -sh "${{ env.QT_INSTALL_DIR }}" || true
 
             - name: Configure CMake
               run: |
@@ -107,7 +122,12 @@ jobs:
             - name: Build
               run: cmake --build build --parallel
 
+            - name: Run tests
+              if: ${{ inputs.run_tests }}
+              run: ctest --test-dir build --output-on-failure
+
             - name: Upload build directory
+              if: ${{ inputs.upload_artifact }}
               uses: actions/upload-artifact@v4
               with:
                   name: ${{ inputs.artifact_name }}
