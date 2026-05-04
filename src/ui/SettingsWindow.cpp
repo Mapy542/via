@@ -3,7 +3,6 @@
  * @brief Implementation of the settings window
  */
 
-// TODO: UI bug: settings window fails to open if API for drive storage info fails.
 #include "SettingsWindow.h"
 
 #include <QDialogButtonBox>
@@ -15,6 +14,7 @@
 #include <QProcess>
 #include <QShowEvent>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
@@ -36,9 +36,13 @@ QString fuseCacheTooltip() {
         "excluded from this tracker.");
 }
 
-QString emptySecretPlaceholder() { return QStringLiteral("Enter your OAuth Client Secret"); }
+QString emptySecretPlaceholder() {
+    return QStringLiteral("Enter your OAuth Client Secret");
+}
 
-QString storedSecretPlaceholder() { return QStringLiteral("••••••••••••••••"); }
+QString storedSecretPlaceholder() {
+    return QStringLiteral("••••••••••••••••");
+}
 
 class TokenStorageCredentialStore final : public SettingsCredentialStore {
    public:
@@ -187,6 +191,7 @@ void SettingsWindow::setupLoginTab() {
     QVBoxLayout* storageLayout = new QVBoxLayout(storageGroup);
 
     m_storageLabel = new QLabel("Retrieving storage info...", m_loginTab);
+    m_storageLabel->setObjectName("settingsStorageInfoLabel");
     storageLayout->addWidget(m_storageLabel);
 
     layout->addWidget(storageGroup);
@@ -234,7 +239,7 @@ void SettingsWindow::setupLoginTab() {
             m_accountStatus->setText("Not signed in");
             m_loginButton->setVisible(true);
             m_logoutButton->setVisible(false);
-            m_storageLabel->setText("Not available");
+            setStorageInfoState(StorageInfoState::Unavailable);
         });
     }
 
@@ -256,23 +261,35 @@ void SettingsWindow::setupLoginTab() {
                     m_accountStatus->setText(statusText);
                 });
 
-        // Handle API errors for storage info
-        connect(m_driveClient, &GoogleDriveClient::error, this,
-                [this](const QString& operation, const QString& error) {
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
+                [this](const QString& operation, const QString& error, int, const QString&,
+                       const QString&) {
                     if (operation == "getAboutInfo") {
-                        m_storageLabel->setText(
-                            QString("Unable to retrieve storage info: %1").arg(error));
+                        if (m_authManager && m_authManager->isAuthenticated()) {
+                            setStorageInfoState(StorageInfoState::Failure, error);
+                        } else {
+                            setStorageInfoState(StorageInfoState::Unavailable);
+                        }
                     }
                 });
+    }
+
+    if (m_driveClient && m_authManager && m_authManager->isAuthenticated()) {
+        setStorageInfoState(StorageInfoState::Loading);
+    } else {
+        setStorageInfoState(StorageInfoState::Unavailable);
     }
 }
 
 void SettingsWindow::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
 
-    // Update storage info when window is shown
     if (m_authManager && m_authManager->isAuthenticated()) {
-        updateStorageInfo();
+        QTimer::singleShot(0, this, [this]() {
+            if (isVisible() && m_authManager && m_authManager->isAuthenticated()) {
+                updateStorageInfo();
+            }
+        });
     }
 
     refreshCacheUsageTracker();
@@ -833,15 +850,49 @@ void SettingsWindow::onSaveCredentialsClicked() {
 
 void SettingsWindow::updateStorageInfo() {
     if (m_driveClient && m_authManager && m_authManager->isAuthenticated()) {
-        m_storageLabel->setText("Retrieving storage info...");
+        setStorageInfoState(StorageInfoState::Loading);
         m_driveClient->getAboutInfo();
     } else {
-        m_storageLabel->setText("Not available");
+        setStorageInfoState(StorageInfoState::Unavailable);
     }
 }
 
 void SettingsWindow::onStorageInfoReceived(qint64 storageUsed, qint64 storageLimit) {
-    // Format bytes to human-readable format
+    if (!m_authManager || !m_authManager->isAuthenticated()) {
+        setStorageInfoState(StorageInfoState::Unavailable);
+        return;
+    }
+
+    setStorageInfoState(StorageInfoState::Success, QString(), storageUsed, storageLimit);
+}
+
+void SettingsWindow::setStorageInfoState(StorageInfoState state, const QString& detail,
+                                         qint64 storageUsed, qint64 storageLimit) {
+    if (!m_storageLabel) {
+        return;
+    }
+
+    switch (state) {
+        case StorageInfoState::Loading:
+            m_storageLabel->setText("Retrieving storage info...");
+            return;
+
+        case StorageInfoState::Unavailable:
+            m_storageLabel->setText("Not available");
+            return;
+
+        case StorageInfoState::Failure:
+            if (detail.isEmpty()) {
+                m_storageLabel->setText("Unable to retrieve storage info");
+            } else {
+                m_storageLabel->setText(QString("Unable to retrieve storage info: %1").arg(detail));
+            }
+            return;
+
+        case StorageInfoState::Success:
+            break;
+    }
+
     auto formatBytes = [](qint64 bytes) -> QString {
         const qint64 KB = 1024;
         const qint64 MB = KB * 1024;
@@ -856,14 +907,14 @@ void SettingsWindow::onStorageInfoReceived(qint64 storageUsed, qint64 storageLim
             return QString::number(bytes / (double)MB, 'f', 2) + " MB";
         } else if (bytes >= KB) {
             return QString::number(bytes / (double)KB, 'f', 2) + " KB";
-        } else {
-            return QString::number(bytes) + " B";
         }
+
+        return QString::number(bytes) + " B";
     };
 
-    QString usedStr = formatBytes(storageUsed);
-    QString limitStr = formatBytes(storageLimit);
-    double percentUsed = storageLimit > 0 ? (storageUsed * 100.0 / storageLimit) : 0.0;
+    const QString usedStr = formatBytes(storageUsed);
+    const QString limitStr = formatBytes(storageLimit);
+    const double percentUsed = storageLimit > 0 ? (storageUsed * 100.0 / storageLimit) : 0.0;
 
     m_storageLabel->setText(QString("Storage usage: %1 / %2 (%3%)")
                                 .arg(usedStr)
@@ -872,16 +923,22 @@ void SettingsWindow::onStorageInfoReceived(qint64 storageUsed, qint64 storageLim
 }
 
 bool SettingsWindow::checkRestartRequired() const {
-    if (m_syncFolderEdit->text() != m_originalSyncFolder) return true;
-    if (m_syncModeCombo->currentData().toString() != m_originalSyncMode) return true;
+    if (m_syncFolderEdit->text() != m_originalSyncFolder)
+        return true;
+    if (m_syncModeCombo->currentData().toString() != m_originalSyncMode)
+        return true;
     if (m_duplicateNameCombo->currentData().toString() != m_originalDuplicateNameStrategy)
         return true;
     if (m_conflictResolutionCombo->currentData().toString() != m_originalConflictStrategy)
         return true;
-    if (m_syncSystemCombo->currentData().toString() != m_originalSyncSystem) return true;
-    if (m_fuseMountPointEdit->text() != m_originalFuseMountPoint) return true;
-    if (m_cacheSize->value() != m_originalCacheSize) return true;
-    if (m_nativeDocModeCombo->currentData().toString() != m_originalNativeDocMode) return true;
+    if (m_syncSystemCombo->currentData().toString() != m_originalSyncSystem)
+        return true;
+    if (m_fuseMountPointEdit->text() != m_originalFuseMountPoint)
+        return true;
+    if (m_cacheSize->value() != m_originalCacheSize)
+        return true;
+    if (m_nativeDocModeCombo->currentData().toString() != m_originalNativeDocMode)
+        return true;
     return false;
 }
 

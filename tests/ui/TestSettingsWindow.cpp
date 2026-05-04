@@ -4,11 +4,15 @@
  */
 
 #include <QApplication>
+#include <QLabel>
 #include <QMessageBox>
 #include <QSettings>
 #include <QTimer>
 #include <QtTest/QtTest>
 
+#include "api/GoogleDriveClient.h"
+#include "auth/GoogleAuthManager.h"
+#include "auth/TokenStorage.h"
 #include "sync/RuntimePauseController.h"
 #include "ui/SettingsWindow.h"
 
@@ -26,6 +30,65 @@ class FakeCredentialStore : public SettingsCredentialStore {
     QString clientSecret;
 };
 
+class FakeAuthenticatedAuthManager : public GoogleAuthManager {
+    Q_OBJECT
+
+   public:
+    explicit FakeAuthenticatedAuthManager(TokenStorage* tokenStorage, QObject* parent = nullptr)
+        : GoogleAuthManager(tokenStorage, parent) {}
+
+    bool isAuthenticated() const override { return m_authenticated; }
+
+    void setAuthenticated(bool authenticated) { m_authenticated = authenticated; }
+
+   private:
+    bool m_authenticated = true;
+};
+
+class FakeDriveClientForSettingsWindow : public GoogleDriveClient {
+    Q_OBJECT
+
+   public:
+    enum class FailureMode {
+        Auth,
+        NonAuth,
+    };
+
+    explicit FakeDriveClientForSettingsWindow(GoogleAuthManager* authManager,
+                                              QObject* parent = nullptr)
+        : GoogleDriveClient(authManager, parent) {}
+
+    void setFailureMode(FailureMode mode) { m_failureMode = mode; }
+
+    void getAboutInfo() override {
+        ++aboutInfoRequestCount;
+
+        QTimer::singleShot(0, this, [this]() {
+            switch (m_failureMode) {
+                case FailureMode::Auth:
+                    emit errorDetailed(QStringLiteral("getAboutInfo"),
+                                       QStringLiteral("Unauthorized"), 401, QString(), QString());
+                    emit authenticationFailure(QStringLiteral("getAboutInfo"), 401,
+                                               QStringLiteral("Unauthorized"));
+                    break;
+
+                case FailureMode::NonAuth:
+                    emit error(QStringLiteral("getAboutInfo"),
+                               QStringLiteral("Internal Server Error"));
+                    emit errorDetailed(QStringLiteral("getAboutInfo"),
+                                       QStringLiteral("Internal Server Error"), 500, QString(),
+                                       QString());
+                    break;
+            }
+        });
+    }
+
+    int aboutInfoRequestCount = 0;
+
+   private:
+    FailureMode m_failureMode = FailureMode::Auth;
+};
+
 class TestSettingsWindow : public QObject {
     Q_OBJECT
 
@@ -36,6 +99,8 @@ class TestSettingsWindow : public QObject {
 
     void testReopenShowsStoredIdAndKeepsStoredSecretOnResave();
     void testAutoPauseCheckboxPersistsAndUpdatesController();
+    void testWindowStaysUsableWhenAboutInfoAuthFailsOnOpen();
+    void testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen();
 
    private:
     static void acceptNextMessageBox();
@@ -157,6 +222,56 @@ void TestSettingsWindow::testAutoPauseCheckboxPersistsAndUpdatesController() {
     QVERIFY(controller.isAutoPauseEnabled());
     QVERIFY(controller.isEffectivelyPaused());
     QCOMPARE(controller.effectiveStatusText(), QStringLiteral("Offline"));
+}
+
+void TestSettingsWindow::testWindowStaysUsableWhenAboutInfoAuthFailsOnOpen() {
+    TokenStorage tokenStorage;
+    FakeAuthenticatedAuthManager authManager(&tokenStorage);
+    FakeDriveClientForSettingsWindow driveClient(&authManager);
+    driveClient.setFailureMode(FakeDriveClientForSettingsWindow::FailureMode::Auth);
+
+    SettingsWindow window(&authManager, &driveClient);
+    auto* storageLabel = window.findChild<QLabel*>("settingsStorageInfoLabel");
+    auto* clientIdEdit = window.findChild<QLineEdit*>("settingsClientIdEdit");
+
+    QVERIFY(storageLabel != nullptr);
+    QVERIFY(clientIdEdit != nullptr);
+
+    window.show();
+
+    QTRY_VERIFY(window.isVisible());
+    QTRY_COMPARE(driveClient.aboutInfoRequestCount, 1);
+    QTRY_COMPARE(storageLabel->text(),
+                 QStringLiteral("Unable to retrieve storage info: Unauthorized"));
+
+    QVERIFY(window.isVisible());
+    QVERIFY(window.isEnabled());
+    QVERIFY(clientIdEdit->isEnabled());
+}
+
+void TestSettingsWindow::testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen() {
+    TokenStorage tokenStorage;
+    FakeAuthenticatedAuthManager authManager(&tokenStorage);
+    FakeDriveClientForSettingsWindow driveClient(&authManager);
+    driveClient.setFailureMode(FakeDriveClientForSettingsWindow::FailureMode::NonAuth);
+
+    SettingsWindow window(&authManager, &driveClient);
+    auto* storageLabel = window.findChild<QLabel*>("settingsStorageInfoLabel");
+    auto* clientIdEdit = window.findChild<QLineEdit*>("settingsClientIdEdit");
+
+    QVERIFY(storageLabel != nullptr);
+    QVERIFY(clientIdEdit != nullptr);
+
+    window.show();
+
+    QTRY_VERIFY(window.isVisible());
+    QTRY_COMPARE(driveClient.aboutInfoRequestCount, 1);
+    QTRY_COMPARE(storageLabel->text(),
+                 QStringLiteral("Unable to retrieve storage info: Internal Server Error"));
+
+    QVERIFY(window.isVisible());
+    QVERIFY(window.isEnabled());
+    QVERIFY(clientIdEdit->isEnabled());
 }
 
 QTEST_MAIN(TestSettingsWindow)

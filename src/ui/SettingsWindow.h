@@ -48,6 +48,13 @@ class SettingsCredentialStore {
 class SettingsWindow : public QDialog {
     Q_OBJECT
 
+    enum class StorageInfoState {
+        Loading,
+        Success,
+        Failure,
+        Unavailable,
+    };
+
    public:
     /**
      * @brief Construct the settings window
@@ -114,6 +121,8 @@ class SettingsWindow : public QDialog {
     void setupFuseTab();
     void setupMiscTab();
     void updateStorageInfo();
+    void setStorageInfoState(StorageInfoState state, const QString& detail = QString(),
+                             qint64 storageUsed = 0, qint64 storageLimit = 0);
     void updateClientSecretPlaceholder(bool hasStoredSecret);
     void refreshCacheUsageTracker();
     qint64 scanFuseCacheUsageBytes() const;
