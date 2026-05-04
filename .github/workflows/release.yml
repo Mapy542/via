@@ -129,7 +129,8 @@ jobs:
                     file \
                     desktop-file-utils \
                     cmake \
-                    qtkeychain-qt6-dev
+                    qtkeychain-qt6-dev \
+                    libxcb-cursor0
 
             - name: Install Qt
               uses: jurplel/install-qt-action@v4
