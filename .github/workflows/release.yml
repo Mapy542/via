@@ -69,16 +69,19 @@ jobs:
                       runner: ubuntu-latest
                       qt_host: linux
                       qt_arch: ''
+                      build_parallelism: '0'
                       artifact_name: via-release-build-x86_64
                     - arch: aarch64
                       runner: ubuntu-24.04-arm
                       qt_host: linux_arm64
                       qt_arch: linux_gcc_arm64
+                      build_parallelism: '2'
                       artifact_name: via-release-build-aarch64
         uses: ./.github/workflows/build-reusable.yml
         with:
             build_type: Release
             build_tests: false
+            build_parallelism: ${{ matrix.build_parallelism }}
             artifact_name: ${{ matrix.artifact_name }}
             cmake_install_prefix: /usr
             runner: ${{ matrix.runner }}

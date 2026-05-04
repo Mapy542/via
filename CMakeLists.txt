@@ -69,9 +69,8 @@ find_package(Qt6Keychain REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3)
 
-# Source files
-set(SOURCES
-    src/main.cpp
+# Source files shared by the app, tests, and the FUSE harness
+set(VIA_CORE_SOURCES
     src/ui/MainWindow.cpp
     src/ui/SettingsWindow.cpp
     src/ui/SystemTrayManager.cpp
@@ -108,6 +107,10 @@ set(SOURCES
     src/utils/FileInUseChecker.cpp
     src/utils/PowerProfileMonitor.cpp
     src/utils/SuspendMonitor.cpp
+)
+
+set(VIA_APP_SOURCES
+    src/main.cpp
 )
 
 # Header files
@@ -181,15 +184,14 @@ foreach(icon_file IN LISTS VIA_THEME_ICON_FILES)
     )
 endforeach()
 
-# Create executable
-add_executable(${PROJECT_NAME}
-    ${SOURCES}
+# Create a shared object library so the full app is not recompiled for tests.
+add_library(via_core OBJECT
+    ${VIA_CORE_SOURCES}
     ${HEADERS}
     ${RESOURCES}
 )
 
-# Link libraries
-target_link_libraries(${PROJECT_NAME} PRIVATE
+target_link_libraries(via_core PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
@@ -202,13 +204,26 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     qt6keychain
 )
 
-# Include directories
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(via_core PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${VIA_GENERATED_DIR}
 )
 
-# Compiler warnings
+target_compile_options(via_core PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# Create executable
+add_executable(${PROJECT_NAME}
+    ${VIA_APP_SOURCES}
+)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    via_core
+)
+
 target_compile_options(${PROJECT_NAME} PRIVATE
     -Wall
     -Wextra
@@ -250,33 +265,11 @@ if(BUILD_TESTS)
         ${CMAKE_BINARY_DIR}/CTestCustom.cmake
         COPYONLY
     )
-
-
-    # Create a static library for testable code
-    add_library(via_testable STATIC ${SOURCES} ${HEADERS})
-    target_link_libraries(via_testable PUBLIC
-        Qt6::Core
-        Qt6::Network
-        Qt6::NetworkAuth
-        Qt6::Sql
-        Qt6::DBus
-        Qt6::Concurrent
-        Qt6::Widgets
-        Qt6::Test
-        PkgConfig::FUSE3
-        qt6keychain
-    )
-    target_include_directories(via_testable PUBLIC
-        ${CMAKE_SOURCE_DIR}/src
-        ${VIA_GENERATED_DIR}
-    )
-    target_compile_options(via_testable PRIVATE -Wall -Wextra)
-
     # Macro to add a Qt test
     macro(add_qt_test TEST_NAME TEST_SOURCE)
         add_executable(${TEST_NAME} ${TEST_SOURCE})
         target_link_libraries(${TEST_NAME} PRIVATE
-            via_testable
+            via_core
             Qt6::Test
         )
         add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
@@ -330,7 +323,7 @@ if(BUILD_TESTS)
     # ==================================================================
     add_executable(via_fuse_harness tests/e2e/FuseTestHarness.cpp)
     target_link_libraries(via_fuse_harness PRIVATE
-        via_testable
+        via_core
     )
 
 endif()
