@@ -124,6 +124,7 @@ jobs:
                     libsecret-1-dev \
                     libdbus-1-dev \
                     libgl1-mesa-dev \
+                    libxkbcommon-x11-0 \
                     fuse3 \
                     file \
                     desktop-file-utils \

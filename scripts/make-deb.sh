@@ -116,18 +116,42 @@ collect_artifacts() {
     local package_version="$1"
     local deb_arch="$2"
     local package_dir="$3"
-    local dbgsym_path="${package_dir}/via-dbgsym_${package_version}_${deb_arch}.ddeb"
+    local changes_path="${package_dir}/via_${package_version}_${deb_arch}.changes"
+    local buildinfo_path="${package_dir}/via_${package_version}_${deb_arch}.buildinfo"
+    local artifact_name
+    local -a referenced_artifacts=()
 
     rm -rf "${ARTIFACTS_DIR}"
     mkdir -p "${ARTIFACTS_DIR}"
 
-    cp "${package_dir}/via_${package_version}_${deb_arch}.deb" "${ARTIFACTS_DIR}/"
-    cp "${package_dir}/via_${package_version}_${deb_arch}.changes" "${ARTIFACTS_DIR}/"
-    cp "${package_dir}/via_${package_version}_${deb_arch}.buildinfo" "${ARTIFACTS_DIR}/"
+    cp "${changes_path}" "${ARTIFACTS_DIR}/"
+    cp "${buildinfo_path}" "${ARTIFACTS_DIR}/"
 
-    if [[ -f "${dbgsym_path}" ]]; then
-        cp "${dbgsym_path}" "${ARTIFACTS_DIR}/"
+    mapfile -t referenced_artifacts < <(
+        awk '
+            /^Files:/ { in_files = 1; next }
+            in_files && /^[^[:space:]]/ { exit }
+            in_files && NF >= 5 { print $NF }
+        ' "${changes_path}"
+    )
+
+    if (( ${#referenced_artifacts[@]} == 0 )); then
+        error "No package artifacts listed in ${changes_path}"
+        exit 1
     fi
+
+    for artifact_name in "${referenced_artifacts[@]}"; do
+        if [[ ! -f "${package_dir}/${artifact_name}" ]]; then
+            error "${changes_path} references missing artifact ${artifact_name}"
+            exit 1
+        fi
+
+        if [[ "${artifact_name}" == "$(basename "${buildinfo_path}")" ]]; then
+            continue
+        fi
+
+        cp "${package_dir}/${artifact_name}" "${ARTIFACTS_DIR}/"
+    done
 }
 
 APP_VERSION="$(read_version)"
