@@ -291,6 +291,7 @@ if(BUILD_TESTS)
     add_qt_test(test_LocalChangeWatcher tests/sync/TestLocalChangeWatcher.cpp)
     add_qt_test(test_RemoteChangeWatcher tests/sync/TestRemoteChangeWatcher.cpp)
     add_qt_test(test_FullSync tests/sync/TestFullSync.cpp)
+    add_qt_test(test_MirrorSyncRuntime tests/sync/TestMirrorSyncRuntime.cpp)
     add_qt_test(test_TrashPolicy tests/sync/TestTrashPolicy.cpp)
 
     # FUSE subsystem tests

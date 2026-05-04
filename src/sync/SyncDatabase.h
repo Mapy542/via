@@ -8,11 +8,31 @@
 
 #include <QAtomicInteger>
 #include <QDateTime>
+#include <QHash>
 #include <QList>
 #include <QMutex>
 #include <QObject>
 #include <QSqlDatabase>
+#include <QSqlError>
 #include <QString>
+
+class SyncDatabase;
+
+class SyncDatabaseConnectionHandle {
+   public:
+    explicit SyncDatabaseConnectionHandle(const SyncDatabase* owner = nullptr);
+
+    operator QSqlDatabase() const;
+    bool isOpen() const;
+    QString connectionName() const;
+    QStringList tables() const;
+    QSqlError lastError() const;
+
+   private:
+    QSqlDatabase database() const;
+
+    const SyncDatabase* m_owner = nullptr;
+};
 
 /**
  * @struct FileSyncState
@@ -157,6 +177,14 @@ class SyncDatabase : public QObject {
      * @brief Close the database connection
      */
     void close();
+
+    /**
+     * @brief Close and remove the SQLite connection owned by the current thread
+     *
+     * Safe to call from worker threads before they shut down so the main thread
+     * does not need to touch foreign-thread QSqlDatabase connections later.
+     */
+    void closeCurrentThreadConnection();
 
     /**
      * @brief Check if database is open
@@ -569,8 +597,16 @@ class SyncDatabase : public QObject {
     void databaseError(const QString& error) const;
 
    private:
+    friend class SyncDatabaseConnectionHandle;
+
+    QSqlDatabase databaseForCurrentThread() const;
+    QSqlDatabase databaseForCurrentThreadUnlocked() const;
     bool openConnectionUnlocked();
     void closeUnlocked();
+    void closeConnectionByNameUnlocked(const QString& connectionName);
+    void closeAllConnectionsUnlocked();
+    QString connectionNameForThreadUnlocked(quintptr threadKey) const;
+    QString ensureConnectionNameForThreadUnlocked(quintptr threadKey);
     bool createTables();
     bool createFuseTables();  ///< Create FUSE-specific tables
     bool ensureSettingsTable();
@@ -587,8 +623,11 @@ class SyncDatabase : public QObject {
     void requireRelativePath(const QString& path, const char* operation) const;
     void requireFileId(const QString& fileId, const char* operation) const;
 
-    QSqlDatabase m_db;
+    mutable SyncDatabaseConnectionHandle m_db;
     QString m_dbPath;
+    mutable QHash<quintptr, QString> m_connectionNamesByThread;
+    QString m_primaryConnectionName;
+    bool m_connectionsReady = false;
     mutable QRecursiveMutex m_mutex;                      ///< Thread-safe access to database
     mutable QAtomicInteger<int> m_concurrentAccessCount;  ///< Track concurrent access attempts
     SchemaCompatibility m_lastSchemaCompatibility = SchemaCompatibility::Current;

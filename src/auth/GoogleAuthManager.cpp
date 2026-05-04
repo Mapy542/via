@@ -10,9 +10,11 @@
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSet>
+#include <QThread>
 #include <QUrlQuery>
 #include <QUuid>
 #include <QtGlobal>
@@ -22,7 +24,24 @@
 
 namespace {
 constexpr int kRefreshRequestTimeoutMs = 15000;
+
+template <typename Result, typename Func>
+Result invokeOnObjectThread(const GoogleAuthManager* object, Func&& func) {
+    if (!object) {
+        return Result();
+    }
+
+    if (QThread::currentThread() == object->thread()) {
+        return func();
+    }
+
+    Result result{};
+    QMetaObject::invokeMethod(
+        const_cast<GoogleAuthManager*>(object), [&]() { result = func(); },
+        Qt::BlockingQueuedConnection);
+    return result;
 }
+}  // namespace
 
 // Google OAuth endpoints
 const QString GoogleAuthManager::AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -175,26 +194,40 @@ void GoogleAuthManager::saveTokens() {
 }
 
 bool GoogleAuthManager::isAuthenticated() const {
-    return m_authenticated && !m_accessToken.isEmpty();
+    return invokeOnObjectThread<bool>(
+        this, [this]() { return m_authenticated && !m_accessToken.isEmpty(); });
 }
 
-QString GoogleAuthManager::accessToken() const { return m_accessToken; }
+QString GoogleAuthManager::accessToken() const {
+    return invokeOnObjectThread<QString>(this, [this]() { return m_accessToken; });
+}
 
-QString GoogleAuthManager::refreshToken() const { return m_refreshTokenValue; }
+QString GoogleAuthManager::refreshToken() const {
+    return invokeOnObjectThread<QString>(this, [this]() { return m_refreshTokenValue; });
+}
 
-QDateTime GoogleAuthManager::tokenExpiry() const { return m_accessTokenExpiry; }
+QDateTime GoogleAuthManager::tokenExpiry() const {
+    return invokeOnObjectThread<QDateTime>(this, [this]() { return m_accessTokenExpiry; });
+}
 
 bool GoogleAuthManager::isTokenExpiringSoon(int bufferSecs) const {
-    if (!m_authenticated || m_accessToken.isEmpty()) {
-        return true;  // not authenticated at all
-    }
-    if (!m_accessTokenExpiry.isValid()) {
-        return false;  // unknown expiry — assume valid
-    }
-    return QDateTime::currentDateTimeUtc().secsTo(m_accessTokenExpiry) <= bufferSecs;
+    return invokeOnObjectThread<bool>(this, [this, bufferSecs]() {
+        if (!m_authenticated || m_accessToken.isEmpty()) {
+            return true;  // not authenticated at all
+        }
+        if (!m_accessTokenExpiry.isValid()) {
+            return false;  // unknown expiry — assume valid
+        }
+        return QDateTime::currentDateTimeUtc().secsTo(m_accessTokenExpiry) <= bufferSecs;
+    });
 }
 
 bool GoogleAuthManager::ensureValidToken(int timeoutMs) {
+    if (QThread::currentThread() != thread()) {
+        return invokeOnObjectThread<bool>(
+            this, [this, timeoutMs]() { return ensureValidToken(timeoutMs); });
+    }
+
     // Already valid and not expiring soon — nothing to do
     if (!isTokenExpiringSoon()) {
         return true;
@@ -271,6 +304,11 @@ void GoogleAuthManager::authenticate() {
 }
 
 void GoogleAuthManager::refreshTokens() {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this]() { refreshTokens(); }, Qt::QueuedConnection);
+        return;
+    }
+
     if (m_refreshTokenValue.isEmpty()) {
         m_authenticated = false;
         emit tokenRefreshError("No refresh token available");
@@ -358,7 +396,9 @@ QNetworkReply* GoogleAuthManager::createRefreshReply(const QNetworkRequest& requ
     return m_networkManager->post(request, payload);
 }
 
-int GoogleAuthManager::refreshRequestTimeoutMs() const { return kRefreshRequestTimeoutMs; }
+int GoogleAuthManager::refreshRequestTimeoutMs() const {
+    return kRefreshRequestTimeoutMs;
+}
 
 void GoogleAuthManager::clearRefreshRequestState(QNetworkReply* reply) {
     m_refreshReplyTimeoutTimer->stop();
@@ -537,7 +577,9 @@ void GoogleAuthManager::onError(const QString& error, const QString& errorDescri
     emit authenticationError(message);
 }
 
-void GoogleAuthManager::onTokenRefreshTimerExpired() { refreshTokens(); }
+void GoogleAuthManager::onTokenRefreshTimerExpired() {
+    refreshTokens();
+}
 
 void GoogleAuthManager::scheduleTokenRefresh() {
     int refreshInterval = 50 * 60 * 1000;

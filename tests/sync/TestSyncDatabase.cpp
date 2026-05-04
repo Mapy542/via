@@ -160,6 +160,7 @@ class TestSyncDatabase : public QObject {
     // ==========================================================================
     void testMultipleRapidWrites();
     void testConcurrentReadWrite_NoCorruption();
+    void testConcurrentReadWrite_UsesThreadScopedConnections();
     void testConcurrentFuseMetadata_NoCorruption();
     void testDatabaseNotOpen_OperationsGraceful();
 
@@ -1589,6 +1590,52 @@ void TestSyncDatabase::testConcurrentReadWrite_NoCorruption() {
         FileSyncState retrieved = m_db->getFileState(QString("concurrent/file%1.txt").arg(i));
         QCOMPARE(retrieved.fileId, QString("CONC_ID_%1").arg(i));
     }
+}
+
+void TestSyncDatabase::testConcurrentReadWrite_UsesThreadScopedConnections() {
+    const auto syncConnectionCount = []() {
+        int count = 0;
+        for (const QString& connectionName : QSqlDatabase::connectionNames()) {
+            if (connectionName.startsWith(QStringLiteral("sync_connection_"))) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    const int baselineConnectionCount = syncConnectionCount();
+
+    FileSyncState mainThreadState;
+    mainThreadState.localPath = "thread-scope/main-thread.txt";
+    mainThreadState.fileId = "MAIN_THREAD_ID";
+    m_db->saveFileState(mainThreadState);
+
+    QAtomicInt workerResult(0);
+    QThread workerThread;
+    QObject workerContext;
+    workerContext.moveToThread(&workerThread);
+
+    connect(&workerThread, &QThread::started, &workerContext, [this, &workerResult]() {
+        FileSyncState workerState;
+        workerState.localPath = "thread-scope/worker-thread.txt";
+        workerState.fileId = "WORKER_THREAD_ID";
+        m_db->saveFileState(workerState);
+
+        const FileSyncState saved = m_db->getFileState(workerState.localPath);
+        if (saved.fileId == workerState.fileId) {
+            workerResult.storeRelaxed(1);
+        }
+
+        QThread::currentThread()->quit();
+    });
+
+    workerThread.start();
+    QVERIFY(workerThread.wait(5000));
+
+    QCOMPARE(workerResult.loadRelaxed(), 1);
+    QCOMPARE(m_db->getFileState(QStringLiteral("thread-scope/worker-thread.txt")).fileId,
+             QString("WORKER_THREAD_ID"));
+    QVERIFY(syncConnectionCount() >= baselineConnectionCount + 1);
 }
 
 void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {

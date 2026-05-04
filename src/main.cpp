@@ -250,8 +250,12 @@ int main(int argc, char* argv[]) {
     // Initialize Google Auth Manager
     GoogleAuthManager authManager(&tokenStorage);
 
-    // Initialize Google Drive API client
+    // Initialize Google Drive API clients.
+    // UI/FUSE traffic stays on the main-thread client while mirror sync uses a
+    // dedicated sibling client that MirrorSyncRuntime moves onto the mirror
+    // worker thread.
     GoogleDriveClient driveClient(&authManager);
+    GoogleDriveClient mirrorDriveClient(&authManager);
 
     // Initialize sync database
     SyncDatabase syncDatabase;
@@ -443,30 +447,26 @@ int main(int argc, char* argv[]) {
         settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString();
 
     // Initialize remote change watcher
-    RemoteChangeWatcher remoteWatcher(&changeQueue, &driveClient, &syncDatabase);
+    RemoteChangeWatcher remoteWatcher(&changeQueue, &mirrorDriveClient, &syncDatabase);
 
     // Initialize change processor/conflict resolver
-    ChangeProcessor changeProcessor(&changeQueue, &syncActionQueue, &syncDatabase, &driveClient);
+    ChangeProcessor changeProcessor(&changeQueue, &syncActionQueue, &syncDatabase,
+                                    &mirrorDriveClient);
 
     QObject::connect(&fuseDriver, &FuseDriver::mountError, &notificationManager,
                      [&notificationManager](const QString& error) {
                          notificationManager.showError("FUSE Mount Error", error);
                      });
     // Initialize sync action thread (executes sync actions from queue)
-    // TODO: Mangled wiring / performance bug: despite the "Watcher/Processor/Thread" naming and
-    // class docs that describe dedicated worker threads, RemoteChangeWatcher, ChangeProcessor,
-    // SyncActionThread, and FullSync are all instantiated here on the GUI thread and never moved
-    // to a QThread. Their synchronous queue work, disk I/O, and blocking Drive helpers therefore
-    // run on the UI event loop and can freeze the application during sync bursts or slow network
-    // calls. Either move them to real worker threads or update the design to avoid blocking work.
-    SyncActionThread syncActionThread(&syncActionQueue, &syncDatabase, &driveClient,
+    SyncActionThread syncActionThread(&syncActionQueue, &syncDatabase, &mirrorDriveClient,
                                       &changeProcessor, &localWatcher);
 
     // Initialize full sync handler
-    FullSync fullSync(&changeQueue, &syncDatabase, &driveClient, &changeProcessor);
+    FullSync fullSync(&changeQueue, &syncDatabase, &mirrorDriveClient, &changeProcessor);
 
     MirrorSyncRuntime mirrorSyncRuntime(&localWatcher, &remoteWatcher, &changeProcessor,
-                                        &syncActionQueue, &syncActionThread, &fullSync, &app);
+                                        &syncActionQueue, &syncActionThread, &fullSync,
+                                        &mirrorDriveClient, &syncDatabase, &app);
     mirrorSyncRuntime.setSyncFolder(syncFolder);
 
     // Load stored change token if available
@@ -522,8 +522,8 @@ int main(int argc, char* argv[]) {
                                   Q_ARG(int, 0));
     };
 
-    // Connect remote watcher to save change tokens to database
-    QObject::connect(&remoteWatcher, &RemoteChangeWatcher::changeTokenUpdated, &syncDatabase,
+    // Connect runtime to save change tokens to database
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::changeTokenUpdated, &syncDatabase,
                      &SyncDatabase::setChangeToken);
 
     // Initialize shared UI status coordination and UI surfaces.
@@ -533,8 +533,9 @@ int main(int argc, char* argv[]) {
                          &statusCoordinator, &UiStatusCoordinator::updatePendingActions);
         QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorStateChanged,
                          &statusCoordinator, &UiStatusCoordinator::updateMirrorProcessorState);
-        statusCoordinator.updatePendingActions(syncActionQueue.count());
-        statusCoordinator.updateMirrorProcessorState(changeProcessor.state());
+        statusCoordinator.updatePendingActions(mirrorSyncRuntime.pendingActionCount());
+        statusCoordinator.updateMirrorProcessorState(mirrorSyncRuntime.processorState());
+        statusCoordinator.setHasConflicts(mirrorSyncRuntime.unresolvedConflictCount() > 0);
     }
 
     SystemTrayManager trayManager(&authManager, &pauseController, &statusCoordinator);
@@ -570,40 +571,40 @@ int main(int argc, char* argv[]) {
 
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
-    MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &syncActionQueue : nullptr,
+    MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &mirrorSyncRuntime : nullptr,
                           &pauseController, &statusCoordinator, &notificationManager);
 
     if (mirrorEnabled) {
-        QObject::connect(&changeProcessor, &ChangeProcessor::error, &mainWindow,
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorError, &mainWindow,
                          [&mainWindow](const QString& error) {
                              mainWindow.addRecentActivity("Error: " + error);
                          });
-        QObject::connect(&changeProcessor, &ChangeProcessor::conflictDetected, &mainWindow,
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &mainWindow,
                          [&mainWindow](const ConflictInfo& info) {
                              mainWindow.addRecentActivity("Conflict: " + info.localPath);
                          });
-        QObject::connect(&changeProcessor, &ChangeProcessor::conflictResolved, &mainWindow,
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictResolved, &mainWindow,
                          [&mainWindow](const QString& localPath, ConflictResolutionStrategy) {
                              mainWindow.addRecentActivity("Conflict resolved: " + localPath);
                          });
-        QObject::connect(&changeProcessor, &ChangeProcessor::changeProcessed, &mainWindow,
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::changeProcessed, &mainWindow,
                          [&mainWindow](const QString& localPath) {
                              mainWindow.addRecentActivity("Processed: " + localPath);
                          });
         QObject::connect(
-            &fullSync, &FullSync::progressUpdated, &mainWindow,
+            &mirrorSyncRuntime, &MirrorSyncRuntime::fullSyncProgressUpdated, &mainWindow,
             [&mainWindow](const QString& phase, int current, int total) {
                 Q_UNUSED(total);
                 mainWindow.addRecentActivity(QString("%1 (%2 files)").arg(phase).arg(current));
             });
-        QObject::connect(&fullSync, &FullSync::completed, &mainWindow,
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::fullSyncCompleted, &mainWindow,
                          [&mainWindow](int localCount, int remoteCount) {
                              mainWindow.addRecentActivity(
                                  QString("Full sync complete: %1 local, %2 remote files")
                                      .arg(localCount)
                                      .arg(remoteCount));
                          });
-        QObject::connect(&fullSync, &FullSync::error, &mainWindow,
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::fullSyncError, &mainWindow,
                          [&mainWindow](const QString& error) {
                              mainWindow.addRecentActivity("Full sync error: " + error);
                          });
@@ -937,18 +938,18 @@ int main(int argc, char* argv[]) {
                      &UiStatusCoordinator::updateStorageInfo);
 
     // Connect sync action thread status updates to shared UI status coordinator
-    QObject::connect(&syncActionThread, &SyncActionThread::actionCompleted, &statusCoordinator,
-                     [&statusCoordinator](const SyncActionItem&) {
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionCompleted,
+                     &statusCoordinator, [&statusCoordinator](const SyncActionItem&) {
                          statusCoordinator.updateMirrorStatus("Syncing...");
                      });
-    QObject::connect(&syncActionThread, &SyncActionThread::actionFailed, &statusCoordinator,
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionFailed, &statusCoordinator,
                      [&statusCoordinator](const SyncActionItem&, const QString&) {
                          statusCoordinator.updateMirrorStatus("Sync error");
                      });
 
     // Connect full sync state changes to shared UI status coordinator
-    QObject::connect(&fullSync, &FullSync::stateChanged, &statusCoordinator,
-                     [&statusCoordinator](FullSync::State state) {
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::fullSyncStateChanged,
+                     &statusCoordinator, [&statusCoordinator](FullSync::State state) {
                          switch (state) {
                              case FullSync::State::ScanningLocal:
                                  statusCoordinator.updateMirrorStatus("Scanning local files...");
@@ -1073,13 +1074,13 @@ int main(int argc, char* argv[]) {
                      &QTimer::stop);
 
     // Connect change processor errors to notification manager
-    QObject::connect(&changeProcessor, &ChangeProcessor::error, &notificationManager,
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorError, &notificationManager,
                      [&notificationManager](const QString& error) {
                          notificationManager.showError("Sync Error", error);
                      });
 
     // Connect conflict detection to notification
-    QObject::connect(&changeProcessor, &ChangeProcessor::conflictDetected, &notificationManager,
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &notificationManager,
                      [&notificationManager](const ConflictInfo& info) {
                          QString fileName = QFileInfo(info.localPath).fileName();
                          notificationManager.showConflict(fileName);
@@ -1087,51 +1088,50 @@ int main(int argc, char* argv[]) {
 
     // MIS-01: Wire ConflictDialog for interactive conflict resolution
     ConflictDialog conflictDialog(&mainWindow);
-    QObject::connect(&changeProcessor, &ChangeProcessor::conflictDetected, &conflictDialog,
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &conflictDialog,
                      [&conflictDialog](const ConflictInfo& info) {
                          conflictDialog.addConflict(info);
                          conflictDialog.show();
                          conflictDialog.raise();
                          conflictDialog.activateWindow();
                      });
-    QObject::connect(&conflictDialog, &ConflictDialog::conflictResolved, &changeProcessor,
-                     &ChangeProcessor::resolveConflict);
+    QObject::connect(&conflictDialog, &ConflictDialog::conflictResolved, &mirrorSyncRuntime,
+                     &MirrorSyncRuntime::resolveConflict);
 
     // Connect conflict detection to shared UI status coordinator for warning icon state
     QObject::connect(
-        &changeProcessor, &ChangeProcessor::conflictDetected, &statusCoordinator,
+        &mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &statusCoordinator,
         [&statusCoordinator](const ConflictInfo&) { statusCoordinator.setHasConflicts(true); });
     QObject::connect(
-        &changeProcessor, &ChangeProcessor::conflictResolved, &statusCoordinator,
-        [&statusCoordinator, &changeProcessor](const QString&, ConflictResolutionStrategy) {
+        &mirrorSyncRuntime, &MirrorSyncRuntime::conflictResolved, &statusCoordinator,
+        [&statusCoordinator, &mirrorSyncRuntime](const QString&, ConflictResolutionStrategy) {
             // LOG-03: Only clear conflict icon when all conflicts are resolved
-            if (changeProcessor.unresolvedConflictCount() == 0) {
+            if (mirrorSyncRuntime.unresolvedConflictCount() == 0) {
                 statusCoordinator.setHasConflicts(false);
             }
         });
 
     // Connect sync action thread errors to notification manager
-    QObject::connect(&syncActionThread, &SyncActionThread::error, &notificationManager,
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionError, &notificationManager,
                      [&notificationManager](const QString& error) {
                          notificationManager.showError("Sync Action Error", error);
                      });
 
     // Connect progress bar to sync action thread
     QObject::connect(
-        &syncActionThread, &SyncActionThread::actionProgress, &mainWindow,
+        &mirrorSyncRuntime, &MirrorSyncRuntime::syncActionProgress, &mainWindow,
         [&mainWindow](const SyncActionItem&, qint64 bytesProcessed, qint64 bytesTotal) {
             mainWindow.updateSyncProgress(bytesProcessed, bytesTotal);
         });
 
-    QObject::connect(&syncActionThread, &SyncActionThread::tokenRefreshRequested, &authManager,
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::tokenRefreshRequested, &authManager,
                      &GoogleAuthManager::refreshTokens);
 
     bool refreshInFlight = false;
     qint64 lastRefreshAttemptMs = 0;
     constexpr qint64 AUTH_REFRESH_COOLDOWN_MS = 10000;
 
-    QObject::connect(
-        &driveClient, &GoogleDriveClient::authenticationFailure, &app,
+    const auto handleDriveAuthenticationFailure =
         [&authManager, &refreshInFlight, &lastRefreshAttemptMs](
             const QString& operation, int httpStatus, const QString& errorMsg) {
             const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
@@ -1152,7 +1152,12 @@ int main(int argc, char* argv[]) {
             refreshInFlight = true;
             lastRefreshAttemptMs = nowMs;
             authManager.refreshTokens();
-        });
+        };
+
+    QObject::connect(&driveClient, &GoogleDriveClient::authenticationFailure, &app,
+                     handleDriveAuthenticationFailure);
+    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::authenticationFailure, &app,
+                     handleDriveAuthenticationFailure);
 
     QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &app,
                      [&refreshInFlight, &wakeRefreshNotificationGate]() {
@@ -1237,22 +1242,25 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&fuseDriver, fuseEnabled]() {
-        // Warn the user that we're about to block and upload any pending
-        // dirty files before quitting, so they don't force-kill the process.
-        if (fuseEnabled && fuseDriver.isMounted() && fuseDriver.fileCache()) {
-            int dirtyCount = fuseDriver.fileCache()->getDirtyFiles().size();
-            if (dirtyCount > 0) {
-                QMessageBox::information(
-                    nullptr, QStringLiteral("Uploading pending files"),
-                    QStringLiteral("Uploading %1 unsaved file(s) to Google Drive "
-                                   "before quitting.\n\n"
-                                   "Please wait — do not force-quit.")
-                        .arg(dirtyCount));
-            }
-        }
-        stopFuseComponent(&fuseDriver);
-    });
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app,
+                     [&fuseDriver, &mirrorSyncRuntime, fuseEnabled]() {
+                         mirrorSyncRuntime.shutdown();
+
+                         // Warn the user that we're about to block and upload any pending
+                         // dirty files before quitting, so they don't force-kill the process.
+                         if (fuseEnabled && fuseDriver.isMounted() && fuseDriver.fileCache()) {
+                             int dirtyCount = fuseDriver.fileCache()->getDirtyFiles().size();
+                             if (dirtyCount > 0) {
+                                 QMessageBox::information(
+                                     nullptr, QStringLiteral("Uploading pending files"),
+                                     QStringLiteral("Uploading %1 unsaved file(s) to Google Drive "
+                                                    "before quitting.\n\n"
+                                                    "Please wait — do not force-quit.")
+                                         .arg(dirtyCount));
+                             }
+                         }
+                         stopFuseComponent(&fuseDriver);
+                     });
 
     // Show main window on first run or if not logged in
     if (!tokenStorage.hasValidTokens()) {

@@ -22,19 +22,20 @@
 #include "UiStatusCoordinator.h"
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
+#include "sync/MirrorSyncRuntime.h"
 #include "sync/RuntimePauseController.h"
-#include "sync/SyncActionQueue.h"
 #include "utils/NotificationManager.h"
 #include "utils/ThemeHelper.h"
 
 MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
-                       SyncActionQueue* syncActionQueue, RuntimePauseController* pauseController,
+                       MirrorSyncRuntime* mirrorSyncRuntime,
+                       RuntimePauseController* pauseController,
                        UiStatusCoordinator* statusCoordinator,
                        NotificationManager* notificationManager, QWidget* parent)
     : QMainWindow(parent),
       m_authManager(authManager),
       m_driveClient(driveClient),
-      m_syncActionQueue(syncActionQueue),
+      m_mirrorSyncRuntime(mirrorSyncRuntime),
       m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_notificationManager(notificationManager),
@@ -285,9 +286,10 @@ void MainWindow::connectSignals() {
             [this](const QString& error) { addRecentActivity("Token refresh error: " + error); });
     }
 
-    // SyncActionQueue and ChangeProcessor connections
-    if (m_syncActionQueue) {
-        connect(m_syncActionQueue, &SyncActionQueue::itemEnqueued, this,
+    if (m_mirrorSyncRuntime) {
+        connect(m_mirrorSyncRuntime, &MirrorSyncRuntime::pendingActionsChanged, this,
+                &MainWindow::updatePendingActions);
+        connect(m_mirrorSyncRuntime, &MirrorSyncRuntime::syncActionQueued, this,
                 [this](const SyncActionItem& item) {
                     switch (item.actionType) {
                         case SyncActionType::Upload:
@@ -312,12 +314,10 @@ void MainWindow::connectSignals() {
                             addRecentActivity("Queued rename: " + item.localPath);
                             break;
                     }
-                    if (m_syncActionQueue) {
-                        updatePendingActions(m_syncActionQueue->count());
+                    if (m_mirrorSyncRuntime) {
+                        updatePendingActions(m_mirrorSyncRuntime->pendingActionCount());
                     }
                 });
-        connect(m_syncActionQueue, &SyncActionQueue::queueEmpty, this,
-                [this]() { updatePendingActions(0); });
     }
 }
 

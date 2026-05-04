@@ -12,6 +12,7 @@
 #include <QSqlQuery>
 #include <QSqlRecord>
 #include <QStandardPaths>
+#include <QThread>
 #include <atomic>
 #include <stdexcept>
 
@@ -28,7 +29,7 @@ bool tableExists(const QSqlDatabase& db, const QString& tableName) {
     return db.tables().contains(tableName, Qt::CaseInsensitive);
 }
 
-bool tableHasColumn(QSqlDatabase& db, const QString& tableName, const QString& columnName) {
+bool tableHasColumn(QSqlDatabase db, const QString& tableName, const QString& columnName) {
     QSqlQuery query(db);
     if (!query.exec(QString("PRAGMA table_info(%1)").arg(tableName))) {
         return false;
@@ -41,7 +42,7 @@ bool tableHasColumn(QSqlDatabase& db, const QString& tableName, const QString& c
     return false;
 }
 
-bool addColumnIfMissing(QSqlDatabase& db, const QString& tableName, const QString& columnDef) {
+bool addColumnIfMissing(QSqlDatabase db, const QString& tableName, const QString& columnDef) {
     const QString columnName = columnDef.section(' ', 0, 0);
     if (tableHasColumn(db, tableName, columnName)) {
         return true;
@@ -94,9 +95,41 @@ FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
         QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
     return metadata;
 }
+
+quintptr currentThreadKey() {
+    return reinterpret_cast<quintptr>(QThread::currentThreadId());
+}
 }  // namespace
 
-SyncDatabase::SyncDatabase(QObject* parent) : QObject(parent), m_concurrentAccessCount(0) {
+SyncDatabaseConnectionHandle::SyncDatabaseConnectionHandle(const SyncDatabase* owner)
+    : m_owner(owner) {}
+
+QSqlDatabase SyncDatabaseConnectionHandle::database() const {
+    return m_owner ? m_owner->databaseForCurrentThread() : QSqlDatabase();
+}
+
+SyncDatabaseConnectionHandle::operator QSqlDatabase() const {
+    return database();
+}
+
+bool SyncDatabaseConnectionHandle::isOpen() const {
+    return database().isOpen();
+}
+
+QString SyncDatabaseConnectionHandle::connectionName() const {
+    return database().connectionName();
+}
+
+QStringList SyncDatabaseConnectionHandle::tables() const {
+    return database().tables();
+}
+
+QSqlError SyncDatabaseConnectionHandle::lastError() const {
+    return database().lastError();
+}
+
+SyncDatabase::SyncDatabase(QObject* parent)
+    : QObject(parent), m_db(this), m_concurrentAccessCount(0) {
     // Set database path
     QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     m_dbPath = dataPath + "/" + DB_NAME;
@@ -107,23 +140,37 @@ SyncDatabase::~SyncDatabase() {
 }
 
 bool SyncDatabase::openConnectionUnlocked() {
-    if (m_db.isOpen()) {
+    const quintptr threadKey = currentThreadKey();
+    const QString connectionName = ensureConnectionNameForThreadUnlocked(threadKey);
+
+    QSqlDatabase db;
+    if (QSqlDatabase::contains(connectionName)) {
+        db = QSqlDatabase::database(connectionName, false);
+    } else if (!m_primaryConnectionName.isEmpty() && connectionName != m_primaryConnectionName &&
+               QSqlDatabase::contains(m_primaryConnectionName)) {
+        db = QSqlDatabase::cloneDatabase(m_primaryConnectionName, connectionName);
+    } else {
+        db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
+    }
+
+    if (db.isOpen()) {
         return true;
     }
 
-    const QString connectionName =
-        QStringLiteral("sync_connection_%1").arg(s_connectionCounter.fetch_add(1));
-    m_db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
-    m_db.setDatabaseName(m_dbPath);
+    db.setDatabaseName(m_dbPath);
 
-    if (!m_db.open()) {
-        logError("initialize", m_db.lastError().text());
+    if (!db.open()) {
+        logError("initialize", db.lastError().text());
         return false;
     }
 
-    QSqlQuery walQuery(m_db);
+    QSqlQuery walQuery(db);
     if (!walQuery.exec("PRAGMA journal_mode=WAL")) {
         qWarning() << "Failed to enable WAL mode:" << walQuery.lastError().text();
+    }
+
+    if (m_primaryConnectionName.isEmpty()) {
+        m_primaryConnectionName = connectionName;
     }
 
     return true;
@@ -132,6 +179,7 @@ bool SyncDatabase::openConnectionUnlocked() {
 bool SyncDatabase::initialize() {
     QMutexLocker locker(&m_mutex);
     m_lastSchemaCompatibility = SchemaCompatibility::Current;
+    m_connectionsReady = false;
 
     // Ensure data directory exists
     QDir dir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
@@ -188,6 +236,7 @@ bool SyncDatabase::initialize() {
     }
 
     m_lastSchemaCompatibility = SchemaCompatibility::Current;
+    m_connectionsReady = true;
 
     qInfo() << "Sync database initialized at:" << m_dbPath;
     return true;
@@ -207,21 +256,101 @@ void SyncDatabase::close() {
     closeUnlocked();
 }
 
-void SyncDatabase::closeUnlocked() {
-    if (m_db.isOpen()) {
-        m_db.close();
+void SyncDatabase::closeCurrentThreadConnection() {
+    QMutexLocker locker(&m_mutex);
+
+    const quintptr threadKey = currentThreadKey();
+    const QString connectionName = connectionNameForThreadUnlocked(threadKey);
+    if (connectionName.isEmpty()) {
+        return;
     }
 
-    const QString connectionName = m_db.connectionName();
-    m_db = QSqlDatabase();
-    if (!connectionName.isEmpty()) {
-        QSqlDatabase::removeDatabase(connectionName);
+    m_connectionNamesByThread.remove(threadKey);
+    if (m_primaryConnectionName == connectionName) {
+        m_primaryConnectionName.clear();
     }
+
+    closeConnectionByNameUnlocked(connectionName);
+}
+
+void SyncDatabase::closeUnlocked() {
+    m_connectionsReady = false;
+    closeAllConnectionsUnlocked();
 }
 
 bool SyncDatabase::isOpen() const {
     QMutexLocker locker(&m_mutex);
-    return m_db.isOpen();
+    return databaseForCurrentThreadUnlocked().isOpen();
+}
+
+QSqlDatabase SyncDatabase::databaseForCurrentThread() const {
+    QMutexLocker locker(&m_mutex);
+    QSqlDatabase db = databaseForCurrentThreadUnlocked();
+    if ((!db.isValid() || !db.isOpen()) && m_connectionsReady) {
+        if (const_cast<SyncDatabase*>(this)->openConnectionUnlocked()) {
+            db = databaseForCurrentThreadUnlocked();
+        }
+    }
+
+    return db;
+}
+
+QSqlDatabase SyncDatabase::databaseForCurrentThreadUnlocked() const {
+    const QString connectionName = connectionNameForThreadUnlocked(currentThreadKey());
+    if (connectionName.isEmpty() || !QSqlDatabase::contains(connectionName)) {
+        return QSqlDatabase();
+    }
+
+    return QSqlDatabase::database(connectionName, false);
+}
+
+void SyncDatabase::closeConnectionByNameUnlocked(const QString& connectionName) {
+    if (connectionName.isEmpty() || !QSqlDatabase::contains(connectionName)) {
+        return;
+    }
+
+    if (connectionName == connectionNameForThreadUnlocked(currentThreadKey())) {
+        QSqlDatabase db = QSqlDatabase::database(connectionName, false);
+        if (db.isValid() && db.isOpen()) {
+            db.close();
+        }
+    }
+
+    QSqlDatabase::removeDatabase(connectionName);
+}
+
+void SyncDatabase::closeAllConnectionsUnlocked() {
+    const QString currentThreadConnectionName = connectionNameForThreadUnlocked(currentThreadKey());
+    const QList<QString> connectionNames = m_connectionNamesByThread.values();
+    m_connectionNamesByThread.clear();
+    m_primaryConnectionName.clear();
+
+    for (const QString& connectionName : connectionNames) {
+        if (connectionName != currentThreadConnectionName &&
+            QSqlDatabase::contains(connectionName)) {
+            QSqlDatabase::removeDatabase(connectionName);
+            continue;
+        }
+
+        closeConnectionByNameUnlocked(connectionName);
+    }
+}
+
+QString SyncDatabase::connectionNameForThreadUnlocked(quintptr threadKey) const {
+    return m_connectionNamesByThread.value(threadKey);
+}
+
+QString SyncDatabase::ensureConnectionNameForThreadUnlocked(quintptr threadKey) {
+    const auto existing = m_connectionNamesByThread.constFind(threadKey);
+    if (existing != m_connectionNamesByThread.cend()) {
+        return existing.value();
+    }
+
+    const QString connectionName = QStringLiteral("sync_connection_%1_%2")
+                                       .arg(threadKey)
+                                       .arg(s_connectionCounter.fetch_add(1));
+    m_connectionNamesByThread.insert(threadKey, connectionName);
+    return connectionName;
 }
 
 SyncDatabase::SchemaCompatibility SyncDatabase::lastSchemaCompatibility() const {
@@ -369,6 +498,7 @@ bool SyncDatabase::recreateDatabaseUnlocked() {
     }
 
     m_lastSchemaCompatibility = SchemaCompatibility::Current;
+    m_connectionsReady = true;
     return true;
 }
 

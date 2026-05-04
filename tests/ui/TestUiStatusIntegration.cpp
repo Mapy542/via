@@ -58,8 +58,7 @@ void TestUiStatusIntegration::init() {
     m_pauseController = new RuntimePauseController();
     m_coordinator = new UiStatusCoordinator(nullptr, true, m_pauseController);
     m_tray = new SystemTrayManager(nullptr, m_pauseController, m_coordinator);
-    m_window = new MainWindow(nullptr, nullptr, m_syncActionQueue, m_pauseController, m_coordinator,
-                              nullptr);
+    m_window = new MainWindow(nullptr, nullptr, nullptr, m_pauseController, m_coordinator, nullptr);
 }
 
 void TestUiStatusIntegration::cleanup() {
@@ -85,15 +84,21 @@ void TestUiStatusIntegration::cleanup() {
     m_changeQueue = nullptr;
 }
 
-QString TestUiStatusIntegration::traySummary() const { return m_tray->m_statusAction->text(); }
+QString TestUiStatusIntegration::traySummary() const {
+    return m_tray->m_statusAction->text();
+}
 
 QImage TestUiStatusIntegration::trayIconImage(int size) const {
     return m_tray->trayIcon()->icon().pixmap(size, size).toImage();
 }
 
-QString TestUiStatusIntegration::trayTooltip() const { return m_tray->trayIcon()->toolTip(); }
+QString TestUiStatusIntegration::trayTooltip() const {
+    return m_tray->trayIcon()->toolTip();
+}
 
-QString TestUiStatusIntegration::windowSummary() const { return m_window->m_statusLabel->text(); }
+QString TestUiStatusIntegration::windowSummary() const {
+    return m_window->m_statusLabel->text();
+}
 
 void TestUiStatusIntegration::testFuseUploadingStatusPropagatesToTrayAndWindow() {
     m_changeProcessor->start();
