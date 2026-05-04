@@ -6,9 +6,6 @@
  * a Google Drive desktop client for Linux.
  */
 
-// TODO: Actions aarm runner stalls, out of resources, fails to build.
-//  Investigate other options such as docker on x86 or qemu emulation.
-
 #include <QApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -455,7 +452,8 @@ int main(int argc, char* argv[]) {
         &driveClient, &GoogleDriveClient::errorDetailed, &notificationManager,
         [&notificationManager](const QString& operation, const QString& errorMsg, int httpStatus,
                                const QString& /*fileId*/, const QString& /*localPath*/) {
-            if (!operation.startsWith(QLatin1String("exportFile"))) return;
+            if (!operation.startsWith(QLatin1String("exportFile")))
+                return;
             const QString detail = nativeDocExportFailureMessage(errorMsg, httpStatus);
             notificationManager.showPersistentError(QStringLiteral("Export Failed"), detail);
         });
