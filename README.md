@@ -10,7 +10,7 @@ Not affiliated with Google or Google Drive.
 - **Bidirectional Synchronization**: Keep your local files in sync with Google Drive automatically
 - **Virtual File System (FUSE)**: Access Google Drive files as if they were on your local disk without allocating local storage
 - **Mirror Mode**: Optionally keep a full local copy of your Google Drive for offline access and performant read/write operations
-- **On-Demand Access**: Files are downloaded only when you need them
+- **On-Demand Access**: Files are downloaded only when you need them in Fuse sync
 - **Offline Access**: Cached FUSE files are available offline and sync back when you're online, and mirror mode allows full local copies
 - **Conflict Resolution**: Automatic detection and handling of file conflicts
 - **Native Filesystem Integration**: Works with file system for access in all applications or cli
@@ -25,12 +25,16 @@ Not affiliated with Google or Google Drive.
 3. Make it executable: `chmod +x Via-*.AppImage`
 4. Run: `./Via-*.AppImage` (Will install .desktop file)
 
+The appIamge will automatically prompt and then update itself to the latest release on this repo.
+
 ### Debian Package
 
 When release packaging is enabled for your target version, Releases also include `.deb` assets for `amd64` and `arm64`.
 
 1. Download the matching `via_<version>-1_<arch>.deb` asset
 2. Install it with `sudo apt install ./via_<version>-1_<arch>.deb`
+
+Note the debian package does not automatically update to the latest since it's not registered upstream with Debian repos.
 
 ### Building from Source
 
@@ -61,7 +65,7 @@ cmake --build build --parallel
 
 #### Building a Local Debian Package
 
-Replace any remaining `MAINTAINER` placeholders in the Debian metadata before the first packaging build. The packaging entrypoint stops immediately until those placeholders are replaced.
+There is a 1 click script to build the debian package locally:
 
 ```bash
 sudo apt-get install build-essential cmake debhelper desktop-file-utils \
@@ -73,11 +77,9 @@ sudo apt-get install build-essential cmake debhelper desktop-file-utils \
 
 Artifacts are written to `build-deb/artifacts/` as `.deb`, `.changes`, and `.buildinfo` files.
 
-Release builds also derive the Debian changelog entry and GitHub release description from non-merge commit subjects since the previous `v*` tag.
-
 ## Configuration
 
-### Google API Credentials
+### Google API Credentials (BYOK)
 
 To use Via, you need to set up Google API credentials:
 
@@ -88,16 +90,19 @@ To use Via, you need to set up Google API credentials:
 5. Download the credentials JSON file
 6. In Via settings, enter your Client ID and Client Secret
 
+Since the software runs on your client, there is no way to distribute a common key securely. You bring your own key for this program to work.
+(For quick testing you may be able to borrow the API keys stored in Gnome G-Drive connector, or KIO-GDrive)
+
 ### Settings
 
 Access settings through the main window or system tray menu:
 
-- **Sync Folder**: Choose where to sync your Google Drive files
-- **Selective Sync**: Choose which folders to sync
-- **Bandwidth Limits**: Control upload/download speeds
-- **FUSE Mount**: Enable virtual file system access
-- **Notifications**: Configure desktop notifications
-- **Startup**: Set to start on system login
+- **API Settings**: Supply client key and secret.
+- **Mirror Sync**: Control Mirror sync settings
+- **FUSE Sync**: Enable virtual file system access
+- **MISC**: Configure desktop notifications, theme, startup, etc
+
+  Note you may run a mirror sync folder and a fuse sync folder simultanously, or just 1 of the methods. Only 1 account is supported at a time.
 
 ## Other Information
 
