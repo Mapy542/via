@@ -27,14 +27,10 @@
 
 namespace {
 bool isActionOwnedDriveOperation(const QString& operation) {
-    return operation == QLatin1String("createFolder") ||
-           operation == QLatin1String("updateFile") ||
-           operation == QLatin1String("uploadFile") ||
-           operation == QLatin1String("downloadFile") ||
-           operation == QLatin1String("deleteFile") ||
-           operation == QLatin1String("trashFile") ||
-           operation == QLatin1String("moveFile") ||
-           operation == QLatin1String("renameFile");
+    return operation == QLatin1String("createFolder") || operation == QLatin1String("updateFile") ||
+           operation == QLatin1String("uploadFile") || operation == QLatin1String("downloadFile") ||
+           operation == QLatin1String("deleteFile") || operation == QLatin1String("trashFile") ||
+           operation == QLatin1String("moveFile") || operation == QLatin1String("renameFile");
 }
 }  // namespace
 
@@ -84,7 +80,9 @@ SyncActionThread::SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* d
     }
 }
 
-SyncActionThread::~SyncActionThread() { stop(); }
+SyncActionThread::~SyncActionThread() {
+    stop();
+}
 
 SyncActionThread::State SyncActionThread::state() const {
     QMutexLocker locker(&m_stateMutex);
@@ -96,7 +94,9 @@ void SyncActionThread::setSyncFolder(const QString& path) {
     qDebug() << "SyncActionThread sync folder set to:" << path;
 }
 
-QString SyncActionThread::syncFolder() const { return m_syncFolder; }
+QString SyncActionThread::syncFolder() const {
+    return m_syncFolder;
+}
 
 void SyncActionThread::start() {
     bool shouldSchedule = false;
