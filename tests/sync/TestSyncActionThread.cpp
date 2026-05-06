@@ -265,7 +265,9 @@ class TestSyncActionThread : public QObject {
     void testUploadFolder_RecoversFromStaleParentId();
     void testUploadFile_DeferredParentDeduplicatesPendingParentCreate();
     void testUploadFile_RetriesAfterAuthFailure();
+    void testUnmatchedWatcherFailureDoesNotEmitUserError();
     void testUnmatchedAuthFailureDoesNotEmitUserError();
+    void testWatcherLegacyErrorDoesNotFailUnrelatedAction();
     void testUploadFile_RetriesTransientFailure();
     void testUploadFile_StopsAfterRetryBudget();
     void testDownloadFile();
@@ -567,6 +569,17 @@ void TestSyncActionThread::testUploadFile_RetriesAfterAuthFailure() {
     QCOMPARE(m_drive->uploadCallCount(), 2);
 }
 
+void TestSyncActionThread::testUnmatchedWatcherFailureDoesNotEmitUserError() {
+    QSignalSpy errorSpy(m_thread, &SyncActionThread::error);
+
+    m_thread->onDriveErrorDetailed("listChanges", "HTTP/2 GOAWAY stream error", 0, QString(),
+                                   QString());
+
+    QCoreApplication::processEvents();
+
+    QCOMPARE(errorSpy.count(), 0);
+}
+
 void TestSyncActionThread::testUnmatchedAuthFailureDoesNotEmitUserError() {
     QSignalSpy errorSpy(m_thread, &SyncActionThread::error);
     QSignalSpy refreshSpy(m_thread, &SyncActionThread::tokenRefreshRequested);
@@ -579,6 +592,27 @@ void TestSyncActionThread::testUnmatchedAuthFailureDoesNotEmitUserError() {
 
     QCOMPARE(errorSpy.count(), 0);
     QCOMPARE(refreshSpy.count(), 0);
+}
+
+void TestSyncActionThread::testWatcherLegacyErrorDoesNotFailUnrelatedAction() {
+    SyncActionItem action;
+    action.actionType = SyncActionType::Upload;
+    action.localPath = "upload/inflight.txt";
+
+    const QString actionKey = m_thread->actionKeyForLocalPath(action.localPath);
+    QVERIFY(!actionKey.isEmpty());
+    m_thread->m_driveActionsInProgress.insert(actionKey, action);
+
+    QSignalSpy errorSpy(m_thread, &SyncActionThread::error);
+    QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
+
+    m_thread->onDriveError("listChanges", "HTTP/2 stream 1 was not closed cleanly");
+
+    QCoreApplication::processEvents();
+
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(m_thread->m_driveActionsInProgress.contains(actionKey));
 }
 
 void TestSyncActionThread::testUploadFile_RetriesTransientFailure() {

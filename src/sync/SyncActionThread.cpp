@@ -25,6 +25,19 @@
 #include "utils/FileInUseChecker.h"
 #include "utils/PathUtils.h"
 
+namespace {
+bool isActionOwnedDriveOperation(const QString& operation) {
+    return operation == QLatin1String("createFolder") ||
+           operation == QLatin1String("updateFile") ||
+           operation == QLatin1String("uploadFile") ||
+           operation == QLatin1String("downloadFile") ||
+           operation == QLatin1String("deleteFile") ||
+           operation == QLatin1String("trashFile") ||
+           operation == QLatin1String("moveFile") ||
+           operation == QLatin1String("renameFile");
+}
+}  // namespace
+
 SyncActionThread::SyncActionThread(SyncActionQueue* actionQueue, SyncDatabase* database,
                                    GoogleDriveClient* driveClient, ChangeProcessor* changeProcessor,
                                    LocalChangeWatcher* localWatcher, QObject* parent)
@@ -1397,6 +1410,12 @@ void SyncActionThread::onFolderCreatedDetailed(const DriveFile& folder, const QS
 }
 
 void SyncActionThread::onDriveError(const QString& operation, const QString& errorMsg) {
+    if (!isActionOwnedDriveOperation(operation)) {
+        qWarning() << "Ignoring background Drive error in SyncActionThread:" << operation
+                   << errorMsg;
+        return;
+    }
+
     // The legacy error signal lacks fileId/localPath, so we cannot reliably
     // match it to a specific in-progress action.  If there is exactly one
     // action in flight we can assume this error belongs to it and fail it;
@@ -1456,6 +1475,12 @@ void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QStr
         if (isAuthFailure) {
             qInfo() << "Suppressing unmatched auth failure in SyncActionThread:" << operation
                     << errorMsg;
+            return;
+        }
+
+        if (!isActionOwnedDriveOperation(operation)) {
+            qWarning() << "Ignoring unmatched background Drive error in SyncActionThread:"
+                       << operation << errorMsg;
             return;
         }
 
