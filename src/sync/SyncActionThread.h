@@ -299,6 +299,13 @@ class SyncActionThread : public QObject {
     QString computeLocalFileMd5(const QString& localPath) const;
 
     /**
+     * @brief Convert a native-doc export-limit failure into a browser shortcut.
+     * @param item The in-flight native-doc download action
+     * @return true if the fallback was handled locally
+     */
+    bool handleNativeDocExportLimitFallback(const SyncActionItem& item);
+
+    /**
      * @brief Mark action as complete, unmark file in operation, continue processing
      * @param item The completed action item
      */

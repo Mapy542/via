@@ -18,6 +18,52 @@
 #include "SyncDatabase.h"
 #include "SyncSettings.h"
 #include "api/GoogleDriveClient.h"
+#include "utils/NativeDocSupport.h"
+
+namespace {
+
+struct NativeDocChangeContext {
+    NativeDocState state;
+    NativeDocRepresentation representation;
+
+    bool isNativeDoc() const {
+        return state.isValid() && isNativeDocMimeType(state.remoteMimeType);
+    }
+    bool isVisible() const { return isNativeDoc() && representation.visible; }
+};
+
+NativeDocChangeContext resolveNativeDocChangeContext(const SyncDatabase* database,
+                                                     const SyncSettings& settings,
+                                                     const QString& localPath,
+                                                     const QString& fileId) {
+    NativeDocChangeContext context;
+    if (!database) {
+        return context;
+    }
+
+    QString resolvedFileId = fileId;
+    if (resolvedFileId.isEmpty() && !localPath.isEmpty()) {
+        resolvedFileId = database->getFileId(localPath);
+    }
+    if (resolvedFileId.isEmpty()) {
+        return context;
+    }
+
+    context.state = database->getNativeDocState(resolvedFileId);
+    if (context.state.fileId.isEmpty()) {
+        context.state.fileId = resolvedFileId;
+    }
+    if (!isNativeDocMimeType(context.state.remoteMimeType)) {
+        return context;
+    }
+
+    context.representation = effectiveNativeDocRepresentation(
+        context.state.remoteMimeType, context.state.nativeDocModeOverride,
+        nativeDocModeFromString(settings.nativeDocMode));
+    return context;
+}
+
+}  // namespace
 
 // Static registration for QMetaType
 static const int conflictInfoTypeId = qRegisterMetaType<ConflictInfo>("ConflictInfo");
@@ -47,7 +93,9 @@ ChangeProcessor::ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* sync
     }
 }
 
-ChangeProcessor::~ChangeProcessor() { stop(); }
+ChangeProcessor::~ChangeProcessor() {
+    stop();
+}
 
 ChangeProcessor::State ChangeProcessor::state() const {
     QMutexLocker locker(&m_stateMutex);
@@ -68,9 +116,13 @@ void ChangeProcessor::setSyncFolder(const QString& path) {
     qDebug() << "ChangeProcessor sync folder set to:" << path;
 }
 
-QString ChangeProcessor::syncFolder() const { return m_syncFolder; }
+QString ChangeProcessor::syncFolder() const {
+    return m_syncFolder;
+}
 
-void ChangeProcessor::onSyncFolderChanged(const QString& path) { setSyncFolder(path); }
+void ChangeProcessor::onSyncFolderChanged(const QString& path) {
+    setSyncFolder(path);
+}
 
 QList<ConflictInfo> ChangeProcessor::unresolvedConflicts() const {
     QMutexLocker locker(&m_conflictsMutex);
@@ -932,6 +984,8 @@ void ChangeProcessor::resolveConflictInternal(const ConflictInfo& conflict,
 void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
     const bool remoteReadOnly = m_cachedSettings.isRemoteReadOnly();
     const bool remoteNoDelete = m_cachedSettings.isRemoteNoDelete();
+    const NativeDocChangeContext nativeDocContext = resolveNativeDocChangeContext(
+        m_database, m_cachedSettings, change.localPath, change.fileId);
 
     if ((change.changeType == ChangeType::Create || change.changeType == ChangeType::Modify) &&
         !change.isDirectory) {
@@ -951,6 +1005,40 @@ void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
             !change.remoteMd5.isEmpty() && change.localContentHash == change.remoteMd5) {
             qInfo() << "Skipping local change - remote content already matches local hash:"
                     << change.localPath;
+            return;
+        }
+
+        if (change.origin == ChangeOrigin::Local && nativeDocContext.isVisible()) {
+            const QString conflictPath = generateConflictCopyPath(change.localPath);
+
+            SyncActionItem moveAction;
+            moveAction.actionType = SyncActionType::MoveLocal;
+            moveAction.localPath = change.localPath;
+            moveAction.fileId = nativeDocContext.state.fileId;
+            moveAction.modifiedTime = change.modifiedTime;
+            moveAction.moveDestination = conflictPath;
+            moveAction.localContentHash = change.localContentHash;
+            moveAction.remoteMd5 = change.remoteMd5;
+
+            SyncActionItem downloadAction;
+            downloadAction.actionType = SyncActionType::Download;
+            downloadAction.localPath = change.localPath;
+            downloadAction.fileId = nativeDocContext.state.fileId;
+            downloadAction.modifiedTime =
+                m_database ? m_database->getModifiedTimeAtSync(change.localPath) : QDateTime();
+
+            bool queuedMove = false;
+            bool queuedDownload = false;
+            if (m_syncActionQueue && moveAction.isValid()) {
+                queuedMove = m_syncActionQueue->enqueueIfNotDuplicate(moveAction);
+            }
+            if (m_syncActionQueue && downloadAction.isValid()) {
+                queuedDownload = m_syncActionQueue->enqueueIfNotDuplicate(downloadAction);
+            }
+
+            qInfo() << "Redirecting native-doc local content edit into conflict copy and refresh:"
+                    << change.localPath << "conflictCopy:" << conflictPath
+                    << "moveQueued:" << queuedMove << "downloadQueued:" << queuedDownload;
             return;
         }
     }

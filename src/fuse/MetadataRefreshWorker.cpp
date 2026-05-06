@@ -13,11 +13,11 @@
 
 #include "FileCache.h"
 #include "MetadataCache.h"
-#include "NativeDocPolicy.h"
 #include "api/DriveChange.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
+#include "utils/NativeDocSupport.h"
 
 // Key used to store the FUSE change token in the fuse_sync_state table
 const QString MetadataRefreshWorker::FUSE_CHANGE_TOKEN_KEY = QStringLiteral("fuse_change_token");
@@ -49,7 +49,9 @@ MetadataRefreshWorker::MetadataRefreshWorker(MetadataCache* metadataCache, FileC
     }
 }
 
-MetadataRefreshWorker::~MetadataRefreshWorker() { stop(); }
+MetadataRefreshWorker::~MetadataRefreshWorker() {
+    stop();
+}
 
 // ============================================================================
 // Configuration
@@ -195,7 +197,9 @@ void MetadataRefreshWorker::checkNow() {
 // Private Slots
 // ============================================================================
 
-void MetadataRefreshWorker::onPollingTimeout() { checkNow(); }
+void MetadataRefreshWorker::onPollingTimeout() {
+    checkNow();
+}
 
 void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
                                               const QString& newToken) {
@@ -349,6 +353,10 @@ void MetadataRefreshWorker::removeFromCaches(const QString& fileId) {
         m_metadataCache->removeByFileId(fileId);
     }
 
+    if (m_database && !fileId.isEmpty()) {
+        m_database->deleteNativeDocState(fileId);
+    }
+
     // Remove from file cache (if cached)
     if (m_fileCache) {
         m_fileCache->removeFromCache(fileId);
@@ -402,7 +410,7 @@ bool MetadataRefreshWorker::shouldProcess(const DriveFile& file) const {
         }
 
         if (nativeDocModeOverride.isEmpty() && m_database) {
-            nativeDocModeOverride = m_database->getFuseMetadata(file.id).nativeDocModeOverride;
+            nativeDocModeOverride = m_database->getNativeDocState(file.id).nativeDocModeOverride;
         }
 
         QSettings settings;

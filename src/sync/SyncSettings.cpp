@@ -7,12 +7,15 @@
 
 #include <QDir>
 
+#include "utils/NativeDocSupport.h"
+
 namespace {
 constexpr const char* kSyncFolderKey = "sync/folder";
 constexpr const char* kSyncModeKey = "sync/syncMode";
 constexpr const char* kConflictStrategyKey = "sync/conflictStrategy";
 constexpr const char* kDuplicateNameStrategyKey = "sync/duplicateNameStrategy";
 constexpr const char* kRemotePollIntervalKey = "sync/remotePollIntervalMs";
+constexpr const char* kNativeDocModeKey = "advanced/nativeDocMode";
 
 QString syncModeFromLegacy(int value) {
     switch (value) {
@@ -82,6 +85,9 @@ SyncSettings SyncSettings::load() {
         duplicateNameStrategy = "file-id-suffix";
     }
     settings.duplicateNameStrategy = duplicateNameStrategy;
+
+    settings.nativeDocMode = nativeDocModeToString(
+        nativeDocModeFromString(qsettings.value(kNativeDocModeKey, "hide").toString()));
 
     settings.ignorePatterns = defaultIgnorePatterns();
 

@@ -150,7 +150,9 @@ class TestSyncDatabase : public QObject {
     // ==========================================================================
     // FUSE Native Doc Support
     // ==========================================================================
+    void testNativeDocState_SaveAndRetrieve();
     void testFuseMetadata_NativeDocFields_SaveAndRetrieve();
+    void testDeleteFuseMetadata_PreservesSharedNativeDocState();
     void testClearFuseRepresentationState_ClearsMetadataAndCache();
     void testClearFuseRepresentationState_PreservesDirtyFiles();
     void testClearFuseRepresentationState_ReturnsFalseOnClosedDb();
@@ -255,6 +257,16 @@ void TestSyncDatabase::testInitialize_CreatesRequiredTables() {
     // deleted_files table
     m_db->markFileDeleted("deleted/file.txt", "deleted_id");
     QVERIFY(m_db->wasFileDeleted("deleted/file.txt"));
+
+    // native_doc_state table
+    NativeDocState nativeDocState;
+    nativeDocState.fileId = "native_doc_id";
+    nativeDocState.remoteName = "Doc";
+    nativeDocState.remoteMimeType = "application/vnd.google-apps.document";
+    nativeDocState.webViewLink = "https://docs.google.com/document/d/native_doc_id/edit";
+    QVERIFY(m_db->saveNativeDocState(nativeDocState));
+    QCOMPARE(m_db->getNativeDocState("native_doc_id").remoteMimeType,
+             QString("application/vnd.google-apps.document"));
 }
 
 void TestSyncDatabase::testInitialize_IdempotentMultipleCalls() {
@@ -1723,11 +1735,30 @@ void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
 // FUSE Native Doc Support
 // =============================================================================
 
+void TestSyncDatabase::testNativeDocState_SaveAndRetrieve() {
+    NativeDocState state;
+    state.fileId = "NATIVE_STATE_ID";
+    state.remoteName = "Shared Document";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/shared/edit";
+    state.nativeDocModeOverride = "browser-shortcut";
+
+    QVERIFY(m_db->saveNativeDocState(state));
+
+    const NativeDocState retrieved = m_db->getNativeDocState("NATIVE_STATE_ID");
+    QCOMPARE(retrieved.fileId, QString("NATIVE_STATE_ID"));
+    QCOMPARE(retrieved.remoteName, QString("Shared Document"));
+    QCOMPARE(retrieved.remoteMimeType, QString("application/vnd.google-apps.document"));
+    QCOMPARE(retrieved.webViewLink, QString("https://docs.google.com/document/d/shared/edit"));
+    QCOMPARE(retrieved.nativeDocModeOverride, QString("browser-shortcut"));
+}
+
 void TestSyncDatabase::testFuseMetadata_NativeDocFields_SaveAndRetrieve() {
     FuseMetadata meta;
     meta.fileId = "NATIVE_DOC_ID";
     meta.path = "/test/My Document.gdoc";
     meta.name = "My Document.gdoc";
+    meta.remoteName = "My Document";
     meta.parentId = "PARENT_ID";
     meta.isFolder = false;
     meta.size = 0;
@@ -1747,6 +1778,45 @@ void TestSyncDatabase::testFuseMetadata_NativeDocFields_SaveAndRetrieve() {
     QCOMPARE(retrieved.remoteMimeType, QString("application/vnd.google-apps.document"));
     QCOMPARE(retrieved.webViewLink, QString("https://docs.google.com/document/d/abc123/edit"));
     QCOMPARE(retrieved.nativeDocModeOverride, QString("browser-shortcut"));
+
+    const NativeDocState shared = m_db->getNativeDocState("NATIVE_DOC_ID");
+    QCOMPARE(shared.fileId, QString("NATIVE_DOC_ID"));
+    QCOMPARE(shared.remoteName, QString("My Document"));
+    QCOMPARE(shared.remoteMimeType, QString("application/vnd.google-apps.document"));
+    QCOMPARE(shared.webViewLink, QString("https://docs.google.com/document/d/abc123/edit"));
+    QCOMPARE(shared.nativeDocModeOverride, QString("browser-shortcut"));
+}
+
+void TestSyncDatabase::testDeleteFuseMetadata_PreservesSharedNativeDocState() {
+    FuseMetadata meta;
+    meta.fileId = "FUSE_CACHE_ONLY_ID";
+    meta.path = "/test/My Document.gdoc";
+    meta.name = "My Document.gdoc";
+    meta.remoteName = "My Document";
+    meta.parentId = "PARENT_ID";
+    meta.isFolder = false;
+    meta.size = 0;
+    meta.mimeType = "application/vnd.google-apps.document";
+    meta.remoteMimeType = "application/vnd.google-apps.document";
+    meta.webViewLink = "https://docs.google.com/document/d/cache-only/edit";
+    meta.nativeDocModeOverride = "browser-shortcut";
+    meta.cachedAt = QDateTime::currentDateTime();
+    meta.createdTime = QDateTime::currentDateTime();
+    meta.modifiedTime = QDateTime::currentDateTime();
+    meta.lastAccessed = QDateTime::currentDateTime();
+
+    QVERIFY(m_db->saveFuseMetadata(meta));
+    QVERIFY(m_db->deleteFuseMetadata(meta.fileId));
+
+    const FuseMetadata retrieved = m_db->getFuseMetadata(meta.fileId);
+    QVERIFY(retrieved.fileId.isEmpty());
+
+    const NativeDocState shared = m_db->getNativeDocState(meta.fileId);
+    QCOMPARE(shared.fileId, QString("FUSE_CACHE_ONLY_ID"));
+    QCOMPARE(shared.remoteName, QString("My Document"));
+    QCOMPARE(shared.remoteMimeType, QString("application/vnd.google-apps.document"));
+    QCOMPARE(shared.webViewLink, QString("https://docs.google.com/document/d/cache-only/edit"));
+    QCOMPARE(shared.nativeDocModeOverride, QString("browser-shortcut"));
 }
 
 void TestSyncDatabase::testClearFuseRepresentationState_ClearsMetadataAndCache() {

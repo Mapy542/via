@@ -57,8 +57,8 @@ class RemoteChangeWatcher : public QObject {
      * @param syncDatabase Pointer to the sync database for persistence
      * @param parent Parent object
      */
-    explicit RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveClient* driveClient, SyncDatabase* syncDatabase,
-                                 QObject* parent = nullptr);
+    explicit RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveClient* driveClient,
+                                 SyncDatabase* syncDatabase, QObject* parent = nullptr);
 
     ~RemoteChangeWatcher() override;
 
@@ -176,7 +176,8 @@ class RemoteChangeWatcher : public QObject {
 
    private slots:
     void onPollingTimeout();
-    void onChangesReceived(const QList<DriveChange>& changes, const QString& newToken, bool hasMorePages);
+    void onChangesReceived(const QList<DriveChange>& changes, const QString& newToken,
+                           bool hasMorePages);
     void onStartPageTokenReceived(const QString& token);
     void onApiError(const QString& operation, const QString& error);
 
@@ -184,7 +185,8 @@ class RemoteChangeWatcher : public QObject {
     void processChange(const DriveChange& change);
     QString resolvePath(const DriveFile& file);
     QString resolvePathFromParents(const DriveFile& file);
-    bool shouldProcess(const DriveFile& file) const;
+    bool shouldProcess(const DriveFile& file,
+                       const QString& nativeDocModeOverride = QString()) const;
 
     ChangeQueue* m_changeQueue;
     SyncDatabase* m_syncDatabase;

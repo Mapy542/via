@@ -24,7 +24,40 @@
 #include "TrashPolicy.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
+#include "utils/NativeDocSupport.h"
 #include "utils/PathUtils.h"
+
+namespace {
+
+QString nativeDocModeOverrideForFile(const SyncDatabase* database, const QString& fileId) {
+    if (!database || fileId.isEmpty()) {
+        return QString();
+    }
+
+    return database->getNativeDocState(fileId).nativeDocModeOverride;
+}
+
+void persistObservedNativeDocState(SyncDatabase* database, const DriveFile& file,
+                                   const QString& nativeDocModeOverride) {
+    if (!database || file.id.isEmpty()) {
+        return;
+    }
+
+    if (!isNativeDocMimeType(file.mimeType) && nativeDocModeOverride.isEmpty()) {
+        database->deleteNativeDocState(file.id);
+        return;
+    }
+
+    NativeDocState state;
+    state.fileId = file.id;
+    state.remoteName = file.name;
+    state.remoteMimeType = file.mimeType;
+    state.webViewLink = file.webViewLink;
+    state.nativeDocModeOverride = nativeDocModeOverride;
+    database->saveNativeDocState(state);
+}
+
+}  // namespace
 
 FullSync::FullSync(ChangeQueue* changeQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
                    ChangeProcessor* changeProcessor, QObject* parent)
@@ -52,7 +85,9 @@ FullSync::~FullSync() {
     delete m_remoteTree;
 }
 
-FullSync::State FullSync::state() const { return m_state.load(); }
+FullSync::State FullSync::state() const {
+    return m_state.load();
+}
 
 void FullSync::setSyncFolder(const QString& path) {
     QMutexLocker locker(&m_mutex);
@@ -74,11 +109,17 @@ bool FullSync::isRunning() const {
     return s == State::ScanningLocal || s == State::FetchingRemote;
 }
 
-void FullSync::fullSync() { startInternal(Mode::Full); }
+void FullSync::fullSync() {
+    startInternal(Mode::Full);
+}
 
-void FullSync::fullSyncLocal() { startInternal(Mode::LocalOnly); }
+void FullSync::fullSyncLocal() {
+    startInternal(Mode::LocalOnly);
+}
 
-void FullSync::start() { fullSync(); }
+void FullSync::start() {
+    fullSync();
+}
 
 void FullSync::startInternal(Mode mode) {
     {
@@ -265,8 +306,11 @@ void FullSync::processRemoteFiles(const QList<DriveFile>& files, const QString& 
             }
         }
 
+        const QString nativeDocModeOverride = nativeDocModeOverrideForFile(m_database, file.id);
+        persistObservedNativeDocState(m_database, file, nativeDocModeOverride);
+
         // Skip files that shouldn't be synced
-        if (shouldSkipRemoteFile(file)) {
+        if (shouldSkipRemoteFile(file, nativeDocModeOverride)) {
             continue;
         }
 
@@ -393,11 +437,13 @@ void FullSync::buildRemoteFolderStructure() {
                     // Found parent - add to tree
                     FileTreeNode* parentNode = currentBranchDepthParents[j];
                     FileTreeNode* newNode = new FileTreeNode();
+                    const QString nativeDocModeOverride =
+                        nativeDocModeOverrideForFile(m_database, file.id);
                     newNode->name = file.name;
                     newNode->isFolder = file.isFolder;
                     newNode->relativePath = MirrorPathResolver::resolveRemoteLocalPath(
-                        parentNode->relativePath, file.name, file.id, m_database, m_settings,
-                        m_syncFolder, &claimedPaths);
+                        parentNode->relativePath, file.name, file.mimeType, nativeDocModeOverride,
+                        file.id, m_database, m_settings, m_syncFolder, &claimedPaths);
                     newNode->modifiedTime = file.modifiedTime;
                     newNode->fileId = file.id;
                     parentNode->children.insert(file.id, newNode);
@@ -517,6 +563,17 @@ bool FullSync::shouldIgnoreFile(const QString& fileName) const {
     return false;
 }
 
-bool FullSync::shouldSkipRemoteFile(const DriveFile& file) const {
-    return FileFilter::shouldSkipRemoteFile(file, m_settings);
+bool FullSync::shouldSkipRemoteFile(const DriveFile& file,
+                                    const QString& nativeDocModeOverride) const {
+    if (FileFilter::shouldSkipRemoteFile(file, m_settings)) {
+        return true;
+    }
+
+    if (!isNativeDocMimeType(file.mimeType) || file.isFolder || file.isShortcut) {
+        return false;
+    }
+
+    const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+        file.mimeType, nativeDocModeOverride, nativeDocModeFromString(m_settings.nativeDocMode));
+    return !representation.visible;
 }

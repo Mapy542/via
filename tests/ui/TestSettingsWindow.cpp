@@ -1,6 +1,6 @@
 /**
  * @file TestSettingsWindow.cpp
- * @brief Regression tests for credential persistence in SettingsWindow.
+ * @brief Regression tests for SettingsWindow behavior.
  */
 
 #include <QApplication>
@@ -101,6 +101,8 @@ class TestSettingsWindow : public QObject {
     void testAutoPauseCheckboxPersistsAndUpdatesController();
     void testWindowStaysUsableWhenAboutInfoAuthFailsOnOpen();
     void testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen();
+    void testMirrorOnlyModeKeepsNativeDocModeEditable();
+    void testNativeDocModeRestartPromptMentionsMirrorRebuild();
 
    private:
     static void acceptNextMessageBox();
@@ -272,6 +274,67 @@ void TestSettingsWindow::testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen() 
     QVERIFY(window.isVisible());
     QVERIFY(window.isEnabled());
     QVERIFY(clientIdEdit->isEnabled());
+}
+
+void TestSettingsWindow::testMirrorOnlyModeKeepsNativeDocModeEditable() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* syncSystemCombo = window.findChild<QComboBox*>("settingsSyncSystemCombo");
+    auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
+    auto* nativeDocInfoLabel = window.findChild<QLabel*>("settingsNativeDocModeInfoLabel");
+
+    QVERIFY(syncSystemCombo != nullptr);
+    QVERIFY(nativeDocCombo != nullptr);
+    QVERIFY(nativeDocInfoLabel != nullptr);
+
+    const int mirrorOnlyIndex = syncSystemCombo->findData(QStringLiteral("mirror-only"));
+    QVERIFY(mirrorOnlyIndex >= 0);
+    syncSystemCombo->setCurrentIndex(mirrorOnlyIndex);
+
+    QVERIFY(nativeDocCombo->isEnabled());
+    QVERIFY(nativeDocInfoLabel->text().contains(QStringLiteral("mirror sync and FUSE")));
+}
+
+void TestSettingsWindow::testNativeDocModeRestartPromptMentionsMirrorRebuild() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* syncSystemCombo = window.findChild<QComboBox*>("settingsSyncSystemCombo");
+    auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
+    auto* applyButton = window.findChild<QPushButton*>("settingsApplyButton");
+
+    QVERIFY(syncSystemCombo != nullptr);
+    QVERIFY(nativeDocCombo != nullptr);
+    QVERIFY(applyButton != nullptr);
+
+    window.show();
+    QTRY_VERIFY(window.isVisible());
+
+    const int mirrorOnlyIndex = syncSystemCombo->findData(QStringLiteral("mirror-only"));
+    QVERIFY(mirrorOnlyIndex >= 0);
+    syncSystemCombo->setCurrentIndex(mirrorOnlyIndex);
+
+    const int browserShortcutIndex =
+        nativeDocCombo->findData(QStringLiteral("browser-shortcut"));
+    QVERIFY(browserShortcutIndex >= 0);
+    nativeDocCombo->setCurrentIndex(browserShortcutIndex);
+
+    bool promptSeen = false;
+    QString promptText;
+    QString promptInfo;
+    QTimer::singleShot(0, [&promptSeen, &promptText, &promptInfo]() {
+        if (auto* messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            promptSeen = true;
+            promptText = messageBox->text();
+            promptInfo = messageBox->informativeText();
+            messageBox->reject();
+        }
+    });
+
+    applyButton->click();
+
+    QVERIFY(promptSeen);
+    QVERIFY(promptText.contains(QStringLiteral("restart to take effect"), Qt::CaseInsensitive));
+    QVERIFY(promptInfo.contains(QStringLiteral("native-document artifacts")));
+    QVERIFY(promptInfo.contains(QStringLiteral("sync folder")));
+    QVERIFY(promptInfo.contains(QStringLiteral("next launch")));
 }
 
 QTEST_MAIN(TestSettingsWindow)

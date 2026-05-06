@@ -9,6 +9,7 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -23,6 +24,7 @@
 #include "sync/ChangeQueue.h"
 #include "sync/SyncActionQueue.h"
 #include "sync/SyncDatabase.h"
+#include "utils/NativeDocSupport.h"
 
 class TestChangeProcessor : public QObject {
     Q_OBJECT
@@ -93,6 +95,10 @@ class TestChangeProcessor : public QObject {
     void testValidateChange_LocalRenameMissingFileIdRejected();
     void testValidateChange_DuplicatePendingActionSkipped();
     void testValidateChange_LocalModifySameHashSkipped();
+    void testDetermineAndQueueActions_LocalModifyNativeDocQueuesConflictCopyAndRefresh();
+    void testDetermineAndQueueActions_LocalDeleteNativeDocStillTrashesRemote();
+    void testDetermineAndQueueActions_LocalMoveNativeDocStillMovesRemote();
+    void testDetermineAndQueueActions_LocalRenameNativeDocStillRenamesRemote();
     void testDetermineAndQueueActions_LocalMoveMissingFileIdSkipped();
     void testDetermineAndQueueActions_LocalRenameMissingFileIdSkipped();
     void testDetermineAndQueueActions_DuplicateSuppressed();
@@ -1087,6 +1093,112 @@ void TestChangeProcessor::testValidateChange_LocalModifySameHashSkipped() {
     change.fileId = "same-hash-id";
 
     QVERIFY(!m_processor->validateChange(change));
+}
+
+void TestChangeProcessor::
+    testDetermineAndQueueActions_LocalModifyNativeDocQueuesConflictCopyAndRefresh() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+    m_processor->m_cachedSettings = SyncSettings::load();
+
+    NativeDocState nativeDocState;
+    nativeDocState.fileId = "native-doc-modify";
+    nativeDocState.remoteName = "Quarterly";
+    nativeDocState.remoteMimeType = "application/vnd.google-apps.document";
+    nativeDocState.webViewLink = "https://docs.google.com/document/d/native-doc-modify/edit";
+    QVERIFY(m_db->saveNativeDocState(nativeDocState));
+
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Local, "Quarterly.gdoc",
+                                        nativeDocState.fileId);
+    change.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 2);
+
+    const SyncActionItem moveAction = m_actionQueue->dequeue();
+    QCOMPARE(moveAction.actionType, SyncActionType::MoveLocal);
+    QCOMPARE(moveAction.localPath, QString("Quarterly.gdoc"));
+    QCOMPARE(moveAction.fileId, nativeDocState.fileId);
+    QVERIFY(moveAction.moveDestination.startsWith(QString("./Quarterly (local conflict ")) ||
+            moveAction.moveDestination.startsWith(QString("Quarterly (local conflict ")));
+    QVERIFY(moveAction.moveDestination.endsWith(QString(".gdoc")));
+
+    const SyncActionItem downloadAction = m_actionQueue->dequeue();
+    QCOMPARE(downloadAction.actionType, SyncActionType::Download);
+    QCOMPARE(downloadAction.localPath, QString("Quarterly.gdoc"));
+    QCOMPARE(downloadAction.fileId, nativeDocState.fileId);
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_LocalDeleteNativeDocStillTrashesRemote() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+    m_processor->m_cachedSettings = SyncSettings::load();
+
+    NativeDocState nativeDocState;
+    nativeDocState.fileId = "native-doc-delete";
+    nativeDocState.remoteMimeType = "application/vnd.google-apps.document";
+    QVERIFY(m_db->saveNativeDocState(nativeDocState));
+
+    ChangeQueueItem change = makeChange(ChangeType::Delete, ChangeOrigin::Local, "Quarterly.gdoc",
+                                        nativeDocState.fileId);
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    const SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::TrashRemote);
+    QCOMPARE(action.fileId, nativeDocState.fileId);
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_LocalMoveNativeDocStillMovesRemote() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+    m_processor->m_cachedSettings = SyncSettings::load();
+
+    NativeDocState nativeDocState;
+    nativeDocState.fileId = "native-doc-move";
+    nativeDocState.remoteMimeType = "application/vnd.google-apps.document";
+    QVERIFY(m_db->saveNativeDocState(nativeDocState));
+
+    ChangeQueueItem change =
+        makeChange(ChangeType::Move, ChangeOrigin::Local, "Quarterly.gdoc", nativeDocState.fileId);
+    change.moveDestination = "archive/Quarterly.gdoc";
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    const SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::MoveRemote);
+    QCOMPARE(action.fileId, nativeDocState.fileId);
+    QCOMPARE(action.moveDestination, QString("archive"));
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_LocalRenameNativeDocStillRenamesRemote() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+    m_processor->m_cachedSettings = SyncSettings::load();
+
+    NativeDocState nativeDocState;
+    nativeDocState.fileId = "native-doc-rename";
+    nativeDocState.remoteMimeType = "application/vnd.google-apps.document";
+    QVERIFY(m_db->saveNativeDocState(nativeDocState));
+
+    ChangeQueueItem change = makeChange(ChangeType::Rename, ChangeOrigin::Local, "Quarterly.gdoc",
+                                        nativeDocState.fileId);
+    change.renameTo = "Renamed.gdoc";
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    const SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::RenameRemote);
+    QCOMPARE(action.fileId, nativeDocState.fileId);
+    QCOMPARE(action.renameTo, QString("Renamed.gdoc"));
 }
 
 void TestChangeProcessor::testDetermineAndQueueActions_LocalMoveMissingFileIdSkipped() {

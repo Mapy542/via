@@ -103,6 +103,7 @@ void SettingsWindow::setupUi() {
     buttonLayout->addStretch();
 
     m_applyButton = new QPushButton("Apply", this);
+    m_applyButton->setObjectName("settingsApplyButton");
     m_cancelButton = new QPushButton("Cancel", this);
     m_okButton = new QPushButton("OK", this);
     m_okButton->setDefault(true);
@@ -449,6 +450,7 @@ void SettingsWindow::setupFuseTab() {
     QHBoxLayout* syncSystemLayout = new QHBoxLayout();
     syncSystemLayout->addWidget(new QLabel("Sync system:", m_fuseTab));
     m_syncSystemCombo = new QComboBox(m_fuseTab);
+    m_syncSystemCombo->setObjectName("settingsSyncSystemCombo");
     m_syncSystemCombo->addItem("Mirror Only", "mirror-only");
     m_syncSystemCombo->addItem("FUSE Only", "fuse-only");
     m_syncSystemCombo->addItem("Both", "both");
@@ -492,16 +494,30 @@ void SettingsWindow::setupFuseTab() {
     fuseLayout->addWidget(cacheInfoLabel);
 
     QHBoxLayout* nativeDocLayout = new QHBoxLayout();
-    nativeDocLayout->addWidget(new QLabel("Google-native docs:", m_fuseTab));
+    QLabel* nativeDocLabel = new QLabel("Google-native docs representation:", m_fuseTab);
+    nativeDocLabel->setObjectName("settingsNativeDocModeLabel");
+    nativeDocLayout->addWidget(nativeDocLabel);
     m_nativeDocModeCombo = new QComboBox(m_fuseTab);
-    m_nativeDocModeCombo->addItem("Hide (don't show in mount)", "hide");
-    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, ...)", "browser-shortcut");
-    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, ...)", "open-document");
+    m_nativeDocModeCombo->setObjectName("settingsNativeDocModeCombo");
+    m_nativeDocModeCombo->addItem("Hide (don't materialize locally)", "hide");
+    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)",
+                                  "browser-shortcut");
+    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)",
+                                  "open-document");
     m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
     m_nativeDocModeCombo->setEnabled(false);
     nativeDocLayout->addWidget(m_nativeDocModeCombo);
     nativeDocLayout->addStretch();
     fuseLayout->addLayout(nativeDocLayout);
+
+    QLabel* nativeDocInfoLabel = new QLabel(
+        "<i>This setting applies to mirror sync and FUSE. Native-document shortcuts and "
+        "exports are always materialized read-only.</i>",
+        m_fuseTab);
+    nativeDocInfoLabel->setObjectName("settingsNativeDocModeInfoLabel");
+    nativeDocInfoLabel->setWordWrap(true);
+    nativeDocInfoLabel->setTextFormat(Qt::RichText);
+    fuseLayout->addWidget(nativeDocInfoLabel);
 
     m_clearCacheButton = new QPushButton("Restart and Clear Cache", m_fuseTab);
     m_clearCacheButton->setEnabled(false);
@@ -515,10 +531,13 @@ void SettingsWindow::setupFuseTab() {
 
     // Enable/disable FUSE-related widgets based on sync system selection
     auto updateFuseWidgets = [this]() {
-        bool fuseEnabled = (m_syncSystemCombo->currentData().toString() != "mirror-only");
+        const QString syncSystem = m_syncSystemCombo->currentData().toString();
+        const bool fuseEnabled = (syncSystem != "mirror-only");
+        const bool nativeDocEnabled = (syncSystem == "mirror-only" || syncSystem == "fuse-only" ||
+                                       syncSystem == "both");
         m_fuseMountPointEdit->setEnabled(fuseEnabled);
         m_cacheSize->setEnabled(fuseEnabled);
-        m_nativeDocModeCombo->setEnabled(fuseEnabled);
+        m_nativeDocModeCombo->setEnabled(nativeDocEnabled);
         m_clearCacheButton->setEnabled(fuseEnabled);
     };
     connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -732,7 +751,7 @@ void SettingsWindow::loadSettings() {
     m_cacheSize->setValue(m_settings.value("advanced/cacheSize", 5000).toInt());
     m_debugModeCheck->setChecked(m_settings.value("advanced/debugMode", false).toBool());
 
-    // Native doc mode (FUSE)
+    // Native doc mode (mirror sync and FUSE)
     {
         QString nativeDocId = m_settings.value("advanced/nativeDocMode", "hide").toString();
         for (int i = 0; i < m_nativeDocModeCombo->count(); ++i) {
@@ -947,11 +966,33 @@ void SettingsWindow::promptRestart() {
         return;
     }
 
+    const bool nativeDocModeChanged =
+        m_nativeDocModeCombo->currentData().toString() != m_originalNativeDocMode;
+    const QString syncSystem = m_syncSystemCombo->currentData().toString();
+
     QMessageBox msgBox(this);
     msgBox.setWindowTitle("Restart Required");
-    msgBox.setText(
-        "One or more settings you changed require a restart to take effect.\n\n"
-        "Would you like to restart Via now?");
+    msgBox.setText("One or more settings you changed require a restart to take effect.");
+    if (nativeDocModeChanged) {
+        QString rebuildMessage;
+        if (syncSystem == "both") {
+            rebuildMessage =
+                "Via will rebuild local native-document artifacts in the sync folder and refresh "
+                "the FUSE view on next launch.";
+        } else if (syncSystem == "mirror-only") {
+            rebuildMessage =
+                "Via will rebuild local native-document artifacts in the sync folder on next "
+                "launch.";
+        } else {
+            rebuildMessage =
+                "Via will refresh native-document representation in the FUSE view on next "
+                "launch.";
+        }
+
+        msgBox.setInformativeText(rebuildMessage + "\n\nWould you like to restart Via now?");
+    } else {
+        msgBox.setInformativeText("Would you like to restart Via now?");
+    }
     msgBox.setIcon(QMessageBox::Question);
     QPushButton* restartButton = msgBox.addButton("Restart Now", QMessageBox::AcceptRole);
     QPushButton* laterButton = msgBox.addButton("Later", QMessageBox::RejectRole);

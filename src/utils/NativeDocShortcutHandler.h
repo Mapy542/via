@@ -15,6 +15,8 @@
 #include <array>
 #include <optional>
 
+#include "NativeDocSupport.h"
+
 struct NativeDocShortcutInfo {
     QUrl url;
     QString remoteMimeType;
@@ -127,41 +129,6 @@ inline bool isNativeDocShortcutArgument(const QString& argument,
         *resolvedPathOut = resolvedPath;
     }
     return true;
-}
-
-inline bool isNativeDocExportLimitError(const QString& errorMsg, int httpStatus) {
-    if (httpStatus != 403) {
-        return false;
-    }
-
-    const QString lowered = errorMsg.toLower();
-    return lowered.contains(QStringLiteral("10 mb")) || lowered.contains(QStringLiteral("10mb")) ||
-           lowered.contains(QStringLiteral("too large to be exported")) ||
-           lowered.contains(QStringLiteral("too large to export")) ||
-           (lowered.contains(QStringLiteral("export")) &&
-            (lowered.contains(QStringLiteral("limit")) ||
-             lowered.contains(QStringLiteral("maximum")) ||
-             lowered.contains(QStringLiteral("size")) ||
-             lowered.contains(QStringLiteral("too large"))));
-}
-
-inline QString nativeDocExportFailureMessage(const QString& errorMsg, int httpStatus) {
-    if (isNativeDocExportLimitError(errorMsg, httpStatus)) {
-        return QStringLiteral(
-            "Google limits native doc exports to 10 MB. Open the document in your browser "
-            "instead.");
-    }
-
-    const QString trimmed = errorMsg.trimmed();
-    if (!trimmed.isEmpty()) {
-        return trimmed;
-    }
-
-    if (httpStatus == 403) {
-        return QStringLiteral("Google rejected the export for this document or account.");
-    }
-
-    return QStringLiteral("Native document export failed.");
 }
 
 inline std::optional<NativeDocShortcutInfo> parseNativeDocShortcutText(

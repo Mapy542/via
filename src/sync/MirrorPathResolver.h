@@ -37,6 +37,16 @@ QString resolveRemoteLocalPath(const QString& parentLocalPath, const QString& re
                                const QSet<QString>* additionalClaims = nullptr,
                                bool reuseExistingMapping = true);
 
+/**
+ * @brief Resolve a remote file name using shared native-doc visible-name rules.
+ */
+QString resolveRemoteLocalPath(const QString& parentLocalPath, const QString& remoteName,
+                               const QString& remoteMimeType, const QString& nativeDocModeOverride,
+                               const QString& fileId, const SyncDatabase* database,
+                               const SyncSettings& settings, const QString& syncFolder,
+                               const QSet<QString>* additionalClaims = nullptr,
+                               bool reuseExistingMapping = true);
+
 }  // namespace MirrorPathResolver
 
 #endif  // MIRRORPATHRESOLVER_H

@@ -88,8 +88,9 @@ class FullSync : public QObject {
      * @param changeProcessor Pointer to the change processor (for initial sync mode)
      * @param parent Parent object
      */
-    explicit FullSync(ChangeQueue* changeQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
-                      ChangeProcessor* changeProcessor, QObject* parent = nullptr);
+    explicit FullSync(ChangeQueue* changeQueue, SyncDatabase* database,
+                      GoogleDriveClient* driveClient, ChangeProcessor* changeProcessor,
+                      QObject* parent = nullptr);
 
     ~FullSync() override;
 
@@ -282,9 +283,11 @@ class FullSync : public QObject {
     /**
      * @brief Check if a remote file should be skipped
      * @param file Remote file to check
-     * @return true if file should be skipped (trashed, Google Doc, not owned)
+     * @param nativeDocModeOverride Stored per-file native-doc override, if any
+     * @return true if file should be skipped
      */
-    bool shouldSkipRemoteFile(const DriveFile& file) const;
+    bool shouldSkipRemoteFile(const DriveFile& file,
+                              const QString& nativeDocModeOverride = QString()) const;
 };
 
 #endif  // FULLSYNC_H

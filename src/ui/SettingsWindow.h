@@ -6,6 +6,8 @@
  * login, mirror sync, FUSE, and miscellaneous behavior.
  */
 
+// TODO: Move enable disable of fuse/mirror to checkboxes in respective tabs.
+
 #ifndef SETTINGSWINDOW_H
 #define SETTINGSWINDOW_H
 
@@ -90,8 +92,9 @@ class SettingsWindow : public QDialog {
      * @brief Emitted when the user accepts a restart after changing
      * restart-required settings.
      *
-     * The owner (MainWindow/main.cpp) should perform a safe FUSE
-     * unmount, set any pending purge flags, relaunch, and quit.
+        * The owner (MainWindow/main.cpp) should perform a safe FUSE
+        * unmount, queue any pending native-doc rebuild flags, relaunch,
+        * and quit.
      */
     void restartRequested();
 

@@ -38,7 +38,7 @@
 #include <QThread>
 #include <optional>
 
-#include "NativeDocPolicy.h"
+#include "utils/NativeDocSupport.h"
 
 #define FUSE_USE_VERSION 35
 #include <fuse3/fuse.h>

@@ -1016,7 +1016,7 @@ DriveFile GoogleDriveClient::getFileMetadataBlocking(const QString& fileId) {
 
     QUrl url(API_BASE_URL + "/files/" + fileId);
     QUrlQuery query;
-    query.addQueryItem("fields", "id,name,parents,mimeType,modifiedTime,md5Checksum");
+    query.addQueryItem("fields", "id,name,parents,mimeType,modifiedTime,md5Checksum,webViewLink");
     url.setQuery(query);
 
     QNetworkRequest request = createRequest(url);
@@ -1045,6 +1045,7 @@ DriveFile GoogleDriveClient::getFileMetadataBlocking(const QString& fileId) {
         file.mimeType = obj["mimeType"].toString();
         file.modifiedTime = QDateTime::fromString(obj["modifiedTime"].toString(), Qt::ISODate);
         file.md5Checksum = obj["md5Checksum"].toString();
+        file.webViewLink = obj["webViewLink"].toString();
         file.isFolder = file.mimeType == "application/vnd.google-apps.folder";
 
         QJsonArray parentsArray = obj["parents"].toArray();

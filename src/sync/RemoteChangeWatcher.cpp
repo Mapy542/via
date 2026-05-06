@@ -17,7 +17,40 @@
 #include "api/DriveChange.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
+#include "utils/NativeDocSupport.h"
 #include "utils/PathUtils.h"
+
+namespace {
+
+QString nativeDocModeOverrideForFile(const SyncDatabase* database, const QString& fileId) {
+    if (!database || fileId.isEmpty()) {
+        return QString();
+    }
+
+    return database->getNativeDocState(fileId).nativeDocModeOverride;
+}
+
+void persistObservedNativeDocState(SyncDatabase* database, const DriveFile& file,
+                                   const QString& nativeDocModeOverride) {
+    if (!database || file.id.isEmpty()) {
+        return;
+    }
+
+    if (!isNativeDocMimeType(file.mimeType) && nativeDocModeOverride.isEmpty()) {
+        database->deleteNativeDocState(file.id);
+        return;
+    }
+
+    NativeDocState state;
+    state.fileId = file.id;
+    state.remoteName = file.name;
+    state.remoteMimeType = file.mimeType;
+    state.webViewLink = file.webViewLink;
+    state.nativeDocModeOverride = nativeDocModeOverride;
+    database->saveNativeDocState(state);
+}
+
+}  // namespace
 
 const int RemoteChangeWatcher::DEFAULT_POLL_INTERVAL_MS;
 
@@ -48,7 +81,9 @@ RemoteChangeWatcher::RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveCl
     }
 }
 
-RemoteChangeWatcher::~RemoteChangeWatcher() { stop(); }
+RemoteChangeWatcher::~RemoteChangeWatcher() {
+    stop();
+}
 
 void RemoteChangeWatcher::setPollingInterval(int intervalMs) {
     QMutexLocker locker(&m_mutex);
@@ -207,7 +242,9 @@ void RemoteChangeWatcher::checkNow() {
     m_driveClient->listChanges(token);
 }
 
-void RemoteChangeWatcher::onPollingTimeout() { checkNow(); }
+void RemoteChangeWatcher::onPollingTimeout() {
+    checkNow();
+}
 
 void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
                                             const QString& newToken, bool hasMorePages) {
@@ -333,10 +370,16 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
         m_recentlyProcessedFileIds[change.fileId] = now;
     }
 
-    // Skip files that shouldn't be processed
-    if (!change.removed && !shouldProcess(change.file)) {
-        qDebug() << "Skipping file:" << change.file.name;
-        return;
+    if (!change.removed) {
+        const QString nativeDocModeOverride =
+            nativeDocModeOverrideForFile(m_syncDatabase, change.fileId);
+        persistObservedNativeDocState(m_syncDatabase, change.file, nativeDocModeOverride);
+
+        // Skip files that shouldn't be processed
+        if (!shouldProcess(change.file, nativeDocModeOverride)) {
+            qDebug() << "Skipping file:" << change.file.name;
+            return;
+        }
     }
 
     ChangeQueueItem item;
@@ -347,6 +390,9 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
     // Determine change type
     if (change.removed || change.file.trashed) {
         item.changeType = ChangeType::Delete;
+        if (m_syncDatabase && !change.fileId.isEmpty()) {
+            m_syncDatabase->deleteNativeDocState(change.fileId);
+        }
         // For deletions, we must lookup the path from the sync database
         QString path = m_syncDatabase->getLocalPath(change.fileId);
         item.localPath = path;  // May be empty if we don't have it locally
@@ -417,9 +463,10 @@ QString RemoteChangeWatcher::resolvePath(const DriveFile& file) {
     }
 
     if (haveParentPath) {
+        const QString nativeDocModeOverride = nativeDocModeOverrideForFile(m_syncDatabase, file.id);
         const QString resolvedPath = MirrorPathResolver::resolveRemoteLocalPath(
-            parentPath, file.name, file.id, m_syncDatabase, m_settings, m_settings.syncFolder,
-            &folderClaims);
+            parentPath, file.name, file.mimeType, nativeDocModeOverride, file.id, m_syncDatabase,
+            m_settings, m_settings.syncFolder, &folderClaims);
         if (file.isFolder && !resolvedPath.isEmpty()) {
             QMutexLocker locker(&m_mutex);
             m_folderIdToPath.insert(file.id, resolvedPath);
@@ -475,9 +522,11 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
 
                 QString currentPath = parentPath;
                 for (const DriveFile& node : pathChain) {
+                    const QString nativeDocModeOverride =
+                        nativeDocModeOverrideForFile(m_syncDatabase, node.id);
                     currentPath = MirrorPathResolver::resolveRemoteLocalPath(
-                        currentPath, node.name, node.id, m_syncDatabase, m_settings,
-                        m_settings.syncFolder, &folderClaims);
+                        currentPath, node.name, node.mimeType, nativeDocModeOverride, node.id,
+                        m_syncDatabase, m_settings, m_settings.syncFolder, &folderClaims);
                     if (node.isFolder) {
                         m_folderIdToPath.insert(node.id, currentPath);
                         folderClaims.insert(currentPath);
@@ -502,9 +551,11 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
 
                 QString currentPath = parentPath;
                 for (const DriveFile& node : pathChain) {
+                    const QString nativeDocModeOverride =
+                        nativeDocModeOverrideForFile(m_syncDatabase, node.id);
                     currentPath = MirrorPathResolver::resolveRemoteLocalPath(
-                        currentPath, node.name, node.id, m_syncDatabase, m_settings,
-                        m_settings.syncFolder, &folderClaims);
+                        currentPath, node.name, node.mimeType, nativeDocModeOverride, node.id,
+                        m_syncDatabase, m_settings, m_settings.syncFolder, &folderClaims);
                     if (node.isFolder) {
                         QMutexLocker locker(&m_mutex);
                         m_folderIdToPath.insert(node.id, currentPath);
@@ -540,9 +591,10 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
 
     QString currentPath;
     for (const DriveFile& node : pathChain) {
+        const QString nativeDocModeOverride = nativeDocModeOverrideForFile(m_syncDatabase, node.id);
         currentPath = MirrorPathResolver::resolveRemoteLocalPath(
-            currentPath, node.name, node.id, m_syncDatabase, m_settings, m_settings.syncFolder,
-            &folderClaims);
+            currentPath, node.name, node.mimeType, nativeDocModeOverride, node.id, m_syncDatabase,
+            m_settings, m_settings.syncFolder, &folderClaims);
         if (node.isFolder) {
             QMutexLocker locker(&m_mutex);
             m_folderIdToPath.insert(node.id, currentPath);
@@ -553,6 +605,17 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
     return currentPath;
 }
 
-bool RemoteChangeWatcher::shouldProcess(const DriveFile& file) const {
-    return !FileFilter::shouldSkipRemoteFile(file, m_settings);
+bool RemoteChangeWatcher::shouldProcess(const DriveFile& file,
+                                        const QString& nativeDocModeOverride) const {
+    if (FileFilter::shouldSkipRemoteFile(file, m_settings)) {
+        return false;
+    }
+
+    if (!isNativeDocMimeType(file.mimeType) || file.isFolder || file.isShortcut) {
+        return true;
+    }
+
+    const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+        file.mimeType, nativeDocModeOverride, nativeDocModeFromString(m_settings.nativeDocMode));
+    return representation.visible;
 }

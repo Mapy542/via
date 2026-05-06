@@ -11,6 +11,7 @@
 
 #include "SyncDatabase.h"
 #include "SyncSettings.h"
+#include "utils/NativeDocSupport.h"
 #include "utils/PathUtils.h"
 
 namespace MirrorPathResolver {
@@ -217,6 +218,18 @@ QString resolveRemoteLocalPath(const QString& parentLocalPath, const QString& re
     const QString desiredLocalPath = joinPath(parentLocalPath, safeName);
     return resolveUniqueLocalPath(desiredLocalPath, fileId, database, settings, syncFolder,
                                   additionalClaims, QString(), reuseExistingMapping);
+}
+
+QString resolveRemoteLocalPath(const QString& parentLocalPath, const QString& remoteName,
+                               const QString& remoteMimeType, const QString& nativeDocModeOverride,
+                               const QString& fileId, const SyncDatabase* database,
+                               const SyncSettings& settings, const QString& syncFolder,
+                               const QSet<QString>* additionalClaims, bool reuseExistingMapping) {
+    const QString visibleRemoteName =
+        nativeDocVisibleName(remoteName, remoteMimeType, nativeDocModeOverride,
+                             nativeDocModeFromString(settings.nativeDocMode));
+    return resolveRemoteLocalPath(parentLocalPath, visibleRemoteName, fileId, database, settings,
+                                  syncFolder, additionalClaims, reuseExistingMapping);
 }
 
 }  // namespace MirrorPathResolver

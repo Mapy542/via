@@ -33,11 +33,11 @@
 #include "FileCache.h"
 #include "MetadataCache.h"
 #include "MetadataRefreshWorker.h"
-#include "NativeDocPolicy.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 #include "utils/NativeDocShortcutHandler.h"
+#include "utils/NativeDocSupport.h"
 
 namespace {
 
@@ -74,6 +74,20 @@ bool isAuthOrPermissionFailure(int httpStatus, const QString& errorMsg) {
            lowered.contains(QStringLiteral("permission")) ||
            lowered.contains(QStringLiteral("credential")) ||
            lowered.contains(QStringLiteral("unauthorized"));
+}
+
+QString remoteRenameTargetForMetadata(const FuseMetadata& meta, const QString& requestedName) {
+    const QString remoteMimeType =
+        meta.remoteMimeType.isEmpty() ? meta.mimeType : meta.remoteMimeType;
+    if (!isNativeDocMimeType(remoteMimeType)) {
+        return requestedName;
+    }
+
+    const QString currentModeSetting =
+        QSettings().value("advanced/nativeDocMode", "hide").toString();
+    const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+        remoteMimeType, meta.nativeDocModeOverride, nativeDocModeFromString(currentModeSetting));
+    return nativeDocRemoteNameFromVisibleName(requestedName, representation);
 }
 
 bool waitForFolderCreate(GoogleDriveClient* driveClient, const QString& requestLocalPath,
@@ -752,7 +766,9 @@ bool FuseDriver::isFuseAvailable() {
 // Configuration
 // ============================================================================
 
-QString FuseDriver::mountPoint() const { return m_mountPoint; }
+QString FuseDriver::mountPoint() const {
+    return m_mountPoint;
+}
 
 void FuseDriver::setMountPoint(const QString& path) {
     if (m_mounted) {
@@ -781,13 +797,21 @@ void FuseDriver::setMaxCacheSizeBytes(qint64 bytes) {
     m_maxCacheSizeBytes = qMax<qint64>(bytes, 0);
 }
 
-bool FuseDriver::isMounted() const { return m_mounted; }
+bool FuseDriver::isMounted() const {
+    return m_mounted;
+}
 
-FileCache* FuseDriver::fileCache() const { return m_fileCache; }
+FileCache* FuseDriver::fileCache() const {
+    return m_fileCache;
+}
 
-SyncDatabase* FuseDriver::database() const { return m_database; }
+SyncDatabase* FuseDriver::database() const {
+    return m_database;
+}
 
-GoogleDriveClient* FuseDriver::driveClient() const { return m_driveClient; }
+GoogleDriveClient* FuseDriver::driveClient() const {
+    return m_driveClient;
+}
 
 void FuseDriver::setPauseController(RuntimePauseController* pauseController) {
     m_pauseController = pauseController;
@@ -1273,15 +1297,11 @@ void FuseDriver::emitDriveOperationBlocked(const QString& action, const QString&
  * @brief Check if a FUSE metadata entry represents a Google-native document
  */
 static bool isNativeDoc(const FuseMetadata& meta) {
-    return !meta.remoteMimeType.isEmpty() &&
-           meta.remoteMimeType.startsWith(QLatin1String("application/vnd.google-apps.")) &&
-           !meta.isFolder;
+    return !meta.isFolder && isNativeDocMimeType(meta.remoteMimeType);
 }
 
 static bool isNativeDoc(const FuseFileMetadata& meta) {
-    return !meta.remoteMimeType.isEmpty() &&
-           meta.remoteMimeType.startsWith(QLatin1String("application/vnd.google-apps.")) &&
-           !meta.isFolder;
+    return !meta.isFolder && isNativeDocMimeType(meta.remoteMimeType);
 }
 
 static enum fuse_fill_dir_flags readdirFlagsForChild(const FuseFileMetadata& child,
@@ -1360,22 +1380,6 @@ static void invalidateFusePath(struct fuse* fuseHandle, const QString& path) {
     if (rc != 0 && rc != -ENOENT) {
         qWarning() << "FuseDriver: Failed to invalidate FUSE path" << path << ":" << rc;
     }
-}
-
-/**
- * @brief Generate stub content for a browser-shortcut native doc
- *
- * Produces a simple .desktop-like text file containing the web URL.
- * This format is deterministic (content depends only on the URL) so
- * getattr can report a stable size without materializing the string
- * on every stat call.
- */
-static QByteArray nativeDocStubContent(const FuseMetadata& meta) {
-    // Format: simple URL file similar to .desktop / .url files.
-    // Via's file handler will parse this to open the browser.
-    return QStringLiteral("[Via Native Document]\nURL=%1\nMimeType=%2\n")
-        .arg(meta.webViewLink, meta.remoteMimeType)
-        .toUtf8();
 }
 
 int openLocalHandle(const QString& localPath, bool writable) {
@@ -1545,7 +1549,7 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
 
 qint64 FuseDriver::nativeDocReportedSize(const FuseMetadata& meta, NativeDocMode mode) {
     if (mode == NativeDocMode::BrowserShortcut) {
-        return nativeDocStubContent(meta).size();
+        return nativeDocShortcutPayload(meta.webViewLink, meta.remoteMimeType).size();
     }
 
     NativeDocRepresentation repr =
@@ -1690,12 +1694,12 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
 
         if (mode == NativeDocMode::BrowserShortcut) {
             // Synthetic stub — bypass FileCache entirely; content is
-            // generated on-the-fly in fuseRead from nativeDocStubContent().
+            // generated on-the-fly in fuseRead from nativeDocShortcutPayload().
             FuseOpenFile openFile;
             openFile.fileId = meta.fileId;
             openFile.cacheKey = meta.fileId;
             openFile.path = qpath;
-            openFile.size = nativeDocStubContent(meta).size();
+            openFile.size = nativeDocShortcutPayload(meta.webViewLink, meta.remoteMimeType).size();
             openFile.writable = false;
             openFile.dirty = false;
             openFile.synthetic = true;
@@ -1813,7 +1817,7 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
         if (meta.fileId.isEmpty() || !isNativeDoc(meta)) {
             return -EIO;
         }
-        QByteArray stub = nativeDocStubContent(meta);
+        QByteArray stub = nativeDocShortcutPayload(meta.webViewLink, meta.remoteMimeType);
         if (offset >= stub.size()) {
             return 0;
         }
@@ -2051,6 +2055,7 @@ int FuseDriver::fuseRmdir(const char* path) {
 
     // Remove from metadata only after remote trash confirmed
     drv->m_database->deleteFuseMetadata(meta.fileId);
+    drv->m_database->deleteNativeDocState(meta.fileId);
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseItemTrashed(qpath); }, Qt::QueuedConnection);
@@ -2112,6 +2117,7 @@ int FuseDriver::fuseUnlink(const char* path) {
 
     // Remove from metadata
     drv->m_database->deleteFuseMetadata(meta.fileId);
+    drv->m_database->deleteNativeDocState(meta.fileId);
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseItemTrashed(qpath); }, Qt::QueuedConnection);
@@ -2141,6 +2147,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
     QString newName = getFileName(toPath);
     QString oldParentPath = getParentPath(fromPath);
     QString newParentPath = getParentPath(toPath);
+    const QString remoteNewName = remoteRenameTargetForMetadata(meta, newName);
 
     bool isRename = (oldName != newName);
     bool isMove = (oldParentPath != newParentPath);
@@ -2183,7 +2190,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
                 [&]() {
                     return invokeDriveCall(drv->m_driveClient, [&]() {
                         drv->m_driveClient->moveAndRenameFile(meta.fileId, newParentId, oldParentId,
-                                                              newName);
+                                                              remoteNewName);
                     });
                 },
                 &error, &authFailure)) {
@@ -2240,7 +2247,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
                 drv->m_driveClient, meta.fileId, &renamedFile,
                 [&]() {
                     return invokeDriveCall(drv->m_driveClient, [&]() {
-                        drv->m_driveClient->renameFile(meta.fileId, newName);
+                        drv->m_driveClient->renameFile(meta.fileId, remoteNewName);
                     });
                 },
                 &error, &authFailure)) {
@@ -2255,7 +2262,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
 
     // Update metadata
     meta.name = newName;
-    meta.remoteName = newName;
+    meta.remoteName = remoteNewName;
     meta.path = toLookup;
     meta.cachedAt = QDateTime::currentDateTime();
     meta.lastAccessed = QDateTime::currentDateTime();
@@ -2450,7 +2457,8 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
 int FuseDriver::fuseStatfs(const char* path, struct statvfs* stbuf) {
     Q_UNUSED(path)
     auto* drv = self();
-    if (!drv) return -EIO;
+    if (!drv)
+        return -EIO;
 
     // Provide sensible defaults; a real implementation could query
     // GoogleDriveClient::getAboutInfo() for quota, but that is an

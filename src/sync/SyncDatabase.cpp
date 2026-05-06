@@ -96,6 +96,16 @@ FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
     return metadata;
 }
 
+NativeDocState readNativeDocStateRow(const QSqlQuery& query) {
+    NativeDocState state;
+    state.fileId = query.value("file_id").toString();
+    state.remoteName = query.value("remote_name").toString();
+    state.remoteMimeType = query.value("remote_mime_type").toString();
+    state.webViewLink = query.value("web_view_link").toString();
+    state.nativeDocModeOverride = query.value("native_doc_mode_override").toString();
+    return state;
+}
+
 quintptr currentThreadKey() {
     return reinterpret_cast<quintptr>(QThread::currentThreadId());
 }
@@ -522,6 +532,42 @@ bool SyncDatabase::createTables() {
         return false;
     }
 
+    QString createNativeDocStateTable = R"(
+        CREATE TABLE IF NOT EXISTS native_doc_state (
+            file_id TEXT PRIMARY KEY,
+            remote_name TEXT,
+            remote_mime_type TEXT,
+            web_view_link TEXT,
+            native_doc_mode_override TEXT
+        )
+    )";
+
+    if (!query.exec(createNativeDocStateTable)) {
+        logError("createTables", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "native_doc_state", "remote_name TEXT")) {
+        logError("createTables (native_doc_state.remote_name)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "native_doc_state", "remote_mime_type TEXT")) {
+        logError("createTables (native_doc_state.remote_mime_type)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "native_doc_state", "web_view_link TEXT")) {
+        logError("createTables (native_doc_state.web_view_link)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "native_doc_state", "native_doc_mode_override TEXT")) {
+        logError("createTables (native_doc_state.native_doc_mode_override)",
+                 query.lastError().text());
+        return false;
+    }
+
     // Settings table
     QString createSettingsTable = R"(
         CREATE TABLE IF NOT EXISTS settings (
@@ -589,6 +635,9 @@ bool SyncDatabase::createTables() {
     query.exec("CREATE INDEX IF NOT EXISTS idx_files_local_path ON files(local_path)");
     query.exec(
         "CREATE INDEX IF NOT EXISTS idx_files_file_id_local_path ON files(file_id, local_path)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_native_doc_state_remote_mime ON "
+        "native_doc_state(remote_mime_type)");
     query.exec("CREATE INDEX IF NOT EXISTS idx_conflicts_local_path ON conflicts(local_path)");
     query.exec(
         "CREATE INDEX IF NOT EXISTS idx_conflict_versions_conflict_id ON "
@@ -815,6 +864,24 @@ void SyncDatabase::setLocalPath(const QString& fileId, const QString& localPath)
     }
 }
 
+bool SyncDatabase::deleteFileStateById(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
+    if (fileId.isEmpty()) {
+        return true;
+    }
+
+    QSqlQuery query(m_db);
+    query.prepare("DELETE FROM files WHERE file_id = ?");
+    query.addBindValue(fileId);
+
+    if (!query.exec()) {
+        logError("deleteFileStateById", query.lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
 QDateTime SyncDatabase::getModifiedTimeAtSync(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getModifiedTimeAtSync");
@@ -974,6 +1041,67 @@ QList<FileSyncState> SyncDatabase::getFileStatesByPrefix(const QString& pathPref
     }
 
     return files;
+}
+
+NativeDocState SyncDatabase::getNativeDocState(const QString& fileId) const {
+    QMutexLocker locker(&m_mutex);
+    NativeDocState state;
+    if (fileId.isEmpty()) {
+        return state;
+    }
+
+    QSqlQuery query(m_db);
+    query.prepare("SELECT * FROM native_doc_state WHERE file_id = ?");
+    query.addBindValue(fileId);
+
+    if (query.exec() && query.next()) {
+        state = readNativeDocStateRow(query);
+    }
+
+    return state;
+}
+
+bool SyncDatabase::saveNativeDocState(const NativeDocState& state) {
+    QMutexLocker locker(&m_mutex);
+    requireFileId(state.fileId, "saveNativeDocState");
+
+    QSqlQuery query(m_db);
+    query.prepare(R"(
+        INSERT OR REPLACE INTO native_doc_state
+        (file_id, remote_name, remote_mime_type, web_view_link, native_doc_mode_override)
+        VALUES (?, ?, ?, ?, ?)
+    )");
+
+    query.addBindValue(state.fileId);
+    query.addBindValue(state.remoteName);
+    query.addBindValue(state.remoteMimeType);
+    query.addBindValue(state.webViewLink);
+    query.addBindValue(state.nativeDocModeOverride);
+
+    if (!query.exec()) {
+        logError("saveNativeDocState", query.lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+bool SyncDatabase::deleteNativeDocState(const QString& fileId) {
+    QMutexLocker locker(&m_mutex);
+    if (fileId.isEmpty()) {
+        return true;
+    }
+
+    QSqlQuery query(m_db);
+    query.prepare("DELETE FROM native_doc_state WHERE file_id = ?");
+    query.addBindValue(fileId);
+
+    if (!query.exec()) {
+        logError("deleteNativeDocState", query.lastError().text());
+        return false;
+    }
+
+    return true;
 }
 
 QString SyncDatabase::getChangeToken() const {
@@ -1485,6 +1613,21 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
         return false;
     }
 
+    NativeDocState state;
+    state.fileId = metadata.fileId;
+    state.remoteName = metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName;
+    state.remoteMimeType = metadata.remoteMimeType;
+    state.webViewLink = metadata.webViewLink;
+    state.nativeDocModeOverride = metadata.nativeDocModeOverride;
+
+    if (shouldPersistNativeDocState(state)) {
+        if (!saveNativeDocState(state)) {
+            return false;
+        }
+    } else if (!deleteNativeDocState(metadata.fileId)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -1840,8 +1983,9 @@ bool SyncDatabase::clearAllData() {
     // Order matters: delete from child tables before parents to satisfy
     // any future foreign-key constraints without requiring PRAGMA changes.
     static const char* tables[] = {
-        "conflict_versions",  "conflicts",     "deleted_files",   "files",   "fuse_dirty_files",
-        "fuse_cache_entries", "fuse_metadata", "fuse_sync_state", "settings"};
+        "conflict_versions", "conflicts",        "deleted_files",      "files",
+        "native_doc_state",  "fuse_dirty_files", "fuse_cache_entries", "fuse_metadata",
+        "fuse_sync_state",   "settings"};
     QSqlQuery query(m_db);
     for (const char* table : tables) {
         QString sql;

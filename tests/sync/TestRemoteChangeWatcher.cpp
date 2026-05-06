@@ -108,9 +108,12 @@ class TestRemoteChangeWatcher : public QObject {
     void testInterpretModifyChange_ReusesExistingDuplicateAlias();
     void testInterpretModifyChange_UsesDuplicateFolderAliasForChild();
     void testInterpretModifyChange_DisambiguatesAgainstLocalFile();
+    void testInterpretModifyChange_NativeDocRepresentationModes_data();
+    void testInterpretModifyChange_NativeDocRepresentationModes();
+    void testInterpretModifyChange_NativeDocReusesVisibleAlias();
 
     // Skip logic
-    void testSkipGoogleDoc();
+    void testGenericFilterAllowsGoogleDoc();
     void testSkipNotOwnedFile();
     void testDontSkipNormalFile();
     void testDontSkipTrashedFile();
@@ -467,17 +470,141 @@ void TestRemoteChangeWatcher::testInterpretModifyChange_DisambiguatesAgainstLoca
     QCOMPARE(item.localPath, QString("hello (1).txt"));
 }
 
+void TestRemoteChangeWatcher::testInterpretModifyChange_NativeDocRepresentationModes_data() {
+    QTest::addColumn<QString>("globalMode");
+    QTest::addColumn<QString>("overrideMode");
+    QTest::addColumn<QString>("expectedPath");
+    QTest::addColumn<bool>("expectQueued");
+
+    QTest::newRow("hide") << QString("hide") << QString() << QString() << false;
+    QTest::newRow("browser-shortcut")
+        << QString("browser-shortcut") << QString() << QString("Quarterly.gdoc") << true;
+    QTest::newRow("open-document")
+        << QString("open-document") << QString() << QString("Quarterly.odt") << true;
+    QTest::newRow("text") << QString("text") << QString() << QString("Quarterly.md") << true;
+    QTest::newRow("override-hide")
+        << QString("browser-shortcut") << QString("hide") << QString() << false;
+    QTest::newRow("override-text")
+        << QString("browser-shortcut") << QString("text") << QString("Quarterly.md") << true;
+}
+
+void TestRemoteChangeWatcher::testInterpretModifyChange_NativeDocRepresentationModes() {
+    QFETCH(QString, globalMode);
+    QFETCH(QString, overrideMode);
+    QFETCH(QString, expectedPath);
+    QFETCH(bool, expectQueued);
+
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", globalMode);
+    settings.sync();
+
+    if (!overrideMode.isEmpty()) {
+        NativeDocState state;
+        state.fileId = "doc-1";
+        state.nativeDocModeOverride = overrideMode;
+        QVERIFY(m_syncDatabase->saveNativeDocState(state));
+    }
+
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setNextToken("token-2");
+
+    DriveFile modifiedFile;
+    modifiedFile.id = "doc-1";
+    modifiedFile.name = "Quarterly";
+    modifiedFile.mimeType = "application/vnd.google-apps.document";
+    modifiedFile.webViewLink = "https://docs.google.com/document/d/doc-1/edit";
+    modifiedFile.ownedByMe = true;
+    modifiedFile.parents = {"root-id"};
+    modifiedFile.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-native";
+    change.fileId = "doc-1";
+    change.removed = false;
+    change.file = modifiedFile;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+
+    QSignalSpy tokenSpy(m_watcher, &RemoteChangeWatcher::changeTokenUpdated);
+    QSignalSpy changeSpy(m_watcher, &RemoteChangeWatcher::changeDetected);
+    m_watcher->start();
+
+    QTRY_VERIFY(tokenSpy.count() >= 1);
+    QCOMPARE(m_watcher->changeToken(), QString("token-2"));
+
+    QString resolvedPath;
+    while (!m_changeQueue->isEmpty()) {
+        const ChangeQueueItem item = m_changeQueue->dequeue();
+        if (item.fileId == QStringLiteral("doc-1")) {
+            resolvedPath = item.localPath;
+        }
+    }
+
+    if (expectQueued) {
+        QCOMPARE(changeSpy.count(), 1);
+        QCOMPARE(resolvedPath, expectedPath);
+    } else {
+        QCOMPARE(changeSpy.count(), 0);
+        QVERIFY(resolvedPath.isEmpty());
+    }
+
+    const NativeDocState stored = m_syncDatabase->getNativeDocState("doc-1");
+    QVERIFY(stored.isValid());
+    QCOMPARE(stored.remoteName, QString("Quarterly"));
+    QCOMPARE(stored.remoteMimeType, QString("application/vnd.google-apps.document"));
+    QCOMPARE(stored.webViewLink, QString("https://docs.google.com/document/d/doc-1/edit"));
+    QCOMPARE(stored.nativeDocModeOverride, overrideMode);
+}
+
+void TestRemoteChangeWatcher::testInterpretModifyChange_NativeDocReusesVisibleAlias() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+
+    m_syncDatabase->setFileId("Quarterly_file-3.gdoc", "file-3");
+
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setNextToken("token-2");
+
+    DriveFile modifiedFile;
+    modifiedFile.id = "file-3";
+    modifiedFile.name = "Quarterly";
+    modifiedFile.mimeType = "application/vnd.google-apps.document";
+    modifiedFile.webViewLink = "https://docs.google.com/document/d/file-3/edit";
+    modifiedFile.ownedByMe = true;
+    modifiedFile.parents = {"root-id"};
+    modifiedFile.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-native-alias";
+    change.fileId = "file-3";
+    change.removed = false;
+    change.file = modifiedFile;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+
+    QSignalSpy changeSpy(m_watcher, &RemoteChangeWatcher::changeDetected);
+    m_watcher->start();
+
+    QTRY_VERIFY(changeSpy.count() >= 1);
+
+    const ChangeQueueItem item = m_changeQueue->dequeue();
+    QCOMPARE(item.localPath, QString("Quarterly_file-3.gdoc"));
+}
+
 // ---------------------------------------------------------------------------
 //  Skip logic (FileFilter)
 // ---------------------------------------------------------------------------
-void TestRemoteChangeWatcher::testSkipGoogleDoc() {
+void TestRemoteChangeWatcher::testGenericFilterAllowsGoogleDoc() {
     SyncSettings settings = SyncSettings::load();
 
     DriveFile googleDoc;
     googleDoc.mimeType = "application/vnd.google-apps.document";
     googleDoc.ownedByMe = true;
 
-    QVERIFY(FileFilter::shouldSkipRemoteFile(googleDoc, settings));
+    QVERIFY(!FileFilter::shouldSkipRemoteFile(googleDoc, settings));
 }
 
 void TestRemoteChangeWatcher::testSkipNotOwnedFile() {

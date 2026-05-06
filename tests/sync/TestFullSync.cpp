@@ -139,6 +139,9 @@ class TestFullSync : public QObject {
     void testRemoteTreeNestedFolder();
     void testRemoteDuplicateFilesUseFileIdSuffix();
     void testRemoteDuplicateFoldersKeepDistinctDescendants();
+    void testRemoteTreeNativeDocRepresentationModes_data();
+    void testRemoteTreeNativeDocRepresentationModes();
+    void testRemoteDuplicateNativeDocsUseVisibleSuffix();
     void testRemoteMultiPageFetch();
 
     // Orphan handling
@@ -148,7 +151,7 @@ class TestFullSync : public QObject {
     // Ignore patterns / skip logic (FileFilter)
     void testIgnoresHiddenFiles();
     void testIgnoresTmpExtension();
-    void testFileFilterSkipsGoogleDoc();
+    void testFileFilterAllowsGoogleDocForModeHandling();
     void testFileFilterSkipsSharedFile();
     void testFileFilterAllowsNormalFile();
     void testFileFilterAllowsTrashedFile();
@@ -354,8 +357,10 @@ void TestFullSync::testLocalScanQueuesSubdirectories() {
     bool foundFile = false;
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        if (item.localPath == "subdir") foundDir = true;
-        if (item.localPath == "subdir/nested.txt") foundFile = true;
+        if (item.localPath == "subdir")
+            foundDir = true;
+        if (item.localPath == "subdir/nested.txt")
+            foundFile = true;
         ++count;
     }
     QCOMPARE(count, 2);
@@ -497,6 +502,116 @@ void TestFullSync::testRemoteDuplicateFoldersKeepDistinctDescendants() {
     QCOMPARE(resolvedPaths.value("file-2"), QString("docs_folder-2/readme.md"));
 }
 
+void TestFullSync::testRemoteTreeNativeDocRepresentationModes_data() {
+    QTest::addColumn<QString>("globalMode");
+    QTest::addColumn<QString>("overrideMode");
+    QTest::addColumn<QString>("expectedPath");
+    QTest::addColumn<bool>("expectQueued");
+
+    QTest::newRow("hide") << QString("hide") << QString() << QString() << false;
+    QTest::newRow("browser-shortcut")
+        << QString("browser-shortcut") << QString() << QString("Quarterly.gdoc") << true;
+    QTest::newRow("open-document")
+        << QString("open-document") << QString() << QString("Quarterly.odt") << true;
+    QTest::newRow("text") << QString("text") << QString() << QString("Quarterly.md") << true;
+    QTest::newRow("override-hide")
+        << QString("browser-shortcut") << QString("hide") << QString() << false;
+    QTest::newRow("override-text")
+        << QString("browser-shortcut") << QString("text") << QString("Quarterly.md") << true;
+}
+
+void TestFullSync::testRemoteTreeNativeDocRepresentationModes() {
+    QFETCH(QString, globalMode);
+    QFETCH(QString, overrideMode);
+    QFETCH(QString, expectedPath);
+    QFETCH(bool, expectQueued);
+
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+    m_fullSync->setSyncFolder(syncDir);
+
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", globalMode);
+    settings.sync();
+
+    if (!overrideMode.isEmpty()) {
+        NativeDocState state;
+        state.fileId = "doc-1";
+        state.nativeDocModeOverride = overrideMode;
+        QVERIFY(m_syncDatabase->saveNativeDocState(state));
+    }
+
+    FakeDriveClientForFS::FilePage page;
+    DriveFile nativeDoc = makeFile("doc-1", "Quarterly", "root-id-123", false, false, true,
+                                   "application/vnd.google-apps.document");
+    nativeDoc.webViewLink = "https://docs.google.com/document/d/doc-1/edit";
+    page.files.append(nativeDoc);
+    m_driveClient->filePages.append(page);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSync();
+
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
+
+    QString resolvedPath;
+    while (!m_changeQueue->isEmpty()) {
+        const ChangeQueueItem item = m_changeQueue->dequeue();
+        if (item.origin == ChangeOrigin::Remote && item.fileId == QStringLiteral("doc-1")) {
+            resolvedPath = item.localPath;
+        }
+    }
+
+    if (expectQueued) {
+        QCOMPARE(resolvedPath, expectedPath);
+    } else {
+        QVERIFY(resolvedPath.isEmpty());
+    }
+
+    const NativeDocState stored = m_syncDatabase->getNativeDocState("doc-1");
+    QVERIFY(stored.isValid());
+    QCOMPARE(stored.remoteName, QString("Quarterly"));
+    QCOMPARE(stored.remoteMimeType, QString("application/vnd.google-apps.document"));
+    QCOMPARE(stored.webViewLink, QString("https://docs.google.com/document/d/doc-1/edit"));
+    QCOMPARE(stored.nativeDocModeOverride, overrideMode);
+}
+
+void TestFullSync::testRemoteDuplicateNativeDocsUseVisibleSuffix() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+    m_fullSync->setSyncFolder(syncDir);
+
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+
+    FakeDriveClientForFS::FilePage page;
+    DriveFile first = makeFile("doc-1", "Quarterly", "root-id-123", false, false, true,
+                               "application/vnd.google-apps.document");
+    first.webViewLink = "https://docs.google.com/document/d/doc-1/edit";
+    DriveFile second = makeFile("doc-2", "Quarterly", "root-id-123", false, false, true,
+                                "application/vnd.google-apps.document");
+    second.webViewLink = "https://docs.google.com/document/d/doc-2/edit";
+    page.files.append(first);
+    page.files.append(second);
+    m_driveClient->filePages.append(page);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSync();
+
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
+
+    QHash<QString, QString> resolvedPaths;
+    while (!m_changeQueue->isEmpty()) {
+        const ChangeQueueItem item = m_changeQueue->dequeue();
+        if (item.origin == ChangeOrigin::Remote) {
+            resolvedPaths.insert(item.fileId, item.localPath);
+        }
+    }
+
+    QCOMPARE(resolvedPaths.value("doc-1"), QString("Quarterly.gdoc"));
+    QCOMPARE(resolvedPaths.value("doc-2"), QString("Quarterly_doc-2.gdoc"));
+}
+
 void TestFullSync::testRemoteMultiPageFetch() {
     QString syncDir = m_tempDir->filePath("sync");
     QDir().mkpath(syncDir);
@@ -523,7 +638,8 @@ void TestFullSync::testRemoteMultiPageFetch() {
     int remoteCount = 0;
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        if (item.origin == ChangeOrigin::Remote) ++remoteCount;
+        if (item.origin == ChangeOrigin::Remote)
+            ++remoteCount;
     }
     QCOMPARE(remoteCount, 2);
 }
@@ -551,7 +667,8 @@ void TestFullSync::testOrphansNotQueued() {
     bool foundOrphan = false;
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        if (item.fileId == "orphan-1") foundOrphan = true;
+        if (item.fileId == "orphan-1")
+            foundOrphan = true;
     }
     QVERIFY(!foundOrphan);
 }
@@ -582,7 +699,8 @@ void TestFullSync::testOrphanCountReported() {
     bool foundOrphan = false;
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        if (item.fileId == "orphan-1") foundOrphan = true;
+        if (item.fileId == "orphan-1")
+            foundOrphan = true;
     }
     QVERIFY(!foundOrphan);
 }
@@ -618,8 +736,10 @@ void TestFullSync::testIgnoresHiddenFiles() {
     bool foundVisible = false;
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        if (item.localPath == ".hidden") foundHidden = true;
-        if (item.localPath == "visible.txt") foundVisible = true;
+        if (item.localPath == ".hidden")
+            foundHidden = true;
+        if (item.localPath == "visible.txt")
+            foundVisible = true;
     }
     QVERIFY(!foundHidden);
     QVERIFY(foundVisible);
@@ -644,17 +764,18 @@ void TestFullSync::testIgnoresTmpExtension() {
     bool foundTmp = false;
     while (!m_changeQueue->isEmpty()) {
         ChangeQueueItem item = m_changeQueue->dequeue();
-        if (item.localPath == "scratch.tmp") foundTmp = true;
+        if (item.localPath == "scratch.tmp")
+            foundTmp = true;
     }
     QVERIFY(!foundTmp);
 }
 
-void TestFullSync::testFileFilterSkipsGoogleDoc() {
+void TestFullSync::testFileFilterAllowsGoogleDocForModeHandling() {
     SyncSettings settings = SyncSettings::load();
     DriveFile googleDoc;
     googleDoc.mimeType = "application/vnd.google-apps.document";
     googleDoc.ownedByMe = true;
-    QVERIFY(FileFilter::shouldSkipRemoteFile(googleDoc, settings));
+    QVERIFY(!FileFilter::shouldSkipRemoteFile(googleDoc, settings));
 }
 
 void TestFullSync::testFileFilterSkipsSharedFile() {

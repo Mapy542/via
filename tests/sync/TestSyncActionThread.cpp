@@ -18,6 +18,8 @@
 #include "sync/SyncActionQueue.h"
 #include "sync/SyncActionThread.h"
 #include "sync/SyncDatabase.h"
+#include "utils/NativeDocShortcutHandler.h"
+#include "utils/NativeDocSupport.h"
 
 class FakeGoogleDriveClient : public GoogleDriveClient {
     Q_OBJECT
@@ -33,6 +35,11 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         QString localPath;
         QString parentId;
         QString fileName;
+    };
+
+    struct UpdateCall {
+        QString fileId;
+        QString localPath;
     };
 
     struct MoveCall {
@@ -56,6 +63,12 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
 
     struct DownloadCall {
         QString fileId;
+        QString localPath;
+    };
+
+    struct ExportCall {
+        QString fileId;
+        QString exportMimeType;
         QString localPath;
     };
 
@@ -98,14 +111,20 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
 
     QString lastUploadedFileId() const { return m_lastUploadedFileId; }
     UploadCall lastUploadCall() const { return m_lastUploadCall; }
+    UpdateCall lastUpdateCall() const { return m_lastUpdateCall; }
     MoveCall lastMoveCall() const { return m_lastMoveCall; }
     RenameCall lastRenameCall() const { return m_lastRenameCall; }
     DeleteCall lastDeleteCall() const { return m_lastDeleteCall; }
     TrashCall lastTrashCall() const { return m_lastTrashCall; }
     DownloadCall lastDownloadCall() const { return m_lastDownloadCall; }
+    ExportCall lastExportCall() const { return m_lastExportCall; }
     FolderCall lastFolderCall() const { return m_lastFolderCall; }
     int uploadCallCount() const { return m_uploadCallCount; }
+    int updateCallCount() const { return m_updateCallCount; }
+    int exportCallCount() const { return m_exportCallCount; }
     int folderCallCount() const { return m_folderCallCount; }
+
+    void setFileMetadata(const DriveFile& file) { m_metadataByFileId.insert(file.id, file); }
 
     void downloadFile(const QString& fileId, const QString& localPath) override {
         m_lastDownloadCall = {fileId, localPath};
@@ -117,6 +136,30 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
             file.write("data");
             file.close();
         }
+        emit fileDownloaded(fileId, localPath);
+    }
+
+    void exportFile(const QString& fileId, const QString& exportMimeType,
+                    const QString& localPath) override {
+        ++m_exportCallCount;
+        m_lastExportCall = {fileId, exportMimeType, localPath};
+
+        const QString exactOperation = QStringLiteral("exportFile:%1").arg(fileId);
+        if (emitInjectedError(exactOperation, fileId, localPath) ||
+            emitInjectedError(QStringLiteral("exportFile"), fileId, localPath)) {
+            return;
+        }
+
+        QFileInfo info(localPath);
+        QDir dir(info.dir());
+        dir.mkpath(".");
+        QFile file(localPath);
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write("export:");
+            file.write(exportMimeType.toUtf8());
+            file.close();
+        }
+
         emit fileDownloaded(fileId, localPath);
     }
 
@@ -138,6 +181,8 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
     }
 
     void updateFile(const QString& fileId, const QString& localPath) override {
+        ++m_updateCallCount;
+        m_lastUpdateCall = {fileId, localPath};
         DriveFile file;
         file.id = fileId;
         file.name = QFileInfo(localPath).fileName();
@@ -210,6 +255,10 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
         return m_folderIdByPath.value(normalized);
     }
 
+    DriveFile getFileMetadataBlocking(const QString& fileId) override {
+        return m_metadataByFileId.value(fileId);
+    }
+
    private:
     QString nextId() { return QString("fake-%1").arg(++m_nextId); }
 
@@ -234,18 +283,23 @@ class FakeGoogleDriveClient : public GoogleDriveClient {
 
     int m_nextId = 0;
     int m_uploadCallCount = 0;
+    int m_updateCallCount = 0;
+    int m_exportCallCount = 0;
     int m_folderCallCount = 0;
     QString m_lastUploadedFileId;
     UploadCall m_lastUploadCall;
+    UpdateCall m_lastUpdateCall;
     MoveCall m_lastMoveCall;
     RenameCall m_lastRenameCall;
     DeleteCall m_lastDeleteCall;
     TrashCall m_lastTrashCall;
     DownloadCall m_lastDownloadCall;
+    ExportCall m_lastExportCall;
     FolderCall m_lastFolderCall;
     QHash<QString, QString> m_folderIdByPath;
     QHash<QString, QString> m_folderPathById;
     QHash<QString, QString> m_parentByFileId;
+    QHash<QString, DriveFile> m_metadataByFileId;
     QHash<QString, InjectedError> m_injectedErrors;
 };
 
@@ -270,9 +324,16 @@ class TestSyncActionThread : public QObject {
     void testWatcherLegacyErrorDoesNotFailUnrelatedAction();
     void testUploadFile_RetriesTransientFailure();
     void testUploadFile_StopsAfterRetryBudget();
+    void testUploadNativeDocGuard_RejectsMappedNativeDoc();
     void testDownloadFile();
     void testDownloadFile_DisambiguatesDuplicateWithFileIdSuffix();
     void testDownloadFile_DisambiguatesDuplicateWithNumericSuffix();
+    void testDownloadNativeDoc_BrowserShortcutMaterializesReadOnlyShortcut();
+    void testDownloadNativeDoc_OpenDocumentUsesExportMimeAndReadOnlyPermissions();
+    void testDownloadNativeDoc_FetchesMissingMetadataForShortcutMaterialization();
+    void testDownloadNativeDoc_ExportLimitFallsBackToBrowserShortcut();
+    void testDownloadNativeDoc_ExportLimitFallbackWriteFailurePreservesState();
+    void testDownloadNativeDoc_NonLimitExportFailureStaysError();
     void testDownloadFolder();
     void testDeleteLocal();
     void testDeleteLocalFolderMarksDescendants();
@@ -296,6 +357,7 @@ class TestSyncActionThread : public QObject {
     void testMoveRemoteToRootKeepsExactPathWhenLocalExists();
     void testMoveRemoteDefersMissingParent();
     void testRenameRemote();
+    void testRenameRemote_NativeDocStripsVisibleSuffix();
     void testBadInputFuzzing();
 
    private:
@@ -676,6 +738,39 @@ void TestSyncActionThread::testDownloadFile() {
     QVERIFY(QFile::exists(m_tempDir->filePath(relPath)));
 }
 
+void TestSyncActionThread::testUploadNativeDocGuard_RejectsMappedNativeDoc() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+
+    NativeDocState state;
+    state.fileId = "native-doc-upload";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/native-doc-upload/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+
+    createFile("upload/Quarterly.gdoc", "edited-local-content");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Upload;
+    action.localPath = "upload/Quarterly.gdoc";
+    action.fileId = state.fileId;
+
+    QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
+    QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
+
+    m_thread->start();
+    QTest::qWait(10);
+    m_queue->enqueue(action);
+
+    QTRY_COMPARE(failedSpy.count(), 1);
+    QCOMPARE(completedSpy.count(), 0);
+
+    QCOMPARE(m_drive->uploadCallCount(), 0);
+    QCOMPARE(m_drive->updateCallCount(), 0);
+}
+
 void TestSyncActionThread::testDownloadFile_DisambiguatesDuplicateWithFileIdSuffix() {
     createFile("downloads/file.txt", "existing");
 
@@ -706,6 +801,265 @@ void TestSyncActionThread::testDownloadFile_DisambiguatesDuplicateWithNumericSuf
 
     QCOMPARE(m_db->getLocalPath("remote-file-num"), QString("downloads/file (1).txt"));
     QVERIFY(QFile::exists(m_tempDir->filePath("downloads/file (1).txt")));
+}
+
+void TestSyncActionThread::testDownloadNativeDoc_BrowserShortcutMaterializesReadOnlyShortcut() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+
+    NativeDocState state;
+    state.fileId = "native-doc-shortcut";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/native-doc-shortcut/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/Quarterly.gdoc";
+    action.fileId = state.fileId;
+    action.modifiedTime = QDateTime::currentDateTimeUtc().addSecs(-90);
+
+    enqueueAndWait(action);
+
+    QCOMPARE(m_drive->exportCallCount(), 0);
+    QVERIFY(m_drive->lastDownloadCall().fileId.isEmpty());
+
+    const QString absolutePath = m_tempDir->filePath(action.localPath);
+    QFile shortcutFile(absolutePath);
+    QVERIFY(shortcutFile.open(QIODevice::ReadOnly));
+    QCOMPARE(shortcutFile.readAll(), nativeDocShortcutPayload(state));
+    shortcutFile.close();
+
+    const QFileInfo shortcutInfo(absolutePath);
+    QVERIFY(!(shortcutInfo.permissions() & (QFileDevice::WriteOwner | QFileDevice::WriteUser |
+                                            QFileDevice::WriteGroup | QFileDevice::WriteOther)));
+    const qint64 actualMtime = shortcutInfo.lastModified().toUTC().toSecsSinceEpoch();
+    const qint64 expectedMtime = action.modifiedTime.toUTC().toSecsSinceEpoch();
+    QVERIFY(qAbs(actualMtime - expectedMtime) <= 2);
+
+    QCOMPARE(m_db->getLocalPath(state.fileId), action.localPath);
+}
+
+void TestSyncActionThread::
+    testDownloadNativeDoc_OpenDocumentUsesExportMimeAndReadOnlyPermissions() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "open-document");
+    settings.sync();
+
+    NativeDocState state;
+    state.fileId = "native-doc-export";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/native-doc-export/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/Quarterly.odt";
+    action.fileId = state.fileId;
+    action.modifiedTime = QDateTime::currentDateTimeUtc().addSecs(-90);
+
+    enqueueAndWait(action);
+
+    QCOMPARE(m_drive->exportCallCount(), 1);
+    QCOMPARE(m_drive->lastExportCall().fileId, state.fileId);
+    QCOMPARE(m_drive->lastExportCall().exportMimeType,
+             QString("application/vnd.oasis.opendocument.text"));
+    QVERIFY(m_drive->lastDownloadCall().fileId.isEmpty());
+
+    const QString absolutePath = m_tempDir->filePath(action.localPath);
+    QFile exportedFile(absolutePath);
+    QVERIFY(exportedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(exportedFile.readAll(), QByteArray("export:application/vnd.oasis.opendocument.text"));
+    exportedFile.close();
+
+    const QFileInfo exportedInfo(absolutePath);
+    QVERIFY(!(exportedInfo.permissions() & (QFileDevice::WriteOwner | QFileDevice::WriteUser |
+                                            QFileDevice::WriteGroup | QFileDevice::WriteOther)));
+    const qint64 actualMtime = exportedInfo.lastModified().toUTC().toSecsSinceEpoch();
+    const qint64 expectedMtime = action.modifiedTime.toUTC().toSecsSinceEpoch();
+    QVERIFY(qAbs(actualMtime - expectedMtime) <= 2);
+}
+
+void TestSyncActionThread::
+    testDownloadNativeDoc_FetchesMissingMetadataForShortcutMaterialization() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+
+    DriveFile file;
+    file.id = "native-doc-fetched";
+    file.name = "Fetched Doc";
+    file.mimeType = "application/vnd.google-apps.document";
+    file.webViewLink = "https://docs.google.com/document/d/native-doc-fetched/edit";
+    m_drive->setFileMetadata(file);
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/Fetched Doc.gdoc";
+    action.fileId = file.id;
+
+    enqueueAndWait(action);
+
+    const NativeDocState stored = m_db->getNativeDocState(file.id);
+    QVERIFY(stored.isValid());
+    QCOMPARE(stored.remoteName, file.name);
+    QCOMPARE(stored.remoteMimeType, file.mimeType);
+    QCOMPARE(stored.webViewLink, file.webViewLink);
+
+    const QString absolutePath = m_tempDir->filePath(action.localPath);
+    const auto parsedShortcut = parseNativeDocShortcutFile(absolutePath);
+    QVERIFY(parsedShortcut.has_value());
+    QCOMPARE(parsedShortcut->url.toString(), file.webViewLink);
+    QCOMPARE(parsedShortcut->remoteMimeType, file.mimeType);
+}
+
+void TestSyncActionThread::testDownloadNativeDoc_ExportLimitFallsBackToBrowserShortcut() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "open-document");
+    settings.sync();
+
+    NativeDocState state;
+    state.fileId = "native-doc-export-limit";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/native-doc-export-limit/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+    m_db->setLocalPath(state.fileId, "downloads/Quarterly.odt");
+    createFile("downloads/Quarterly.odt", "stale-export");
+
+    m_drive->injectOperationError(QStringLiteral("exportFile:%1").arg(state.fileId),
+                                  "This file is too large to be exported.", 403, 1);
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/Quarterly.odt";
+    action.fileId = state.fileId;
+    action.modifiedTime = QDateTime::currentDateTimeUtc().addSecs(-90);
+
+    QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
+    QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
+    QSignalSpy errorSpy(m_thread, &SyncActionThread::error);
+
+    m_thread->start();
+    QTest::qWait(10);
+    m_queue->enqueue(action);
+
+    QTRY_COMPARE(completedSpy.count(), 1);
+    QCOMPARE(failedSpy.count(), 0);
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(m_drive->exportCallCount(), 1);
+    QCOMPARE(m_drive->lastExportCall().fileId, state.fileId);
+    QCOMPARE(m_drive->lastExportCall().exportMimeType,
+             QString("application/vnd.oasis.opendocument.text"));
+
+    const NativeDocState stored = m_db->getNativeDocState(state.fileId);
+    QCOMPARE(stored.nativeDocModeOverride, QString("browser-shortcut"));
+    QCOMPARE(m_db->getLocalPath(state.fileId), QString("downloads/Quarterly.gdoc"));
+
+    QVERIFY(!QFile::exists(m_tempDir->filePath("downloads/Quarterly.odt")));
+    const QString shortcutPath = m_tempDir->filePath("downloads/Quarterly.gdoc");
+    const auto parsedShortcut = parseNativeDocShortcutFile(shortcutPath);
+    QVERIFY(parsedShortcut.has_value());
+    QCOMPARE(parsedShortcut->url.toString(), state.webViewLink);
+    QCOMPARE(parsedShortcut->remoteMimeType, state.remoteMimeType);
+}
+
+void TestSyncActionThread::testDownloadNativeDoc_ExportLimitFallbackWriteFailurePreservesState() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "open-document");
+    settings.sync();
+
+    struct PermissionsRestorer {
+        QString path;
+        QFileDevice::Permissions permissions;
+
+        ~PermissionsRestorer() { QFile(path).setPermissions(permissions); }
+    };
+
+    NativeDocState state;
+    state.fileId = "native-doc-export-limit-write-failure";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink =
+        "https://docs.google.com/document/d/native-doc-export-limit-write-failure/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+    m_db->setLocalPath(state.fileId, "downloads/Quarterly.odt");
+    createFile("downloads/Quarterly.odt", "stale-export");
+
+    const QString downloadsPath = m_tempDir->filePath("downloads");
+    QFile downloadsDir(downloadsPath);
+    const QFileDevice::Permissions originalPermissions = downloadsDir.permissions();
+    PermissionsRestorer permissionsRestorer{downloadsPath, originalPermissions};
+    const QFileDevice::Permissions readOnlyPermissions =
+        originalPermissions & ~(QFileDevice::WriteOwner | QFileDevice::WriteUser |
+                                QFileDevice::WriteGroup | QFileDevice::WriteOther);
+    QVERIFY(downloadsDir.setPermissions(readOnlyPermissions));
+
+    m_drive->injectOperationError(QStringLiteral("exportFile:%1").arg(state.fileId),
+                                  "This file is too large to be exported.", 403, 1);
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/Quarterly.odt";
+    action.fileId = state.fileId;
+
+    QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
+    QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
+
+    m_thread->start();
+    QTest::qWait(10);
+    m_queue->enqueue(action);
+
+    QTRY_COMPARE(failedSpy.count(), 1);
+    QCOMPARE(completedSpy.count(), 0);
+
+    const NativeDocState stored = m_db->getNativeDocState(state.fileId);
+    QVERIFY(stored.nativeDocModeOverride.isEmpty());
+    QCOMPARE(m_db->getLocalPath(state.fileId), QString("downloads/Quarterly.odt"));
+    QVERIFY(QFile::exists(m_tempDir->filePath("downloads/Quarterly.odt")));
+    QVERIFY(!QFile::exists(m_tempDir->filePath("downloads/Quarterly.gdoc")));
+}
+
+void TestSyncActionThread::testDownloadNativeDoc_NonLimitExportFailureStaysError() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "open-document");
+    settings.sync();
+
+    NativeDocState state;
+    state.fileId = "native-doc-export-permission";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/native-doc-export-permission/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::Download;
+    action.localPath = "downloads/Quarterly.odt";
+    action.fileId = state.fileId;
+
+    QSignalSpy completedSpy(m_thread, &SyncActionThread::actionCompleted);
+    QSignalSpy failedSpy(m_thread, &SyncActionThread::actionFailed);
+    QSignalSpy errorSpy(m_thread, &SyncActionThread::error);
+
+    m_drive->injectOperationError(QStringLiteral("exportFile:%1").arg(state.fileId),
+                                  "The user does not have sufficient permissions for this file.",
+                                  403, 1);
+
+    m_thread->start();
+    QTest::qWait(10);
+    m_queue->enqueue(action);
+
+    QTRY_COMPARE(failedSpy.count(), 1);
+    QCOMPARE(completedSpy.count(), 0);
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(m_drive->exportCallCount(), 1);
+
+    const NativeDocState stored = m_db->getNativeDocState(state.fileId);
+    QVERIFY(stored.nativeDocModeOverride.isEmpty());
+    QVERIFY(!QFile::exists(m_tempDir->filePath("downloads/Quarterly.gdoc")));
 }
 
 void TestSyncActionThread::testDownloadFolder() {
@@ -1142,6 +1496,34 @@ void TestSyncActionThread::testRenameRemote() {
     enqueueAndWait(action);
     QCOMPARE(m_drive->lastRenameCall().newName, QString("renamed.txt"));
     QCOMPARE(m_db->getLocalPath("remote-id-5"), QString("remote/renamed.txt"));
+}
+
+void TestSyncActionThread::testRenameRemote_NativeDocStripsVisibleSuffix() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "browser-shortcut");
+    settings.sync();
+
+    NativeDocState state;
+    state.fileId = "remote-native-rename";
+    state.remoteName = "Quarterly";
+    state.remoteMimeType = "application/vnd.google-apps.document";
+    state.webViewLink = "https://docs.google.com/document/d/remote-native-rename/edit";
+    QVERIFY(m_db->saveNativeDocState(state));
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::RenameRemote;
+    action.localPath = "remote/Quarterly.gdoc";
+    action.fileId = state.fileId;
+    action.renameTo = "Renamed.gdoc";
+
+    enqueueAndWait(action);
+
+    QCOMPARE(m_drive->lastRenameCall().fileId, state.fileId);
+    QCOMPARE(m_drive->lastRenameCall().newName, QString("Renamed"));
+    QCOMPARE(m_db->getLocalPath(state.fileId), QString("remote/Renamed.gdoc"));
+
+    const NativeDocState updatedState = m_db->getNativeDocState(state.fileId);
+    QCOMPARE(updatedState.remoteName, QString("Renamed"));
 }
 
 void TestSyncActionThread::testBadInputFuzzing() {

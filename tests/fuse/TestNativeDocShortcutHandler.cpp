@@ -18,6 +18,7 @@ class TestNativeDocShortcutHandler : public QObject {
     void testShortcutArgument_LocalFileUrlResolvesToPath();
     void testShortcutArgument_MissingNativeDocStillDetected();
     void testParseShortcutText_ValidShortcut();
+    void testShortcutPayload_RoundTripsWithParser();
     void testParseShortcutFile_InvalidHeader();
     void testDesktopMetadata_SameCount();
     void testMimePackageXml_ContainsAllExtensions();
@@ -75,6 +76,18 @@ void TestNativeDocShortcutHandler::testParseShortcutText_ValidShortcut() {
         "MimeType=application/vnd.google-apps.document\n");
 
     const auto parsed = parseNativeDocShortcutText(text);
+    QVERIFY(parsed.has_value());
+    QCOMPARE(parsed->url.toString(),
+             QStringLiteral("https://docs.google.com/document/d/example/edit"));
+    QCOMPARE(parsed->remoteMimeType, QStringLiteral("application/vnd.google-apps.document"));
+}
+
+void TestNativeDocShortcutHandler::testShortcutPayload_RoundTripsWithParser() {
+    const QByteArray payload =
+        nativeDocShortcutPayload(QStringLiteral("https://docs.google.com/document/d/example/edit"),
+                                 QStringLiteral("application/vnd.google-apps.document"));
+
+    const auto parsed = parseNativeDocShortcutText(QString::fromUtf8(payload));
     QVERIFY(parsed.has_value());
     QCOMPARE(parsed->url.toString(),
              QStringLiteral("https://docs.google.com/document/d/example/edit"));

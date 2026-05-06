@@ -153,6 +153,7 @@ set(HEADERS
     src/utils/FileInUseChecker.h
     src/utils/PowerProfileMonitor.h
     src/utils/AutostartManager.h
+    src/utils/NativeDocSupport.h
     src/utils/NativeDocShortcutHandler.h
     src/utils/UpdateChecker.h
     src/utils/SuspendMonitor.h

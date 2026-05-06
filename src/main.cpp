@@ -203,7 +203,9 @@ void stopFuseComponent(FuseDriver* fuseDriver) {
     }
 }
 
-constexpr int kCurrentFuseRepresentationEpoch = 1;
+constexpr int kCurrentNativeDocRepresentationEpoch = 1;
+constexpr int kCurrentFuseRepresentationEpoch = kCurrentNativeDocRepresentationEpoch;
+constexpr int kCurrentMirrorRepresentationEpoch = kCurrentNativeDocRepresentationEpoch;
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -354,11 +356,20 @@ int main(int argc, char* argv[]) {
         settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse").toString();
     const qint64 cacheSizeMb = settings.value("advanced/cacheSize", 5000).toLongLong();
 
-    // Ensure previousNativeDocMode is seeded on first run so mode-change
-    // detection works on the very first settings change.
+    // Seed mode-tracking keys so restart-time maintenance can detect the first
+    // user-visible change even if this is the first launch after upgrade.
+    const QString configuredNativeDocMode =
+        settings.value("advanced/nativeDocMode", "hide").toString();
+    bool wroteNativeDocModeSeed = false;
     if (!settings.contains("advanced/previousNativeDocMode")) {
-        settings.setValue("advanced/previousNativeDocMode",
-                          settings.value("advanced/nativeDocMode", "hide").toString());
+        settings.setValue("advanced/previousNativeDocMode", configuredNativeDocMode);
+        wroteNativeDocModeSeed = true;
+    }
+    if (!settings.contains("advanced/previousMirrorNativeDocMode")) {
+        settings.setValue("advanced/previousMirrorNativeDocMode", configuredNativeDocMode);
+        wroteNativeDocModeSeed = true;
+    }
+    if (wroteNativeDocModeSeed) {
         settings.sync();
     }
 
@@ -445,6 +456,66 @@ int main(int argc, char* argv[]) {
     LocalChangeWatcher localWatcher(&changeQueue);
     QString syncFolder =
         settings.value("sync/folder", QDir::homePath() + "/GoogleDrive").toString();
+
+    // Startup-authoritative mirror native-doc maintenance. When the serving
+    // mode changes, purge only native-doc mirror artifacts and stale path
+    // mappings, then request an immediate full sync so the new representation
+    // is materialized from Drive.
+    {
+        const QString currentMode = settings.value("advanced/nativeDocMode", "hide").toString();
+        const QString previousMode =
+            settings.value("advanced/previousMirrorNativeDocMode", currentMode).toString();
+        const bool pendingRepresentationReset =
+            settings.value("advanced/pendingMirrorRepresentationReset", false).toBool();
+        const int storedRepresentationEpoch =
+            settings.value("advanced/lastAppliedMirrorRepresentationEpoch", 0).toInt();
+        const bool modeChanged = (currentMode != previousMode);
+        const bool representationEpochChanged =
+            kCurrentMirrorRepresentationEpoch > storedRepresentationEpoch;
+        const StartupMaintenance::MirrorMaintenanceInputs maintenanceInputs{
+            .currentNativeDocMode = currentMode,
+            .previousNativeDocMode = previousMode,
+            .pendingRepresentationReset = pendingRepresentationReset,
+            .storedRepresentationEpoch = storedRepresentationEpoch,
+            .currentRepresentationEpoch = kCurrentMirrorRepresentationEpoch,
+        };
+
+        if (StartupMaintenance::shouldRebuildMirrorRepresentation(maintenanceInputs)) {
+            if (representationEpochChanged) {
+                qInfo() << "Mirror native-doc representation epoch changed from"
+                        << storedRepresentationEpoch << "to"
+                        << kCurrentMirrorRepresentationEpoch
+                        << "- rebuilding local native-doc artifacts";
+            } else if (modeChanged) {
+                qInfo() << "Native-doc mode changed from" << previousMode << "to" << currentMode
+                        << "- rebuilding local native-doc artifacts";
+            } else {
+                qInfo() << "Pending mirror representation reset flag detected - rebuilding local "
+                           "native-doc artifacts";
+            }
+
+            StartupMaintenance::MirrorRepresentationRebuildStats rebuildStats;
+            const bool rebuildOk = StartupMaintenance::purgeMirrorNativeDocArtifacts(
+                syncFolder, syncDatabase, &rebuildStats);
+            if (rebuildOk) {
+                qInfo() << "Mirror native-doc rebuild removed"
+                        << rebuildStats.removedArtifactCount << "artifact(s) and cleared"
+                        << rebuildStats.clearedMappingCount << "mapping(s)";
+                settings.setValue("advanced/previousMirrorNativeDocMode", currentMode);
+                settings.setValue("advanced/lastAppliedMirrorRepresentationEpoch",
+                                  kCurrentMirrorRepresentationEpoch);
+                settings.remove("advanced/pendingMirrorRepresentationReset");
+                settings.sync();
+                forceImmediateMirrorRebuild = true;
+            } else {
+                qWarning() << "Mirror native-doc rebuild failed - will retry on next launch";
+            }
+        } else if (!settings.contains("advanced/lastAppliedMirrorRepresentationEpoch")) {
+            settings.setValue("advanced/lastAppliedMirrorRepresentationEpoch",
+                              kCurrentMirrorRepresentationEpoch);
+            settings.sync();
+        }
+    }
 
     // Initialize remote change watcher
     RemoteChangeWatcher remoteWatcher(&changeQueue, &mirrorDriveClient, &syncDatabase);
@@ -900,10 +971,23 @@ int main(int argc, char* argv[]) {
     QObject::connect(
         &mainWindow, &MainWindow::restartRequested, &app, [&fuseDriver, fuseEnabled, &settings]() {
             const QString currentMode = settings.value("advanced/nativeDocMode", "hide").toString();
+            bool wrotePendingReset = false;
+
             const QString previousMode =
-                settings.value("advanced/previousNativeDocMode", "hide").toString();
+                settings.value("advanced/previousNativeDocMode", currentMode).toString();
             if (currentMode != previousMode) {
                 settings.setValue("advanced/pendingFuseRepresentationReset", true);
+                wrotePendingReset = true;
+            }
+
+            const QString previousMirrorMode =
+                settings.value("advanced/previousMirrorNativeDocMode", currentMode).toString();
+            if (currentMode != previousMirrorMode) {
+                settings.setValue("advanced/pendingMirrorRepresentationReset", true);
+                wrotePendingReset = true;
+            }
+
+            if (wrotePendingReset) {
                 settings.sync();
             }
 

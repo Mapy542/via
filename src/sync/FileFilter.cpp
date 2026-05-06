@@ -13,14 +13,12 @@ bool shouldSkipRemoteFile(const DriveFile& file, const SyncSettings&) {
         return false;  // We want to sync trashed files to detect deletions
     }
 
-    if (file.isGoogleDoc() && !file.isFolder && !file.isShortcut) {
-        return true;
-    }
-
     if (!file.ownedByMe) {
         return true;
     }
 
+    // Native-doc visibility depends on shared policy plus per-file overrides,
+    // so mirror callers decide that after loading SyncDatabase state.
     return false;
 }
 }  // namespace FileFilter

@@ -15,6 +15,7 @@ struct SyncSettings {
     QString syncMode;
     QString conflictStrategy;
     QString duplicateNameStrategy;
+    QString nativeDocMode;
     QStringList ignorePatterns;
     int remotePollIntervalMs = 30000;
 

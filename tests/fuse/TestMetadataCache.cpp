@@ -14,8 +14,8 @@
 
 #include "api/GoogleDriveClient.h"
 #include "fuse/MetadataCache.h"
-#include "fuse/NativeDocPolicy.h"
 #include "sync/SyncDatabase.h"
+#include "utils/NativeDocSupport.h"
 
 // ---------------------------------------------------------------------------
 // Minimal FakeDriveClient — enough for MetadataCache construction
@@ -75,6 +75,7 @@ class TestMetadataCache : public QObject {
     void testNativeDocPolicy_OpenDocument_MapsCorrectly();
     void testNativeDocPolicy_Text_MapsCorrectly();
     void testNativeDocPolicy_UnsupportedTypes_HiddenInExportModes();
+    void testNativeDocVisibleName_RoundTripsRepresentation();
 
    private:
     QTemporaryDir* m_tempDir = nullptr;
@@ -246,7 +247,8 @@ void TestMetadataCache::testGetChildren() {
     QCOMPARE(children.size(), 2);
 
     QSet<QString> ids;
-    for (const auto& c : children) ids.insert(c.fileId);
+    for (const auto& c : children)
+        ids.insert(c.fileId);
     QVERIFY(ids.contains("p1"));
     QVERIFY(ids.contains("p2"));
 }
@@ -516,6 +518,16 @@ void TestMetadataCache::testNativeDocPolicy_UnsupportedTypes_HiddenInExportModes
     auto drawingBrowser = nativeDocRepresentation("application/vnd.google-apps.drawing",
                                                   NativeDocMode::BrowserShortcut);
     QVERIFY(drawingBrowser.visible);
+}
+
+void TestMetadataCache::testNativeDocVisibleName_RoundTripsRepresentation() {
+    const QString remoteName = QStringLiteral("Quarterly Report");
+    const NativeDocRepresentation rep = nativeDocRepresentation(
+        QStringLiteral("application/vnd.google-apps.document"), NativeDocMode::BrowserShortcut);
+
+    const QString visibleName = nativeDocVisibleName(remoteName, rep);
+    QCOMPARE(visibleName, QStringLiteral("Quarterly Report.gdoc"));
+    QCOMPARE(nativeDocRemoteNameFromVisibleName(visibleName, rep), remoteName);
 }
 
 QTEST_MAIN(TestMetadataCache)

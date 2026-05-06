@@ -14,10 +14,10 @@
 #include <QWriteLocker>
 #include <algorithm>
 
-#include "NativeDocPolicy.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 #include "sync/SyncSettings.h"
+#include "utils/NativeDocSupport.h"
 
 const int MetadataCache::DEFAULT_MAX_CACHE_AGE_SECONDS;
 
@@ -226,7 +226,7 @@ FuseFileMetadata fromDriveFile(const DriveFile& file,
         const NativeDocRepresentation rep = effectiveNativeDocRepresentation(
             file.mimeType, nativeDocModeOverride, globalNativeDocModeSetting());
         if (rep.visible && !rep.extension.isEmpty()) {
-            metadata.name = file.name + rep.extension;
+            metadata.name = nativeDocVisibleName(file.name, rep);
         }
     }
     metadata.createdTime = file.createdTime;
@@ -344,7 +344,7 @@ QString existingNativeDocModeOverride(const MetadataCache* cache, SyncDatabase* 
         return QString();
     }
 
-    return database->getFuseMetadata(fileId).nativeDocModeOverride;
+    return database->getNativeDocState(fileId).nativeDocModeOverride;
 }
 
 }  // namespace
@@ -632,7 +632,7 @@ FuseFileMetadata MetadataCache::applyNativeDocModeOverride(const QString& fileId
     }
 
     const QString remoteName = remoteNameForMetadata(metadata);
-    metadata.name = rep.extension.isEmpty() ? remoteName : remoteName + rep.extension;
+    metadata.name = nativeDocVisibleName(remoteName, rep);
     metadata.cachedAt = QDateTime::currentDateTime();
     metadata.lastAccessed = QDateTime::currentDateTime();
 
@@ -983,9 +983,13 @@ void MetadataCache::clearAll() {
 // Configuration
 // ========================================
 
-void MetadataCache::setMaxCacheAge(int seconds) { m_maxCacheAgeSeconds = seconds; }
+void MetadataCache::setMaxCacheAge(int seconds) {
+    m_maxCacheAgeSeconds = seconds;
+}
 
-int MetadataCache::maxCacheAge() const { return m_maxCacheAgeSeconds; }
+int MetadataCache::maxCacheAge() const {
+    return m_maxCacheAgeSeconds;
+}
 
 QString MetadataCache::rootFolderId() const {
     QReadLocker locker(&m_lock);

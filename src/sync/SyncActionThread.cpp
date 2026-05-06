@@ -23,6 +23,7 @@
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
 #include "utils/FileInUseChecker.h"
+#include "utils/NativeDocSupport.h"
 #include "utils/PathUtils.h"
 
 namespace {
@@ -31,6 +32,105 @@ bool isActionOwnedDriveOperation(const QString& operation) {
            operation == QLatin1String("uploadFile") || operation == QLatin1String("downloadFile") ||
            operation == QLatin1String("deleteFile") || operation == QLatin1String("trashFile") ||
            operation == QLatin1String("moveFile") || operation == QLatin1String("renameFile");
+}
+
+constexpr QFileDevice::Permissions kWritePermissions =
+    QFileDevice::WriteOwner | QFileDevice::WriteUser | QFileDevice::WriteGroup |
+    QFileDevice::WriteOther;
+
+QString trackedFileIdForItem(const SyncDatabase* database, const SyncActionItem& item) {
+    if (!item.fileId.isEmpty()) {
+        return item.fileId;
+    }
+    if (!database || item.localPath.isEmpty()) {
+        return QString();
+    }
+    return database->getFileId(item.localPath);
+}
+
+NativeDocState resolveNativeDocStateForFile(SyncDatabase* database, GoogleDriveClient* driveClient,
+                                            const QString& fileId,
+                                            bool requireWebViewLink = false) {
+    NativeDocState state;
+    if (fileId.isEmpty()) {
+        return state;
+    }
+
+    if (database) {
+        state = database->getNativeDocState(fileId);
+    }
+    if (state.fileId.isEmpty()) {
+        state.fileId = fileId;
+    }
+
+    const bool needsMetadata =
+        state.remoteMimeType.isEmpty() || state.remoteName.isEmpty() ||
+        (requireWebViewLink &&
+         (state.remoteMimeType.isEmpty() || isNativeDocMimeType(state.remoteMimeType)) &&
+         state.webViewLink.isEmpty());
+    if (!needsMetadata || !driveClient) {
+        return state;
+    }
+
+    const DriveFile metadata = driveClient->getFileMetadataBlocking(fileId);
+    if (!metadata.isValid() || !isNativeDocMimeType(metadata.mimeType)) {
+        return state;
+    }
+
+    if (state.remoteName.isEmpty()) {
+        state.remoteName = metadata.name;
+    }
+    state.remoteMimeType = metadata.mimeType;
+    if (state.webViewLink.isEmpty()) {
+        state.webViewLink = metadata.webViewLink;
+    }
+
+    if (database && shouldPersistNativeDocState(state)) {
+        database->saveNativeDocState(state);
+    }
+
+    return state;
+}
+
+bool writePayloadToFile(const QString& absolutePath, const QByteArray& payload,
+                        QString* errorMessage = nullptr) {
+    QFile file(absolutePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Failed to open file for writing: %1").arg(absolutePath);
+        }
+        return false;
+    }
+
+    if (file.write(payload) != payload.size()) {
+        file.close();
+        QFile::remove(absolutePath);
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Failed to write file contents: %1").arg(absolutePath);
+        }
+        return false;
+    }
+
+    file.close();
+    return true;
+}
+
+bool restrictWritePermissions(const QString& absolutePath, QString* errorMessage = nullptr) {
+    QFile file(absolutePath);
+    const QFileDevice::Permissions currentPermissions = file.permissions();
+    const QFileDevice::Permissions readOnlyPermissions = currentPermissions & ~kWritePermissions;
+    if (readOnlyPermissions == currentPermissions) {
+        return true;
+    }
+
+    if (file.setPermissions(readOnlyPermissions)) {
+        return true;
+    }
+
+    if (errorMessage) {
+        *errorMessage = QStringLiteral("Failed to set read-only permissions: %1").arg(absolutePath);
+    }
+    return false;
 }
 }  // namespace
 
@@ -389,6 +489,16 @@ void SyncActionThread::processNextAction() {
 }
 
 void SyncActionThread::executeUpload(const SyncActionItem& item) {
+    const QString trackedFileId = trackedFileIdForItem(m_database, item);
+    const NativeDocState nativeDocState =
+        resolveNativeDocStateForFile(m_database, m_driveClient, trackedFileId);
+    if (isNativeDocMimeType(nativeDocState.remoteMimeType)) {
+        failAction(item,
+                   QStringLiteral("Refusing to upload content over native document artifact: %1")
+                       .arg(item.localPath.isEmpty() ? trackedFileId : item.localPath));
+        return;
+    }
+
     QString absolutePath = toAbsolutePath(item.localPath);
 
     QFileInfo fileInfo(absolutePath);
@@ -516,6 +626,54 @@ void SyncActionThread::executeDownload(const SyncActionItem& item) {
                      << parentDir.absolutePath();
             m_localWatcher->watchDirectory(parentDir.absolutePath());
         }
+    }
+
+    const NativeDocState nativeDocState =
+        resolveNativeDocStateForFile(m_database, m_driveClient, item.fileId, true);
+    if (isNativeDocMimeType(nativeDocState.remoteMimeType)) {
+        const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+            nativeDocState.remoteMimeType, nativeDocState.nativeDocModeOverride,
+            nativeDocModeFromString(m_settings.nativeDocMode));
+        if (!representation.visible) {
+            failAction(
+                item,
+                QStringLiteral("Cannot materialize hidden native document: %1").arg(item.fileId));
+            return;
+        }
+
+        if (representation.synthetic) {
+            if (nativeDocState.webViewLink.isEmpty()) {
+                failAction(item,
+                           QStringLiteral(
+                               "Cannot materialize native document shortcut without a web link: %1")
+                               .arg(item.fileId));
+                return;
+            }
+
+            QString errorMessage;
+            if (!writePayloadToFile(absolutePath, nativeDocShortcutPayload(nativeDocState),
+                                    &errorMessage)) {
+                failAction(item, errorMessage);
+                return;
+            }
+
+            qInfo() << "Materialized native document shortcut:" << item.fileId << "to"
+                    << item.localPath;
+            onFileDownloaded(item.fileId, absolutePath);
+            return;
+        }
+
+        if (representation.outputMimeType.isEmpty()) {
+            failAction(item, QStringLiteral(
+                                 "Cannot export native document without an output MIME type: %1")
+                                 .arg(item.fileId));
+            return;
+        }
+
+        qInfo() << "Exporting native document:" << item.fileId << "to" << item.localPath << "as"
+                << representation.outputMimeType;
+        m_driveClient->exportFile(item.fileId, representation.outputMimeType, absolutePath);
+        return;
     }
 
     qInfo() << "Downloading:" << item.fileId << "to" << item.localPath;
@@ -789,10 +947,20 @@ void SyncActionThread::executeRenameRemote(const SyncActionItem& item) {
         return;
     }
 
-    qInfo() << "Renaming remote:" << item.fileId << "to" << item.renameTo;
+    QString remoteName = item.renameTo;
+    const NativeDocState nativeDocState =
+        resolveNativeDocStateForFile(m_database, m_driveClient, item.fileId);
+    if (isNativeDocMimeType(nativeDocState.remoteMimeType)) {
+        const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+            nativeDocState.remoteMimeType, nativeDocState.nativeDocModeOverride,
+            nativeDocModeFromString(m_settings.nativeDocMode));
+        remoteName = nativeDocRemoteNameFromVisibleName(item.renameTo, representation);
+    }
+
+    qInfo() << "Renaming remote:" << item.fileId << "to" << remoteName;
 
     // Use the renameFile method to update just the name metadata
-    m_driveClient->renameFile(item.fileId, item.renameTo);
+    m_driveClient->renameFile(item.fileId, remoteName);
 }
 
 QString SyncActionThread::toAbsolutePath(const QString& relativePath) const {
@@ -1008,6 +1176,129 @@ void SyncActionThread::updateDatabaseAfterAction(const SyncActionItem& item, con
     }
 }
 
+bool SyncActionThread::handleNativeDocExportLimitFallback(const SyncActionItem& item) {
+    if (item.actionType != SyncActionType::Download || item.fileId.isEmpty()) {
+        return false;
+    }
+
+    if (!m_database) {
+        failAction(item, QStringLiteral("Cannot persist native document fallback state"));
+        return true;
+    }
+
+    NativeDocState nativeDocState =
+        resolveNativeDocStateForFile(m_database, m_driveClient, item.fileId, true);
+    if (!isNativeDocMimeType(nativeDocState.remoteMimeType)) {
+        return false;
+    }
+
+    const NativeDocRepresentation currentRepresentation = effectiveNativeDocRepresentation(
+        nativeDocState.remoteMimeType, nativeDocState.nativeDocModeOverride,
+        nativeDocModeFromString(m_settings.nativeDocMode));
+    if (!currentRepresentation.visible || currentRepresentation.synthetic) {
+        return false;
+    }
+
+    nativeDocState.fileId = item.fileId;
+    nativeDocState.nativeDocModeOverride = nativeDocModeToString(NativeDocMode::BrowserShortcut);
+
+    const NativeDocRepresentation fallbackRepresentation = effectiveNativeDocRepresentation(
+        nativeDocState.remoteMimeType, nativeDocState.nativeDocModeOverride,
+        nativeDocModeFromString(m_settings.nativeDocMode));
+    if (!fallbackRepresentation.visible || !fallbackRepresentation.synthetic) {
+        failAction(item, QStringLiteral("Failed to resolve browser shortcut fallback for native "
+                                        "document: %1")
+                             .arg(item.fileId));
+        return true;
+    }
+
+    QString remoteName = nativeDocState.remoteName.trimmed();
+    if (remoteName.isEmpty()) {
+        remoteName = nativeDocRemoteNameFromVisibleName(QFileInfo(item.localPath).fileName(),
+                                                        currentRepresentation);
+    }
+
+    const QString parentLocalPath = QFileInfo(item.localPath).path() == QStringLiteral(".")
+                                        ? QString()
+                                        : QFileInfo(item.localPath).path();
+    const QString fallbackLocalPath = MirrorPathResolver::resolveRemoteLocalPath(
+        parentLocalPath, remoteName, nativeDocState.remoteMimeType,
+        nativeDocState.nativeDocModeOverride, item.fileId, m_database, m_settings, m_syncFolder,
+        nullptr, false);
+    const QString fallbackAbsolutePath = toAbsolutePath(fallbackLocalPath);
+    if (fallbackLocalPath.isEmpty() || fallbackAbsolutePath.isEmpty()) {
+        failAction(item, QStringLiteral("Failed to resolve browser shortcut fallback path for "
+                                        "native document: %1")
+                             .arg(item.fileId));
+        return true;
+    }
+
+    if (nativeDocState.webViewLink.isEmpty()) {
+        failAction(item, QStringLiteral("Cannot materialize native document shortcut without a web "
+                                        "link: %1")
+                             .arg(item.fileId));
+        return true;
+    }
+
+    QFileInfo fallbackInfo(fallbackAbsolutePath);
+    QDir fallbackDir = fallbackInfo.dir();
+    if (!fallbackDir.exists() && !fallbackDir.mkpath(QStringLiteral("."))) {
+        failAction(item, QStringLiteral("Failed to create directory for native document "
+                                        "fallback: %1")
+                             .arg(fallbackDir.path()));
+        return true;
+    }
+
+    QString writeError;
+    if (!writePayloadToFile(fallbackAbsolutePath, nativeDocShortcutPayload(nativeDocState),
+                            &writeError)) {
+        failAction(item, writeError);
+        return true;
+    }
+
+    if (shouldPersistNativeDocState(nativeDocState) &&
+        !m_database->saveNativeDocState(nativeDocState)) {
+        QFile::remove(fallbackAbsolutePath);
+        failAction(item, QStringLiteral("Failed to persist browser shortcut fallback state for "
+                                        "native document: %1")
+                             .arg(item.fileId));
+        return true;
+    }
+
+    const QString currentAbsolutePath = toAbsolutePath(item.localPath);
+    if (!currentAbsolutePath.isEmpty() && currentAbsolutePath != fallbackAbsolutePath) {
+        QFileInfo currentInfo(currentAbsolutePath);
+        if (currentInfo.exists()) {
+            bool removed = false;
+            if (currentInfo.isDir()) {
+                QDir currentDir(currentAbsolutePath);
+                removed = currentDir.removeRecursively();
+            } else {
+                removed = QFile::remove(currentAbsolutePath);
+            }
+
+            if (!removed) {
+                qWarning() << "Failed to remove stale native document export after fallback:"
+                           << currentAbsolutePath;
+            }
+        }
+    }
+
+    SyncActionItem fallbackItem = item;
+    fallbackItem.localPath = fallbackLocalPath;
+
+    QFileInfo localInfo(fallbackAbsolutePath);
+    const QDateTime localModifiedTime =
+        fallbackItem.modifiedTime.isValid() ? fallbackItem.modifiedTime : localInfo.lastModified();
+    updateDatabaseAfterAction(fallbackItem, fallbackItem.fileId, localModifiedTime,
+                              fallbackItem.remoteMd5, fallbackItem.localContentHash);
+
+    qInfo() << "Fell back native document export to browser shortcut:" << item.fileId << "old"
+            << item.localPath << "new" << fallbackItem.localPath;
+    completeAction(fallbackItem);
+    return true;
+}
+
 void SyncActionThread::completeAction(const SyncActionItem& item) {
     qInfo() << "Action completed:" << static_cast<int>(item.actionType)
             << "path:" << item.localPath;
@@ -1044,6 +1335,22 @@ void SyncActionThread::completeAction(const SyncActionItem& item) {
         }
 
         updateLocalMetadata(metadataPath, item.modifiedTime);
+    }
+
+    if (item.actionType == SyncActionType::Download && !item.isFolder && !item.fileId.isEmpty()) {
+        const NativeDocState nativeDocState =
+            m_database ? m_database->getNativeDocState(item.fileId) : NativeDocState{};
+        if (isNativeDocMimeType(nativeDocState.remoteMimeType)) {
+            const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+                nativeDocState.remoteMimeType, nativeDocState.nativeDocModeOverride,
+                nativeDocModeFromString(m_settings.nativeDocMode));
+            if (representation.visible && representation.readOnly) {
+                QString errorMessage;
+                if (!restrictWritePermissions(toAbsolutePath(item.localPath), &errorMessage)) {
+                    qWarning() << errorMessage;
+                }
+            }
+        }
     }
 
     // Unmark file from "in operation" (per flow chart)
@@ -1283,6 +1590,15 @@ void SyncActionThread::onFileRenamed(const QString& fileId) {
 void SyncActionThread::onFileRenamedDetailed(const DriveFile& file) {
     if (!m_database || file.id.isEmpty()) {
         return;
+    }
+
+    NativeDocState nativeDocState = m_database->getNativeDocState(file.id);
+    if (isNativeDocMimeType(nativeDocState.remoteMimeType)) {
+        nativeDocState.fileId = file.id;
+        nativeDocState.remoteName = file.name;
+        if (shouldPersistNativeDocState(nativeDocState)) {
+            m_database->saveNativeDocState(nativeDocState);
+        }
     }
 
     QString localPath = m_database->getLocalPath(file.id);
@@ -1528,6 +1844,12 @@ void SyncActionThread::onDriveErrorDetailed(const QString& operation, const QStr
         if (scheduleRetry(currentAction, "transient Drive/network failure", 300)) {
             return;
         }
+    }
+
+    if (operation.startsWith(QLatin1String("exportFile:")) &&
+        isNativeDocExportLimitError(errorMsg, httpStatus) &&
+        handleNativeDocExportLimitFallback(currentAction)) {
+        return;
     }
 
     failAction(currentAction, operation + ": " + errorMsg);

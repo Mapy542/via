@@ -16,6 +16,8 @@
 #include <QSqlError>
 #include <QString>
 
+#include "utils/NativeDocSupport.h"
+
 class SyncDatabase;
 
 class SyncDatabaseConnectionHandle {
@@ -256,6 +258,13 @@ class SyncDatabase : public QObject {
     void setLocalPath(const QString& fileId, const QString& localPath);
 
     /**
+     * @brief Delete a file state by Drive file ID
+     * @param fileId Google Drive file ID
+     * @return true if deletion successful
+     */
+    bool deleteFileStateById(const QString& fileId);
+
+    /**
      * @brief Get modified time at last sync for a file
      * @param localPath Local file path (relative)
      * @return Modified time at last sync or invalid datetime
@@ -318,6 +327,27 @@ class SyncDatabase : public QObject {
      * @return List of file sync states for descendants
      */
     QList<FileSyncState> getFileStatesByPrefix(const QString& pathPrefix) const;
+
+    /**
+     * @brief Get shared native-doc state for a file
+     * @param fileId Google Drive file ID
+     * @return NativeDocState or empty if not found
+     */
+    NativeDocState getNativeDocState(const QString& fileId) const;
+
+    /**
+     * @brief Save shared native-doc state keyed by file ID
+     * @param state Native-doc state to save
+     * @return true if save successful
+     */
+    bool saveNativeDocState(const NativeDocState& state);
+
+    /**
+     * @brief Delete shared native-doc state for a file
+     * @param fileId Google Drive file ID
+     * @return true if deletion successful
+     */
+    bool deleteNativeDocState(const QString& fileId);
 
     // Change token
 
