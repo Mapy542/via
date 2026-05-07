@@ -35,9 +35,11 @@ class TestUiStatusIntegration : public QObject {
     void testAuthExpiredRecoveryPropagatesToTrayAndWindow();
     void testMainWindowSyncNowEmitsRequestSignal();
     void testPauseActionsTogglePauseController();
+    void testBothSyncSystemsDisabledUsesPausedStatusAndDisablesActions();
 
    private:
     QImage trayIconImage(int size = 16) const;
+    QImage windowIconImage() const;
     QString traySummary() const;
     QString trayTooltip() const;
     QString windowSummary() const;
@@ -90,6 +92,10 @@ QString TestUiStatusIntegration::traySummary() const {
 
 QImage TestUiStatusIntegration::trayIconImage(int size) const {
     return m_tray->trayIcon()->icon().pixmap(size, size).toImage();
+}
+
+QImage TestUiStatusIntegration::windowIconImage() const {
+    return m_window->m_statusIcon->pixmap(Qt::ReturnByValue).toImage();
 }
 
 QString TestUiStatusIntegration::trayTooltip() const {
@@ -241,6 +247,32 @@ void TestUiStatusIntegration::testPauseActionsTogglePauseController() {
     QTRY_VERIFY(!m_pauseController->isEffectivelyPaused());
     QTRY_COMPARE(m_window->m_pauseSyncButton->text(), QStringLiteral("Pause Sync"));
     QTRY_COMPARE(m_tray->m_pauseSyncAction->text(), QStringLiteral("Pause Sync"));
+}
+
+void TestUiStatusIntegration::testBothSyncSystemsDisabledUsesPausedStatusAndDisablesActions() {
+    RuntimePauseController pauseController;
+    UiStatusCoordinator coordinator(nullptr, false, &pauseController);
+    coordinator.setFuseEnabled(false);
+    SystemTrayManager tray(nullptr, &pauseController, &coordinator, false, false);
+    MainWindow window(nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr, false,
+                      false);
+
+    coordinator.updateAuthState(true);
+    tray.updateAuthState(true);
+    window.updateAuthState(true);
+
+    QTRY_COMPARE(window.m_statusLabel->text(), QStringLiteral("Sync disabled"));
+    QTRY_COMPARE(tray.m_statusAction->text(), QStringLiteral("Sync disabled"));
+    QTRY_COMPARE(tray.trayIcon()->toolTip(), QStringLiteral("Via\nSync disabled"));
+    QTRY_COMPARE(tray.trayIcon()->icon().pixmap(16, 16).toImage(),
+                 ThemeHelper::trayIcon(QStringLiteral("paused.svg")).pixmap(16, 16).toImage());
+    QTRY_COMPARE(window.m_statusIcon->pixmap(Qt::ReturnByValue).toImage(),
+                 ThemeHelper::guiIcon(QStringLiteral("paused.svg")).pixmap(32, 32).toImage());
+
+    QVERIFY(!window.m_pauseSyncButton->isEnabled());
+    QVERIFY(!window.m_refreshButton->isEnabled());
+    QVERIFY(!tray.m_pauseSyncAction->isEnabled());
+    QVERIFY(!tray.m_syncNowAction->isEnabled());
 }
 
 QTEST_MAIN(TestUiStatusIntegration)

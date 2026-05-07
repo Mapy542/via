@@ -51,6 +51,7 @@ UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager, bool mi
       m_authManager(authManager),
       m_pauseController(pauseController),
       m_mirrorEnabled(mirrorEnabled),
+      m_fuseEnabled(true),
       m_changeProcessorState(ChangeProcessor::State::Stopped),
       m_statusTimer(nullptr),
       m_fuseIdleTimer(nullptr),
@@ -106,6 +107,19 @@ UiStatusSnapshot UiStatusCoordinator::snapshot() const {
     return status;
 }
 
+void UiStatusCoordinator::setFuseEnabled(bool enabled) {
+    const UiStatusSnapshot before = snapshot();
+
+    m_fuseEnabled = enabled;
+    if (!m_fuseEnabled) {
+        clearFuseActivityState();
+        setFuseStatusInternal(QString());
+    }
+
+    refreshMirrorStatusInternal();
+    emitIfChanged(before);
+}
+
 UiStatusPriority UiStatusCoordinator::priorityFromStatusText(const QString& status) {
     if (status.contains(QStringLiteral("expired"), Qt::CaseInsensitive) ||
         status.contains(QStringLiteral("Authentication"), Qt::CaseInsensitive)) {
@@ -124,6 +138,9 @@ UiStatusPriority UiStatusCoordinator::priorityFromStatusText(const QString& stat
         return UiStatusPriority::Warning;
     }
     if (status.contains(QStringLiteral("Paused"), Qt::CaseInsensitive)) {
+        return UiStatusPriority::Paused;
+    }
+    if (status.contains(QStringLiteral("disabled"), Qt::CaseInsensitive)) {
         return UiStatusPriority::Paused;
     }
     if (status.contains(QStringLiteral("Syncing"), Qt::CaseInsensitive) ||
@@ -390,6 +407,11 @@ void UiStatusCoordinator::refreshMirrorStatusInternal() {
         return;
     }
 
+    if (!m_mirrorEnabled && !m_fuseEnabled) {
+        setMirrorStatusInternal(QString());
+        return;
+    }
+
     if (m_authenticated && m_pauseController && m_pauseController->isEffectivelyPaused()) {
         setMirrorStatusInternal(m_pauseController->effectiveStatusText());
         return;
@@ -445,6 +467,14 @@ void UiStatusCoordinator::clearFuseActivityState() {
 }
 
 UiStatusPriority UiStatusCoordinator::effectivePriority() const {
+    if (m_authExpired) {
+        return UiStatusPriority::AuthExpired;
+    }
+
+    if (m_authenticated && !m_mirrorEnabled && !m_fuseEnabled) {
+        return UiStatusPriority::Paused;
+    }
+
     UiStatusPriority effective = m_mirrorPriority;
     if (m_fusePriority > effective) {
         effective = m_fusePriority;
@@ -477,6 +507,9 @@ QString UiStatusCoordinator::combinedStatusText() const {
     }
     if (!m_authenticated) {
         return QStringLiteral("Not connected");
+    }
+    if (!m_mirrorEnabled && !m_fuseEnabled) {
+        return QStringLiteral("Sync disabled");
     }
     return QStringLiteral("Idle");
 }

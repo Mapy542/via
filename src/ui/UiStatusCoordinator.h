@@ -48,6 +48,7 @@ class UiStatusCoordinator : public QObject {
                                  QObject* parent = nullptr);
 
     UiStatusSnapshot snapshot() const;
+    void setFuseEnabled(bool enabled);
 
     static UiStatusPriority priorityFromStatusText(const QString& status);
     static QString iconForPriority(UiStatusPriority priority);
@@ -88,6 +89,7 @@ class UiStatusCoordinator : public QObject {
     GoogleAuthManager* m_authManager;
     RuntimePauseController* m_pauseController;
     bool m_mirrorEnabled;
+    bool m_fuseEnabled;
     ChangeProcessor::State m_changeProcessorState;
 
     QTimer* m_statusTimer;

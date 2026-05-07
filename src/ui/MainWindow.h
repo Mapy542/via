@@ -9,6 +9,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+class QAction;
+
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -49,7 +51,8 @@ class MainWindow : public QMainWindow {
                         MirrorSyncRuntime* mirrorSyncRuntime,
                         RuntimePauseController* pauseController,
                         UiStatusCoordinator* statusCoordinator,
-                        NotificationManager* notificationManager, QWidget* parent = nullptr);
+                        NotificationManager* notificationManager, bool canPauseSync = true,
+                        bool canRequestFullSync = true, QWidget* parent = nullptr);
 
     ~MainWindow() override;
 
@@ -142,6 +145,7 @@ class MainWindow : public QMainWindow {
     void setupUi();
     void setupMenuBar();
     void connectSignals();
+    void updateSyncActionAvailability(bool authenticated);
     void updatePauseButton(bool paused);
 
     GoogleAuthManager* m_authManager;
@@ -175,6 +179,8 @@ class MainWindow : public QMainWindow {
     QPushButton* m_pauseSyncButton;
     QPushButton* m_refreshButton;
     QPushButton* m_settingsButton;
+    QAction* m_pauseMenuAction;
+    QAction* m_syncNowMenuAction;
 
     // Recent activity section
     QGroupBox* m_activityGroup;
@@ -182,6 +188,8 @@ class MainWindow : public QMainWindow {
 
     bool m_syncPaused;
     bool m_authExpired;
+    bool m_canPauseSync;
+    bool m_canRequestFullSync;
 };
 
 #endif  // MAINWINDOW_H

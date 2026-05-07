@@ -346,9 +346,14 @@ int main(int argc, char* argv[]) {
     if (syncSystemMode.isEmpty()) {
         bool legacyFuse = settings.value("advanced/enableFuse", false).toBool();
         syncSystemMode = legacyFuse ? "both" : "mirror-only";
+    } else if (syncSystemMode != QLatin1String("mirror-only") &&
+               syncSystemMode != QLatin1String("fuse-only") &&
+               syncSystemMode != QLatin1String("both") && syncSystemMode != QLatin1String("none")) {
+        syncSystemMode = QStringLiteral("mirror-only");
     }
     const bool fuseEnabled = (syncSystemMode == "fuse-only" || syncSystemMode == "both");
     const bool mirrorEnabled = (syncSystemMode == "mirror-only" || syncSystemMode == "both");
+    const bool syncControlsEnabled = mirrorEnabled || fuseEnabled;
     qInfo() << "Sync system mode:" << syncSystemMode << "(mirror:" << mirrorEnabled
             << "fuse:" << fuseEnabled << ")";
 
@@ -483,8 +488,7 @@ int main(int argc, char* argv[]) {
         if (StartupMaintenance::shouldRebuildMirrorRepresentation(maintenanceInputs)) {
             if (representationEpochChanged) {
                 qInfo() << "Mirror native-doc representation epoch changed from"
-                        << storedRepresentationEpoch << "to"
-                        << kCurrentMirrorRepresentationEpoch
+                        << storedRepresentationEpoch << "to" << kCurrentMirrorRepresentationEpoch
                         << "- rebuilding local native-doc artifacts";
             } else if (modeChanged) {
                 qInfo() << "Native-doc mode changed from" << previousMode << "to" << currentMode
@@ -498,9 +502,9 @@ int main(int argc, char* argv[]) {
             const bool rebuildOk = StartupMaintenance::purgeMirrorNativeDocArtifacts(
                 syncFolder, syncDatabase, &rebuildStats);
             if (rebuildOk) {
-                qInfo() << "Mirror native-doc rebuild removed"
-                        << rebuildStats.removedArtifactCount << "artifact(s) and cleared"
-                        << rebuildStats.clearedMappingCount << "mapping(s)";
+                qInfo() << "Mirror native-doc rebuild removed" << rebuildStats.removedArtifactCount
+                        << "artifact(s) and cleared" << rebuildStats.clearedMappingCount
+                        << "mapping(s)";
                 settings.setValue("advanced/previousMirrorNativeDocMode", currentMode);
                 settings.setValue("advanced/lastAppliedMirrorRepresentationEpoch",
                                   kCurrentMirrorRepresentationEpoch);
@@ -594,11 +598,14 @@ int main(int argc, char* argv[]) {
     };
 
     // Connect runtime to save change tokens to database
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::changeTokenUpdated, &syncDatabase,
-                     &SyncDatabase::setChangeToken);
+    if (mirrorEnabled) {
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::changeTokenUpdated, &syncDatabase,
+                         &SyncDatabase::setChangeToken);
+    }
 
     // Initialize shared UI status coordination and UI surfaces.
     UiStatusCoordinator statusCoordinator(&authManager, mirrorEnabled, &pauseController);
+    statusCoordinator.setFuseEnabled(fuseEnabled);
     if (mirrorEnabled) {
         QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::pendingActionsChanged,
                          &statusCoordinator, &UiStatusCoordinator::updatePendingActions);
@@ -609,7 +616,8 @@ int main(int argc, char* argv[]) {
         statusCoordinator.setHasConflicts(mirrorSyncRuntime.unresolvedConflictCount() > 0);
     }
 
-    SystemTrayManager trayManager(&authManager, &pauseController, &statusCoordinator);
+    SystemTrayManager trayManager(&authManager, &pauseController, &statusCoordinator,
+                                  syncControlsEnabled, mirrorEnabled);
     trayManager.show();
     notificationManager.setTrayIcon(trayManager.trayIcon());
     QObject::connect(&notificationManager, &NotificationManager::notificationShown, &trayManager,
@@ -643,7 +651,8 @@ int main(int argc, char* argv[]) {
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
     MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &mirrorSyncRuntime : nullptr,
-                          &pauseController, &statusCoordinator, &notificationManager);
+                          &pauseController, &statusCoordinator, &notificationManager,
+                          syncControlsEnabled, mirrorEnabled);
 
     if (mirrorEnabled) {
         QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorError, &mainWindow,
@@ -866,7 +875,9 @@ int main(int argc, char* argv[]) {
             syncActionQueue.clear();
 
             // --- 3. Clear per-component in-memory state ---
-            mirrorSyncRuntime.clearSessionState();
+            if (mirrorEnabled) {
+                mirrorSyncRuntime.clearSessionState();
+            }
 
             // --- 4. Wipe the sync database ---
             syncDatabase.clearAllData();
@@ -1022,35 +1033,39 @@ int main(int argc, char* argv[]) {
                      &UiStatusCoordinator::updateStorageInfo);
 
     // Connect sync action thread status updates to shared UI status coordinator
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionCompleted,
-                     &statusCoordinator, [&statusCoordinator](const SyncActionItem&) {
-                         statusCoordinator.updateMirrorStatus("Syncing...");
-                     });
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionFailed, &statusCoordinator,
-                     [&statusCoordinator](const SyncActionItem&, const QString&) {
-                         statusCoordinator.updateMirrorStatus("Sync error");
-                     });
+    if (mirrorEnabled) {
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionCompleted,
+                         &statusCoordinator, [&statusCoordinator](const SyncActionItem&) {
+                             statusCoordinator.updateMirrorStatus("Syncing...");
+                         });
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionFailed,
+                         &statusCoordinator,
+                         [&statusCoordinator](const SyncActionItem&, const QString&) {
+                             statusCoordinator.updateMirrorStatus("Sync error");
+                         });
 
-    // Connect full sync state changes to shared UI status coordinator
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::fullSyncStateChanged,
-                     &statusCoordinator, [&statusCoordinator](FullSync::State state) {
-                         switch (state) {
-                             case FullSync::State::ScanningLocal:
-                                 statusCoordinator.updateMirrorStatus("Scanning local files...");
-                                 break;
-                             case FullSync::State::FetchingRemote:
-                                 statusCoordinator.updateMirrorStatus("Fetching remote files...");
-                                 break;
-                             case FullSync::State::Complete:
-                                 statusCoordinator.updateMirrorStatus("Syncing...");
-                                 break;
-                             case FullSync::State::Error:
-                                 statusCoordinator.updateMirrorStatus("Sync error");
-                                 break;
-                             case FullSync::State::Idle:
-                                 break;
-                         }
-                     });
+        // Connect full sync state changes to shared UI status coordinator
+        QObject::connect(
+            &mirrorSyncRuntime, &MirrorSyncRuntime::fullSyncStateChanged, &statusCoordinator,
+            [&statusCoordinator](FullSync::State state) {
+                switch (state) {
+                    case FullSync::State::ScanningLocal:
+                        statusCoordinator.updateMirrorStatus("Scanning local files...");
+                        break;
+                    case FullSync::State::FetchingRemote:
+                        statusCoordinator.updateMirrorStatus("Fetching remote files...");
+                        break;
+                    case FullSync::State::Complete:
+                        statusCoordinator.updateMirrorStatus("Syncing...");
+                        break;
+                    case FullSync::State::Error:
+                        statusCoordinator.updateMirrorStatus("Sync error");
+                        break;
+                    case FullSync::State::Idle:
+                        break;
+                }
+            });
+    }
 
     // Connect FUSE subsystem signals to shared UI status coordinator
     if (fuseEnabled) {
@@ -1157,59 +1172,61 @@ int main(int argc, char* argv[]) {
     QObject::connect(&authManager, &GoogleAuthManager::loggedOut, &storageRefreshTimer,
                      &QTimer::stop);
 
-    // Connect change processor errors to notification manager
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorError, &notificationManager,
-                     [&notificationManager](const QString& error) {
-                         notificationManager.showError("Sync Error", error);
-                     });
-
-    // Connect conflict detection to notification
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &notificationManager,
-                     [&notificationManager](const ConflictInfo& info) {
-                         QString fileName = QFileInfo(info.localPath).fileName();
-                         notificationManager.showConflict(fileName);
-                     });
-
-    // MIS-01: Wire ConflictDialog for interactive conflict resolution
     ConflictDialog conflictDialog(&mainWindow);
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &conflictDialog,
-                     [&conflictDialog](const ConflictInfo& info) {
-                         conflictDialog.addConflict(info);
-                         conflictDialog.show();
-                         conflictDialog.raise();
-                         conflictDialog.activateWindow();
-                     });
-    QObject::connect(&conflictDialog, &ConflictDialog::conflictResolved, &mirrorSyncRuntime,
-                     &MirrorSyncRuntime::resolveConflict);
+    if (mirrorEnabled) {
+        // Connect change processor errors to notification manager
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::processorError,
+                         &notificationManager, [&notificationManager](const QString& error) {
+                             notificationManager.showError("Sync Error", error);
+                         });
 
-    // Connect conflict detection to shared UI status coordinator for warning icon state
-    QObject::connect(
-        &mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &statusCoordinator,
-        [&statusCoordinator](const ConflictInfo&) { statusCoordinator.setHasConflicts(true); });
-    QObject::connect(
-        &mirrorSyncRuntime, &MirrorSyncRuntime::conflictResolved, &statusCoordinator,
-        [&statusCoordinator, &mirrorSyncRuntime](const QString&, ConflictResolutionStrategy) {
-            // LOG-03: Only clear conflict icon when all conflicts are resolved
-            if (mirrorSyncRuntime.unresolvedConflictCount() == 0) {
-                statusCoordinator.setHasConflicts(false);
-            }
-        });
+        // Connect conflict detection to notification
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected,
+                         &notificationManager, [&notificationManager](const ConflictInfo& info) {
+                             QString fileName = QFileInfo(info.localPath).fileName();
+                             notificationManager.showConflict(fileName);
+                         });
 
-    // Connect sync action thread errors to notification manager
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionError, &notificationManager,
-                     [&notificationManager](const QString& error) {
-                         notificationManager.showError("Sync Action Error", error);
-                     });
+        // MIS-01: Wire ConflictDialog for interactive conflict resolution
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &conflictDialog,
+                         [&conflictDialog](const ConflictInfo& info) {
+                             conflictDialog.addConflict(info);
+                             conflictDialog.show();
+                             conflictDialog.raise();
+                             conflictDialog.activateWindow();
+                         });
+        QObject::connect(&conflictDialog, &ConflictDialog::conflictResolved, &mirrorSyncRuntime,
+                         &MirrorSyncRuntime::resolveConflict);
 
-    // Connect progress bar to sync action thread
-    QObject::connect(
-        &mirrorSyncRuntime, &MirrorSyncRuntime::syncActionProgress, &mainWindow,
-        [&mainWindow](const SyncActionItem&, qint64 bytesProcessed, qint64 bytesTotal) {
-            mainWindow.updateSyncProgress(bytesProcessed, bytesTotal);
-        });
+        // Connect conflict detection to shared UI status coordinator for warning icon state
+        QObject::connect(
+            &mirrorSyncRuntime, &MirrorSyncRuntime::conflictDetected, &statusCoordinator,
+            [&statusCoordinator](const ConflictInfo&) { statusCoordinator.setHasConflicts(true); });
+        QObject::connect(
+            &mirrorSyncRuntime, &MirrorSyncRuntime::conflictResolved, &statusCoordinator,
+            [&statusCoordinator, &mirrorSyncRuntime](const QString&, ConflictResolutionStrategy) {
+                // LOG-03: Only clear conflict icon when all conflicts are resolved
+                if (mirrorSyncRuntime.unresolvedConflictCount() == 0) {
+                    statusCoordinator.setHasConflicts(false);
+                }
+            });
 
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::tokenRefreshRequested, &authManager,
-                     &GoogleAuthManager::refreshTokens);
+        // Connect sync action thread errors to notification manager
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::syncActionError,
+                         &notificationManager, [&notificationManager](const QString& error) {
+                             notificationManager.showError("Sync Action Error", error);
+                         });
+
+        // Connect progress bar to sync action thread
+        QObject::connect(
+            &mirrorSyncRuntime, &MirrorSyncRuntime::syncActionProgress, &mainWindow,
+            [&mainWindow](const SyncActionItem&, qint64 bytesProcessed, qint64 bytesTotal) {
+                mainWindow.updateSyncProgress(bytesProcessed, bytesTotal);
+            });
+
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::tokenRefreshRequested,
+                         &authManager, &GoogleAuthManager::refreshTokens);
+    }
 
     bool refreshInFlight = false;
     qint64 lastRefreshAttemptMs = 0;
@@ -1240,8 +1257,10 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(&driveClient, &GoogleDriveClient::authenticationFailure, &app,
                      handleDriveAuthenticationFailure);
-    QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::authenticationFailure, &app,
-                     handleDriveAuthenticationFailure);
+    if (mirrorEnabled) {
+        QObject::connect(&mirrorSyncRuntime, &MirrorSyncRuntime::authenticationFailure, &app,
+                         handleDriveAuthenticationFailure);
+    }
 
     QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &app,
                      [&refreshInFlight, &wakeRefreshNotificationGate]() {

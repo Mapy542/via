@@ -31,7 +31,8 @@ MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveC
                        MirrorSyncRuntime* mirrorSyncRuntime,
                        RuntimePauseController* pauseController,
                        UiStatusCoordinator* statusCoordinator,
-                       NotificationManager* notificationManager, QWidget* parent)
+                       NotificationManager* notificationManager, bool canPauseSync,
+                       bool canRequestFullSync, QWidget* parent)
     : QMainWindow(parent),
       m_authManager(authManager),
       m_driveClient(driveClient),
@@ -40,8 +41,12 @@ MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveC
       m_statusCoordinator(statusCoordinator),
       m_notificationManager(notificationManager),
       m_settingsWindow(nullptr),
+      m_pauseMenuAction(nullptr),
+      m_syncNowMenuAction(nullptr),
       m_syncPaused(false),
-      m_authExpired(false) {
+      m_authExpired(false),
+      m_canPauseSync(canPauseSync),
+      m_canRequestFullSync(canRequestFullSync) {
     setWindowTitle("Via");
     setMinimumSize(500, 600);
     resize(550, 700);
@@ -185,11 +190,11 @@ void MainWindow::setupMenuBar() {
     // Sync menu
     QMenu* syncMenu = menuBar->addMenu("&Sync");
 
-    QAction* syncNowAction = syncMenu->addAction("Sync Now");
-    connect(syncNowAction, &QAction::triggered, this, &MainWindow::onRefreshClicked);
+    m_syncNowMenuAction = syncMenu->addAction("Sync Now");
+    connect(m_syncNowMenuAction, &QAction::triggered, this, &MainWindow::onRefreshClicked);
 
-    QAction* pauseAction = syncMenu->addAction("Pause/Resume Sync");
-    connect(pauseAction, &QAction::triggered, this, &MainWindow::onPauseSyncClicked);
+    m_pauseMenuAction = syncMenu->addAction("Pause/Resume Sync");
+    connect(m_pauseMenuAction, &QAction::triggered, this, &MainWindow::onPauseSyncClicked);
 
     // Account menu
     QMenu* accountMenu = menuBar->addMenu("&Account");
@@ -383,14 +388,14 @@ void MainWindow::updateAuthState(bool authenticated) {
     m_loginButton->setVisible(!authenticated);
     m_logoutButton->setVisible(authenticated);
     m_openFolderButton->setEnabled(authenticated);
-    m_pauseSyncButton->setEnabled(authenticated);
-    m_refreshButton->setEnabled(authenticated);
+    updateSyncActionAvailability(authenticated);
 
     if (authenticated) {
         m_accountLabel->setText("Signed in to Google Drive");
         applyPauseControllerState();
         if (!m_statusCoordinator) {
-            updateSyncStatus("Ready to sync");
+            updateSyncStatus((!m_canPauseSync && !m_canRequestFullSync) ? "Sync disabled"
+                                                                        : "Ready to sync");
         }
         addRecentActivity("Signed in successfully");
     } else {
@@ -406,8 +411,7 @@ void MainWindow::setAuthExpired(const QString& reason) {
     m_loginButton->setVisible(true);
     m_logoutButton->setVisible(false);
     m_openFolderButton->setEnabled(false);
-    m_pauseSyncButton->setEnabled(false);
-    m_refreshButton->setEnabled(false);
+    updateSyncActionAvailability(false);
 
     QString message = "Session expired - sign in again";
     if (!reason.isEmpty()) {
@@ -424,10 +428,29 @@ void MainWindow::setAuthExpired(const QString& reason) {
 void MainWindow::updatePauseButton(bool paused) {
     m_syncPaused = paused;
     m_pauseSyncButton->setText(paused ? "Resume Sync" : "Pause Sync");
+    if (m_pauseMenuAction) {
+        m_pauseMenuAction->setText(paused ? "Resume Sync" : "Pause Sync");
+    }
+}
+
+void MainWindow::updateSyncActionAvailability(bool authenticated) {
+    const bool pauseEnabled = authenticated && m_canPauseSync;
+    const bool refreshEnabled = authenticated && m_canRequestFullSync;
+
+    m_pauseSyncButton->setEnabled(pauseEnabled);
+    m_refreshButton->setEnabled(refreshEnabled);
+
+    if (m_pauseMenuAction) {
+        m_pauseMenuAction->setEnabled(pauseEnabled);
+    }
+    if (m_syncNowMenuAction) {
+        m_syncNowMenuAction->setEnabled(refreshEnabled);
+    }
 }
 
 void MainWindow::applyPauseControllerState() {
-    if (!m_pauseController) {
+    if (!m_pauseController || !m_canPauseSync) {
+        updatePauseButton(false);
         return;
     }
 
@@ -481,7 +504,7 @@ void MainWindow::onOpenFolderClicked() {
 }
 
 void MainWindow::onPauseSyncClicked() {
-    if (!m_pauseController) {
+    if (!m_canPauseSync || !m_pauseController) {
         return;
     }
 
@@ -491,6 +514,10 @@ void MainWindow::onPauseSyncClicked() {
 }
 
 void MainWindow::onRefreshClicked() {
+    if (!m_canRequestFullSync) {
+        return;
+    }
+
     if (m_pauseController && m_pauseController->isEffectivelyPaused()) {
         addRecentActivity("Sync request ignored while sync is paused");
         return;

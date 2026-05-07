@@ -6,8 +6,6 @@
  * login, mirror sync, FUSE, and miscellaneous behavior.
  */
 
-// TODO: Move enable disable of fuse/mirror to checkboxes in respective tabs.
-
 #ifndef SETTINGSWINDOW_H
 #define SETTINGSWINDOW_H
 
@@ -92,9 +90,9 @@ class SettingsWindow : public QDialog {
      * @brief Emitted when the user accepts a restart after changing
      * restart-required settings.
      *
-        * The owner (MainWindow/main.cpp) should perform a safe FUSE
-        * unmount, queue any pending native-doc rebuild flags, relaunch,
-        * and quit.
+     * The owner (MainWindow/main.cpp) should perform a safe FUSE
+     * unmount, queue any pending native-doc rebuild flags, relaunch,
+     * and quit.
      */
     void restartRequested();
 
@@ -127,6 +125,10 @@ class SettingsWindow : public QDialog {
     void setStorageInfoState(StorageInfoState state, const QString& detail = QString(),
                              qint64 storageUsed = 0, qint64 storageLimit = 0);
     void updateClientSecretPlaceholder(bool hasStoredSecret);
+    QString currentSyncSystem() const;
+    void setCurrentSyncSystem(const QString& syncSystem);
+    void updateSyncSystemWidgets();
+    void captureRestartSettingSnapshots();
     void refreshCacheUsageTracker();
     qint64 scanFuseCacheUsageBytes() const;
 
@@ -152,6 +154,7 @@ class SettingsWindow : public QDialog {
 
     // Mirror tab widgets
     QWidget* m_mirrorTab;
+    QCheckBox* m_mirrorEnabledCheck;
     QLineEdit* m_syncFolderEdit;
     QPushButton* m_browseFolderButton;
     QComboBox* m_syncModeCombo;
@@ -160,7 +163,7 @@ class SettingsWindow : public QDialog {
 
     // Fuse tab widgets
     QWidget* m_fuseTab;
-    QComboBox* m_syncSystemCombo;
+    QCheckBox* m_fuseEnabledCheck;
     QLineEdit* m_fuseMountPointEdit;
     QSpinBox* m_cacheSize;
     QLabel* m_cacheUsageLabel;

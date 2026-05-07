@@ -48,7 +48,8 @@ class SystemTrayManager : public QObject {
      */
     explicit SystemTrayManager(GoogleAuthManager* authManager,
                                RuntimePauseController* pauseController,
-                               UiStatusCoordinator* statusCoordinator, QObject* parent = nullptr);
+                               UiStatusCoordinator* statusCoordinator, bool canPauseSync = true,
+                               bool canRequestFullSync = true, QObject* parent = nullptr);
 
     ~SystemTrayManager() override;
 
@@ -129,6 +130,7 @@ class SystemTrayManager : public QObject {
 
    private:
     void createMenu();
+    void updateSyncActionAvailability(bool authenticated);
     void updatePauseAction(bool paused);
     void refreshNotificationMenu();
 
@@ -163,6 +165,8 @@ class SystemTrayManager : public QObject {
     bool m_syncPaused;
 
     bool m_authenticated = false;
+    bool m_canPauseSync = true;
+    bool m_canRequestFullSync = true;
 };
 
 #endif  // SYSTEMTRAYMANAGER_H

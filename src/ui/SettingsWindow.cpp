@@ -13,6 +13,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -42,6 +43,35 @@ QString emptySecretPlaceholder() {
 
 QString storedSecretPlaceholder() {
     return QStringLiteral("••••••••••••••••");
+}
+
+bool mirrorEnabledForSyncSystem(const QString& syncSystem) {
+    return syncSystem == QStringLiteral("mirror-only") || syncSystem == QStringLiteral("both");
+}
+
+bool fuseEnabledForSyncSystem(const QString& syncSystem) {
+    return syncSystem == QStringLiteral("fuse-only") || syncSystem == QStringLiteral("both");
+}
+
+QString syncSystemFromEnabledFlags(bool mirrorEnabled, bool fuseEnabled) {
+    if (mirrorEnabled && fuseEnabled) {
+        return QStringLiteral("both");
+    }
+    if (mirrorEnabled) {
+        return QStringLiteral("mirror-only");
+    }
+    if (fuseEnabled) {
+        return QStringLiteral("fuse-only");
+    }
+    return QStringLiteral("none");
+}
+
+QString normalizeSyncSystem(const QString& syncSystem) {
+    if (syncSystem == QStringLiteral("mirror-only") || syncSystem == QStringLiteral("fuse-only") ||
+        syncSystem == QStringLiteral("both") || syncSystem == QStringLiteral("none")) {
+        return syncSystem;
+    }
+    return QStringLiteral("mirror-only");
 }
 
 class TokenStorageCredentialStore final : public SettingsCredentialStore {
@@ -329,6 +359,10 @@ void SettingsWindow::setupMirrorTab() {
     m_mirrorTab = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(m_mirrorTab);
 
+    m_mirrorEnabledCheck = new QCheckBox("Enable mirror sync", m_mirrorTab);
+    m_mirrorEnabledCheck->setObjectName("settingsMirrorEnabledCheck");
+    layout->addWidget(m_mirrorEnabledCheck);
+
     // Sync folder group
     QGroupBox* folderGroup = new QGroupBox("Sync Folder", m_mirrorTab);
     QVBoxLayout* folderLayout = new QVBoxLayout(folderGroup);
@@ -438,25 +472,20 @@ void SettingsWindow::setupMirrorTab() {
     // Connect buttons
     connect(m_browseFolderButton, &QPushButton::clicked, this,
             &SettingsWindow::onBrowseFolderClicked);
+    connect(m_mirrorEnabledCheck, &QCheckBox::toggled, this,
+            &SettingsWindow::updateSyncSystemWidgets);
 }
 
 void SettingsWindow::setupFuseTab() {
     m_fuseTab = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(m_fuseTab);
 
+    m_fuseEnabledCheck = new QCheckBox("Enable FUSE sync", m_fuseTab);
+    m_fuseEnabledCheck->setObjectName("settingsFuseEnabledCheck");
+    layout->addWidget(m_fuseEnabledCheck);
+
     QGroupBox* fuseGroup = new QGroupBox("Virtual File System (FUSE)", m_fuseTab);
     QVBoxLayout* fuseLayout = new QVBoxLayout(fuseGroup);
-
-    QHBoxLayout* syncSystemLayout = new QHBoxLayout();
-    syncSystemLayout->addWidget(new QLabel("Sync system:", m_fuseTab));
-    m_syncSystemCombo = new QComboBox(m_fuseTab);
-    m_syncSystemCombo->setObjectName("settingsSyncSystemCombo");
-    m_syncSystemCombo->addItem("Mirror Only", "mirror-only");
-    m_syncSystemCombo->addItem("FUSE Only", "fuse-only");
-    m_syncSystemCombo->addItem("Both", "both");
-    syncSystemLayout->addWidget(m_syncSystemCombo);
-    syncSystemLayout->addStretch();
-    fuseLayout->addLayout(syncSystemLayout);
 
     QHBoxLayout* mountLayout = new QHBoxLayout();
     mountLayout->addWidget(new QLabel("Mount point:", m_fuseTab));
@@ -500,10 +529,8 @@ void SettingsWindow::setupFuseTab() {
     m_nativeDocModeCombo = new QComboBox(m_fuseTab);
     m_nativeDocModeCombo->setObjectName("settingsNativeDocModeCombo");
     m_nativeDocModeCombo->addItem("Hide (don't materialize locally)", "hide");
-    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)",
-                                  "browser-shortcut");
-    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)",
-                                  "open-document");
+    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)", "browser-shortcut");
+    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)", "open-document");
     m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
     m_nativeDocModeCombo->setEnabled(false);
     nativeDocLayout->addWidget(m_nativeDocModeCombo);
@@ -529,22 +556,11 @@ void SettingsWindow::setupFuseTab() {
     layout->addWidget(fuseGroup);
     layout->addStretch();
 
-    // Enable/disable FUSE-related widgets based on sync system selection
-    auto updateFuseWidgets = [this]() {
-        const QString syncSystem = m_syncSystemCombo->currentData().toString();
-        const bool fuseEnabled = (syncSystem != "mirror-only");
-        const bool nativeDocEnabled = (syncSystem == "mirror-only" || syncSystem == "fuse-only" ||
-                                       syncSystem == "both");
-        m_fuseMountPointEdit->setEnabled(fuseEnabled);
-        m_cacheSize->setEnabled(fuseEnabled);
-        m_nativeDocModeCombo->setEnabled(nativeDocEnabled);
-        m_clearCacheButton->setEnabled(fuseEnabled);
-    };
-    connect(m_syncSystemCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            updateFuseWidgets);
+    connect(m_fuseEnabledCheck, &QCheckBox::toggled, this,
+            &SettingsWindow::updateSyncSystemWidgets);
     connect(m_cacheSize, QOverload<int>::of(&QSpinBox::valueChanged), this,
             [this](int) { refreshCacheUsageTracker(); });
-    updateFuseWidgets();
+    updateSyncSystemWidgets();
     refreshCacheUsageTracker();
 
     connect(m_clearCacheButton, &QPushButton::clicked, this, [this]() {
@@ -634,6 +650,52 @@ void SettingsWindow::updateClientSecretPlaceholder(bool hasStoredSecret) {
 
     m_clientSecretEdit->setPlaceholderText(hasStoredSecret ? storedSecretPlaceholder()
                                                            : emptySecretPlaceholder());
+}
+
+QString SettingsWindow::currentSyncSystem() const {
+    const bool mirrorEnabled = m_mirrorEnabledCheck && m_mirrorEnabledCheck->isChecked();
+    const bool fuseEnabled = m_fuseEnabledCheck && m_fuseEnabledCheck->isChecked();
+    return syncSystemFromEnabledFlags(mirrorEnabled, fuseEnabled);
+}
+
+void SettingsWindow::setCurrentSyncSystem(const QString& syncSystem) {
+    const QString normalizedSyncSystem = normalizeSyncSystem(syncSystem);
+    const QSignalBlocker mirrorBlocker(m_mirrorEnabledCheck);
+    const QSignalBlocker fuseBlocker(m_fuseEnabledCheck);
+
+    m_mirrorEnabledCheck->setChecked(mirrorEnabledForSyncSystem(normalizedSyncSystem));
+    m_fuseEnabledCheck->setChecked(fuseEnabledForSyncSystem(normalizedSyncSystem));
+    updateSyncSystemWidgets();
+}
+
+void SettingsWindow::updateSyncSystemWidgets() {
+    const bool mirrorEnabled = m_mirrorEnabledCheck && m_mirrorEnabledCheck->isChecked();
+    const bool fuseEnabled = m_fuseEnabledCheck && m_fuseEnabledCheck->isChecked();
+    const bool nativeDocEnabled = mirrorEnabled || fuseEnabled;
+
+    m_syncFolderEdit->setEnabled(mirrorEnabled);
+    m_browseFolderButton->setEnabled(mirrorEnabled);
+    m_syncModeCombo->setEnabled(mirrorEnabled);
+    m_duplicateNameCombo->setEnabled(mirrorEnabled);
+    m_conflictResolutionCombo->setEnabled(mirrorEnabled);
+
+    m_fuseMountPointEdit->setEnabled(fuseEnabled);
+    m_cacheSize->setEnabled(fuseEnabled);
+    m_cacheUsageLabel->setEnabled(fuseEnabled);
+    m_clearCacheButton->setEnabled(fuseEnabled);
+
+    m_nativeDocModeCombo->setEnabled(nativeDocEnabled);
+}
+
+void SettingsWindow::captureRestartSettingSnapshots() {
+    m_originalSyncFolder = m_syncFolderEdit->text();
+    m_originalSyncMode = m_syncModeCombo->currentData().toString();
+    m_originalDuplicateNameStrategy = m_duplicateNameCombo->currentData().toString();
+    m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
+    m_originalSyncSystem = currentSyncSystem();
+    m_originalFuseMountPoint = m_fuseMountPointEdit->text();
+    m_originalCacheSize = m_cacheSize->value();
+    m_originalNativeDocMode = m_nativeDocModeCombo->currentData().toString();
 }
 
 void SettingsWindow::loadSettings() {
@@ -742,9 +804,7 @@ void SettingsWindow::loadSettings() {
         bool legacyFuse = m_settings.value("advanced/enableFuse", false).toBool();
         syncSystem = legacyFuse ? "both" : "mirror-only";
     }
-    if (!setComboById(m_syncSystemCombo, syncSystem)) {
-        setComboById(m_syncSystemCombo, "mirror-only");
-    }
+    setCurrentSyncSystem(syncSystem);
     m_fuseMountPointEdit->setText(
         m_settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse")
             .toString());
@@ -762,15 +822,7 @@ void SettingsWindow::loadSettings() {
         }
     }
 
-    // Capture snapshots of restart-required settings
-    m_originalSyncFolder = m_syncFolderEdit->text();
-    m_originalSyncMode = m_syncModeCombo->currentData().toString();
-    m_originalDuplicateNameStrategy = m_duplicateNameCombo->currentData().toString();
-    m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
-    m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
-    m_originalFuseMountPoint = m_fuseMountPointEdit->text();
-    m_originalCacheSize = m_cacheSize->value();
-    m_originalNativeDocMode = m_nativeDocModeCombo->currentData().toString();
+    captureRestartSettingSnapshots();
 
     refreshCacheUsageTracker();
 }
@@ -792,7 +844,7 @@ void SettingsWindow::saveSettings() {
     m_settings.setValue("advanced/themeOverride", m_themeOverrideCombo->currentData().toInt());
 
     // Fuse settings
-    m_settings.setValue("advanced/syncSystem", m_syncSystemCombo->currentData().toString());
+    m_settings.setValue("advanced/syncSystem", currentSyncSystem());
     m_settings.setValue("advanced/fuseMountPoint", m_fuseMountPointEdit->text());
     m_settings.setValue("advanced/cacheSize", m_cacheSize->value());
     m_settings.setValue("advanced/nativeDocMode", m_nativeDocModeCombo->currentData().toString());
@@ -950,7 +1002,7 @@ bool SettingsWindow::checkRestartRequired() const {
         return true;
     if (m_conflictResolutionCombo->currentData().toString() != m_originalConflictStrategy)
         return true;
-    if (m_syncSystemCombo->currentData().toString() != m_originalSyncSystem)
+    if (currentSyncSystem() != m_originalSyncSystem)
         return true;
     if (m_fuseMountPointEdit->text() != m_originalFuseMountPoint)
         return true;
@@ -968,7 +1020,7 @@ void SettingsWindow::promptRestart() {
 
     const bool nativeDocModeChanged =
         m_nativeDocModeCombo->currentData().toString() != m_originalNativeDocMode;
-    const QString syncSystem = m_syncSystemCombo->currentData().toString();
+    const QString syncSystem = currentSyncSystem();
 
     QMessageBox msgBox(this);
     msgBox.setWindowTitle("Restart Required");
@@ -983,6 +1035,10 @@ void SettingsWindow::promptRestart() {
             rebuildMessage =
                 "Via will rebuild local native-document artifacts in the sync folder on next "
                 "launch.";
+        } else if (syncSystem == "none") {
+            rebuildMessage =
+                "Via will apply the updated native-document representation the next time mirror "
+                "or FUSE sync is enabled.";
         } else {
             rebuildMessage =
                 "Via will refresh native-document representation in the FUSE view on next "
@@ -1005,13 +1061,6 @@ void SettingsWindow::promptRestart() {
         emit restartRequested();
     } else {
         // Update snapshots so the prompt doesn't re-trigger for the same change
-        m_originalSyncFolder = m_syncFolderEdit->text();
-        m_originalSyncMode = m_syncModeCombo->currentData().toString();
-        m_originalDuplicateNameStrategy = m_duplicateNameCombo->currentData().toString();
-        m_originalConflictStrategy = m_conflictResolutionCombo->currentData().toString();
-        m_originalSyncSystem = m_syncSystemCombo->currentData().toString();
-        m_originalFuseMountPoint = m_fuseMountPointEdit->text();
-        m_originalCacheSize = m_cacheSize->value();
-        m_originalNativeDocMode = m_nativeDocModeCombo->currentData().toString();
+        captureRestartSettingSnapshots();
     }
 }

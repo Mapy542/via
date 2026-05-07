@@ -20,13 +20,16 @@
 
 SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
                                      RuntimePauseController* pauseController,
-                                     UiStatusCoordinator* statusCoordinator, QObject* parent)
+                                     UiStatusCoordinator* statusCoordinator, bool canPauseSync,
+                                     bool canRequestFullSync, QObject* parent)
     : QObject(parent),
       m_authManager(authManager),
       m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_syncPaused(false),
-      m_authenticated(false) {
+      m_authenticated(false),
+      m_canPauseSync(canPauseSync),
+      m_canRequestFullSync(canRequestFullSync) {
     // Create system tray icon
     m_trayIcon = new QSystemTrayIcon(this);
 
@@ -64,11 +67,17 @@ SystemTrayManager::SystemTrayManager(GoogleAuthManager* authManager,
     }
 }
 
-SystemTrayManager::~SystemTrayManager() { hide(); }
+SystemTrayManager::~SystemTrayManager() {
+    hide();
+}
 
-void SystemTrayManager::show() { m_trayIcon->show(); }
+void SystemTrayManager::show() {
+    m_trayIcon->show();
+}
 
-void SystemTrayManager::hide() { m_trayIcon->hide(); }
+void SystemTrayManager::hide() {
+    m_trayIcon->hide();
+}
 
 void SystemTrayManager::setToolTip(const QString& message) {
     m_trayIcon->setToolTip("Via\n" + message);
@@ -208,8 +217,7 @@ void SystemTrayManager::refreshNotificationMenu() {
 void SystemTrayManager::updateAuthState(bool authenticated) {
     m_authenticated = authenticated;
     m_openFolderAction->setEnabled(authenticated);
-    m_pauseSyncAction->setEnabled(authenticated);
-    m_syncNowAction->setEnabled(authenticated);
+    updateSyncActionAvailability(authenticated);
     m_recentChangesAction->setEnabled(authenticated);
     if (authenticated) {
         applyPauseControllerState();
@@ -223,8 +231,14 @@ void SystemTrayManager::updatePauseAction(bool paused) {
     m_pauseSyncAction->setText(paused ? "Resume Sync" : "Pause Sync");
 }
 
+void SystemTrayManager::updateSyncActionAvailability(bool authenticated) {
+    m_pauseSyncAction->setEnabled(authenticated && m_canPauseSync);
+    m_syncNowAction->setEnabled(authenticated && m_canRequestFullSync);
+}
+
 void SystemTrayManager::applyPauseControllerState() {
-    if (!m_pauseController) {
+    if (!m_pauseController || !m_canPauseSync) {
+        updatePauseAction(false);
         return;
     }
 
@@ -252,7 +266,7 @@ void SystemTrayManager::onOpenFolderClicked() {
 }
 
 void SystemTrayManager::onPauseSyncClicked() {
-    if (!m_pauseController) {
+    if (!m_canPauseSync || !m_pauseController) {
         return;
     }
 
@@ -265,11 +279,17 @@ void SystemTrayManager::onPauseSyncClicked() {
 }
 
 void SystemTrayManager::onSyncNowClicked() {
+    if (!m_canRequestFullSync) {
+        return;
+    }
+
     emit fullSyncRequested();
     showNotification("Syncing", "Starting full Google Drive sync...");
 }
 
-void SystemTrayManager::onRecentChangesClicked() { emit showWindowRequested(); }
+void SystemTrayManager::onRecentChangesClicked() {
+    emit showWindowRequested();
+}
 
 void SystemTrayManager::applyStatusSnapshot() {
     if (!m_statusCoordinator) {

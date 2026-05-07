@@ -101,7 +101,8 @@ class TestSettingsWindow : public QObject {
     void testAutoPauseCheckboxPersistsAndUpdatesController();
     void testWindowStaysUsableWhenAboutInfoAuthFailsOnOpen();
     void testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen();
-    void testMirrorOnlyModeKeepsNativeDocModeEditable();
+    void testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisabled();
+    void testBothSyncSystemsCanBeDisabled();
     void testNativeDocModeRestartPromptMentionsMirrorRebuild();
 
    private:
@@ -276,43 +277,65 @@ void TestSettingsWindow::testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen() 
     QVERIFY(clientIdEdit->isEnabled());
 }
 
-void TestSettingsWindow::testMirrorOnlyModeKeepsNativeDocModeEditable() {
+void TestSettingsWindow::testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisabled() {
     SettingsWindow window(nullptr, nullptr);
-    auto* syncSystemCombo = window.findChild<QComboBox*>("settingsSyncSystemCombo");
+    auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
+    auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
     auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
     auto* nativeDocInfoLabel = window.findChild<QLabel*>("settingsNativeDocModeInfoLabel");
 
-    QVERIFY(syncSystemCombo != nullptr);
+    QVERIFY(mirrorEnabledCheck != nullptr);
+    QVERIFY(fuseEnabledCheck != nullptr);
     QVERIFY(nativeDocCombo != nullptr);
     QVERIFY(nativeDocInfoLabel != nullptr);
 
-    const int mirrorOnlyIndex = syncSystemCombo->findData(QStringLiteral("mirror-only"));
-    QVERIFY(mirrorOnlyIndex >= 0);
-    syncSystemCombo->setCurrentIndex(mirrorOnlyIndex);
+    mirrorEnabledCheck->setChecked(true);
+    fuseEnabledCheck->setChecked(false);
 
     QVERIFY(nativeDocCombo->isEnabled());
     QVERIFY(nativeDocInfoLabel->text().contains(QStringLiteral("mirror sync and FUSE")));
 }
 
+void TestSettingsWindow::testBothSyncSystemsCanBeDisabled() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
+    auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
+    auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
+
+    QVERIFY(mirrorEnabledCheck != nullptr);
+    QVERIFY(fuseEnabledCheck != nullptr);
+    QVERIFY(nativeDocCombo != nullptr);
+
+    mirrorEnabledCheck->setChecked(false);
+    fuseEnabledCheck->setChecked(false);
+
+    QVERIFY(!nativeDocCombo->isEnabled());
+
+    window.saveSettings();
+
+    QSettings settings;
+    QCOMPARE(settings.value("advanced/syncSystem").toString(), QStringLiteral("none"));
+}
+
 void TestSettingsWindow::testNativeDocModeRestartPromptMentionsMirrorRebuild() {
     SettingsWindow window(nullptr, nullptr);
-    auto* syncSystemCombo = window.findChild<QComboBox*>("settingsSyncSystemCombo");
+    auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
+    auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
     auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
     auto* applyButton = window.findChild<QPushButton*>("settingsApplyButton");
 
-    QVERIFY(syncSystemCombo != nullptr);
+    QVERIFY(mirrorEnabledCheck != nullptr);
+    QVERIFY(fuseEnabledCheck != nullptr);
     QVERIFY(nativeDocCombo != nullptr);
     QVERIFY(applyButton != nullptr);
 
     window.show();
     QTRY_VERIFY(window.isVisible());
 
-    const int mirrorOnlyIndex = syncSystemCombo->findData(QStringLiteral("mirror-only"));
-    QVERIFY(mirrorOnlyIndex >= 0);
-    syncSystemCombo->setCurrentIndex(mirrorOnlyIndex);
+    mirrorEnabledCheck->setChecked(true);
+    fuseEnabledCheck->setChecked(false);
 
-    const int browserShortcutIndex =
-        nativeDocCombo->findData(QStringLiteral("browser-shortcut"));
+    const int browserShortcutIndex = nativeDocCombo->findData(QStringLiteral("browser-shortcut"));
     QVERIFY(browserShortcutIndex >= 0);
     nativeDocCombo->setCurrentIndex(browserShortcutIndex);
 
