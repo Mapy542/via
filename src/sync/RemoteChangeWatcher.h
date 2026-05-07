@@ -199,6 +199,7 @@ class RemoteChangeWatcher : public QObject {
     bool m_waitingForToken;
     bool m_changesRequestInFlight = false;
     bool m_pendingCheckRequested = false;
+    int m_consecutiveTransientFailures = 0;
 
     // Folder ID to path mapping for resolving file paths
     mutable QHash<QString, QString> m_folderIdToPath;

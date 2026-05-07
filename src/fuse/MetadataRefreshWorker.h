@@ -299,6 +299,9 @@ class MetadataRefreshWorker : public QObject {
     State m_state;
     mutable QMutex m_mutex;
     bool m_waitingForToken;
+    bool m_changesRequestInFlight = false;
+    bool m_pendingCheckRequested = false;
+    int m_consecutiveTransientFailures = 0;
 
     // Constants
     static const int DEFAULT_POLL_INTERVAL_MS = 30000;  // 30 seconds per flow chart

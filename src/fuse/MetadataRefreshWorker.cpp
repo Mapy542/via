@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QMutexLocker>
 #include <QSettings>
+#include <QtGlobal>
 
 #include "FileCache.h"
 #include "MetadataCache.h"
@@ -18,6 +19,31 @@
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 #include "utils/NativeDocSupport.h"
+
+namespace {
+constexpr int kTransientRetryBaseDelayMs = 300;
+constexpr int kTransientRetryMaxDelayMs = 5000;
+constexpr int kTransientFailureSurfaceThreshold = 3;
+
+bool isTransientPollError(const QString& error) {
+    const QString lowered = error.toLower();
+    return lowered.contains(QStringLiteral("goaway")) ||
+           lowered.contains(QStringLiteral("protocol error")) ||
+           lowered.contains(QStringLiteral("stream error")) ||
+           lowered.contains(QStringLiteral("connection reset")) ||
+           lowered.contains(QStringLiteral("connection closed")) ||
+           lowered.contains(QStringLiteral("remote host closed"));
+}
+
+int transientRetryDelayMs(int consecutiveFailures) {
+    int delayMs = kTransientRetryBaseDelayMs;
+    const int clampedFailures = qBound(1, consecutiveFailures, 5);
+    for (int attempt = 1; attempt < clampedFailures; ++attempt) {
+        delayMs = qMin(delayMs * 2, kTransientRetryMaxDelayMs);
+    }
+    return delayMs;
+}
+}  // namespace
 
 // Key used to store the FUSE change token in the fuse_sync_state table
 const QString MetadataRefreshWorker::FUSE_CHANGE_TOKEN_KEY = QStringLiteral("fuse_change_token");
@@ -107,6 +133,8 @@ void MetadataRefreshWorker::start() {
     if (m_changeToken.isEmpty()) {
         qDebug() << "MetadataRefreshWorker: No change token, requesting start page token";
         m_waitingForToken = true;
+        m_changesRequestInFlight = true;
+        m_pendingCheckRequested = false;
         locker.unlock();
         // Invoke on the drive client's thread (main thread) to avoid cross-thread
         // QNetworkAccessManager usage
@@ -132,6 +160,9 @@ void MetadataRefreshWorker::stop() {
     m_pollingTimer->stop();
     m_state = State::Stopped;
     m_waitingForToken = false;
+    m_changesRequestInFlight = false;
+    m_pendingCheckRequested = false;
+    m_consecutiveTransientFailures = 0;
 
     locker.unlock();
     emit stateChanged(State::Stopped);
@@ -174,15 +205,27 @@ void MetadataRefreshWorker::resume() {
 void MetadataRefreshWorker::checkNow() {
     QMutexLocker locker(&m_mutex);
 
-    if (m_state != State::Running) {
+    if (m_state != State::Running && !m_waitingForToken) {
+        return;
+    }
+
+    if (m_changesRequestInFlight) {
+        m_pendingCheckRequested = true;
+        qDebug()
+            << "MetadataRefreshWorker: Remote changes request already in flight; deferring check";
         return;
     }
 
     if (m_changeToken.isEmpty()) {
         qDebug() << "MetadataRefreshWorker: No change token available";
+        m_waitingForToken = true;
+        m_changesRequestInFlight = true;
+        locker.unlock();
+        QMetaObject::invokeMethod(m_driveClient, "getStartPageToken", Qt::QueuedConnection);
         return;
     }
 
+    m_changesRequestInFlight = true;
     QString token = m_changeToken;
     locker.unlock();
 
@@ -216,14 +259,23 @@ void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
     }
 
     // Update and save the change token
+    bool runDeferredCheck = false;
     {
         QMutexLocker locker(&m_mutex);
         m_changeToken = newToken;
+        m_changesRequestInFlight = false;
+        runDeferredCheck = m_pendingCheckRequested;
+        m_pendingCheckRequested = false;
+        m_consecutiveTransientFailures = 0;
     }
     saveChangeToken(newToken);
 
     emit changeTokenUpdated(newToken);
     emit refreshCompleted(processedCount);
+
+    if (runDeferredCheck) {
+        QTimer::singleShot(0, this, &MetadataRefreshWorker::checkNow);
+    }
 }
 
 void MetadataRefreshWorker::onStartPageTokenReceived(const QString& token) {
@@ -232,6 +284,9 @@ void MetadataRefreshWorker::onStartPageTokenReceived(const QString& token) {
     m_changeToken = token;
     bool wasWaiting = m_waitingForToken;
     m_waitingForToken = false;
+    m_changesRequestInFlight = false;
+    m_pendingCheckRequested = false;
+    m_consecutiveTransientFailures = 0;
 
     locker.unlock();
 
@@ -253,6 +308,37 @@ void MetadataRefreshWorker::onApiError(const QString& operation, const QString& 
     // Only handle errors related to changes API
     if (operation.contains(QStringLiteral("changes"), Qt::CaseInsensitive) ||
         operation.contains(QStringLiteral("token"), Qt::CaseInsensitive)) {
+        const bool transient = isTransientPollError(errorMessage);
+        bool shouldRetry = false;
+        bool shouldSurface = false;
+        int retryDelayMs = 0;
+
+        {
+            QMutexLocker locker(&m_mutex);
+            m_changesRequestInFlight = false;
+            if (transient) {
+                m_consecutiveTransientFailures += 1;
+                shouldRetry = (m_state == State::Running || m_waitingForToken);
+                shouldSurface = m_consecutiveTransientFailures >= kTransientFailureSurfaceThreshold;
+                retryDelayMs = transientRetryDelayMs(m_consecutiveTransientFailures);
+            } else {
+                m_pendingCheckRequested = false;
+                m_consecutiveTransientFailures = 0;
+            }
+        }
+
+        if (transient) {
+            qWarning() << "MetadataRefreshWorker: transient API error in" << operation << "-"
+                       << errorMessage << "retrying in" << retryDelayMs << "ms";
+            if (shouldSurface) {
+                emit error(QStringLiteral("API error: ") + errorMessage);
+            }
+            if (shouldRetry) {
+                QTimer::singleShot(retryDelayMs, this, &MetadataRefreshWorker::checkNow);
+            }
+            return;
+        }
+
         qWarning() << "MetadataRefreshWorker: API error in" << operation << "-" << errorMessage;
         emit error(QStringLiteral("API error: ") + errorMessage);
     }

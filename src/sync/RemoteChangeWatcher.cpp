@@ -8,6 +8,7 @@
 #include <QDebug>
 #include <QMutexLocker>
 #include <QSet>
+#include <QtGlobal>
 
 #include "ChangeQueue.h"
 #include "FileFilter.h"
@@ -21,6 +22,10 @@
 #include "utils/PathUtils.h"
 
 namespace {
+
+constexpr int kTransientRetryBaseDelayMs = 300;
+constexpr int kTransientRetryMaxDelayMs = 5000;
+constexpr int kTransientFailureSurfaceThreshold = 3;
 
 QString nativeDocModeOverrideForFile(const SyncDatabase* database, const QString& fileId) {
     if (!database || fileId.isEmpty()) {
@@ -48,6 +53,25 @@ void persistObservedNativeDocState(SyncDatabase* database, const DriveFile& file
     state.webViewLink = file.webViewLink;
     state.nativeDocModeOverride = nativeDocModeOverride;
     database->saveNativeDocState(state);
+}
+
+bool isTransientPollError(const QString& error) {
+    const QString lowered = error.toLower();
+    return lowered.contains(QStringLiteral("goaway")) ||
+           lowered.contains(QStringLiteral("protocol error")) ||
+           lowered.contains(QStringLiteral("stream error")) ||
+           lowered.contains(QStringLiteral("connection reset")) ||
+           lowered.contains(QStringLiteral("connection closed")) ||
+           lowered.contains(QStringLiteral("remote host closed"));
+}
+
+int transientRetryDelayMs(int consecutiveFailures) {
+    int delayMs = kTransientRetryBaseDelayMs;
+    const int clampedFailures = qBound(1, consecutiveFailures, 5);
+    for (int attempt = 1; attempt < clampedFailures; ++attempt) {
+        delayMs = qMin(delayMs * 2, kTransientRetryMaxDelayMs);
+    }
+    return delayMs;
 }
 
 }  // namespace
@@ -135,6 +159,8 @@ void RemoteChangeWatcher::start() {
     if (m_changeToken.isEmpty()) {
         // Need to get the start page token first
         m_waitingForToken = true;
+        m_changesRequestInFlight = true;
+        m_pendingCheckRequested = false;
         locker.unlock();
         m_driveClient->getStartPageToken();
         return;
@@ -162,6 +188,7 @@ void RemoteChangeWatcher::stop() {
     m_waitingForToken = false;
     m_changesRequestInFlight = false;
     m_pendingCheckRequested = false;
+    m_consecutiveTransientFailures = 0;
 
     locker.unlock();
 
@@ -215,21 +242,22 @@ void RemoteChangeWatcher::resume() {
 void RemoteChangeWatcher::checkNow() {
     QMutexLocker locker(&m_mutex);
 
-    if (m_state != State::Running) {
-        return;
-    }
-
-    if (m_changeToken.isEmpty()) {
-        qDebug() << "No change token, requesting start page token";
-        m_waitingForToken = true;
-        locker.unlock();
-        m_driveClient->getStartPageToken();
+    if (m_state != State::Running && !m_waitingForToken) {
         return;
     }
 
     if (m_changesRequestInFlight) {
         m_pendingCheckRequested = true;
         qDebug() << "Remote changes request already in flight; deferring check";
+        return;
+    }
+
+    if (m_changeToken.isEmpty()) {
+        qDebug() << "No change token, requesting start page token";
+        m_waitingForToken = true;
+        m_changesRequestInFlight = true;
+        locker.unlock();
+        m_driveClient->getStartPageToken();
         return;
     }
 
@@ -255,6 +283,8 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
     {
         QMutexLocker locker(&m_mutex);
         if (m_state != State::Running) {
+            m_changesRequestInFlight = false;
+            m_pendingCheckRequested = false;
             return;
         }
     }
@@ -276,6 +306,7 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
         m_changesRequestInFlight = false;
         runDeferredCheck = m_pendingCheckRequested;
         m_pendingCheckRequested = false;
+        m_consecutiveTransientFailures = 0;
     }
 
     emit changeTokenUpdated(newToken);
@@ -303,6 +334,9 @@ void RemoteChangeWatcher::onStartPageTokenReceived(const QString& token) {
     m_changeToken = token;
     bool wasWaiting = m_waitingForToken;
     m_waitingForToken = false;
+    m_changesRequestInFlight = false;
+    m_pendingCheckRequested = false;
+    m_consecutiveTransientFailures = 0;
 
     locker.unlock();
 
@@ -319,6 +353,11 @@ void RemoteChangeWatcher::onApiError(const QString& operation, const QString& er
     if (operation.contains("changes", Qt::CaseInsensitive) ||
         operation.contains("token", Qt::CaseInsensitive)) {
         bool runDeferredCheck = false;
+        bool shouldRetry = false;
+        bool shouldSurface = false;
+        int retryDelayMs = 0;
+        const bool transient = isTransientPollError(error);
+
         {
             QMutexLocker locker(&m_mutex);
             m_changesRequestInFlight = false;
@@ -326,6 +365,29 @@ void RemoteChangeWatcher::onApiError(const QString& operation, const QString& er
                 runDeferredCheck = true;
                 m_pendingCheckRequested = false;
             }
+
+            if (transient) {
+                m_consecutiveTransientFailures += 1;
+                shouldRetry = (m_state == State::Running || m_waitingForToken);
+                shouldSurface = m_consecutiveTransientFailures >= kTransientFailureSurfaceThreshold;
+                retryDelayMs = transientRetryDelayMs(m_consecutiveTransientFailures);
+            } else {
+                m_consecutiveTransientFailures = 0;
+            }
+        }
+
+        if (transient) {
+            qWarning() << "RemoteChangeWatcher transient API error:" << operation << error
+                       << "- retrying in" << retryDelayMs << "ms";
+
+            if (shouldSurface) {
+                emit this->error("API error in " + operation + ": " + error);
+            }
+
+            if (shouldRetry) {
+                QTimer::singleShot(retryDelayMs, this, &RemoteChangeWatcher::checkNow);
+            }
+            return;
         }
 
         emit this->error("API error in " + operation + ": " + error);

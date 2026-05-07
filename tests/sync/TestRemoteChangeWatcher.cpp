@@ -30,6 +30,12 @@ class FakeDriveClientForRCW : public GoogleDriveClient {
     Q_OBJECT
 
    public:
+    struct InjectedError {
+        QString errorMsg;
+        int remaining = 1;
+        int delayMs = 0;
+    };
+
     explicit FakeDriveClientForRCW(QObject* parent = nullptr)
         : GoogleDriveClient(nullptr, parent) {}
 
@@ -41,6 +47,9 @@ class FakeDriveClientForRCW : public GoogleDriveClient {
     void listChanges(const QString& startPageToken = QString()) override {
         ++listChangesCallCount;
         lastListChangesToken = startPageToken;
+        if (emitInjectedError(QStringLiteral("listChanges"))) {
+            return;
+        }
         // Emit results asynchronously so caller returns first
         // hasMorePages=false means we're caught up
         QTimer::singleShot(
@@ -49,6 +58,9 @@ class FakeDriveClientForRCW : public GoogleDriveClient {
 
     void getStartPageToken() override {
         ++getStartPageTokenCallCount;
+        if (emitInjectedError(QStringLiteral("getStartPageToken"))) {
+            return;
+        }
         QTimer::singleShot(0, this, [this]() { emit startPageTokenReceived(m_startPageToken); });
     }
 
@@ -67,17 +79,42 @@ class FakeDriveClientForRCW : public GoogleDriveClient {
     void setPendingChanges(const QList<DriveChange>& changes) { m_pendingChanges = changes; }
     void setRootFolderId(const QString& id) { m_rootFolderId = id; }
     void addFileMetadata(const DriveFile& file) { m_fileMetadata.insert(file.id, file); }
+    void injectOperationError(const QString& operation, const QString& errorMsg, int remaining = 1,
+                              int delayMs = 0) {
+        m_injectedErrors.insert(operation, InjectedError{errorMsg, remaining, delayMs});
+    }
 
     void emitError(const QString& operation, const QString& errorMsg) {
         emit error(operation, errorMsg);
     }
 
    private:
+    bool emitInjectedError(const QString& operation) {
+        if (!m_injectedErrors.contains(operation)) {
+            return false;
+        }
+
+        InjectedError injected = m_injectedErrors.value(operation);
+        QTimer::singleShot(
+            injected.delayMs, this,
+            [this, operation, errorMsg = injected.errorMsg]() { emit error(operation, errorMsg); });
+
+        injected.remaining -= 1;
+        if (injected.remaining <= 0) {
+            m_injectedErrors.remove(operation);
+        } else {
+            m_injectedErrors.insert(operation, injected);
+        }
+
+        return true;
+    }
+
     QString m_startPageToken = "start-token-1";
     QString m_nextToken = "next-token-1";
     QList<DriveChange> m_pendingChanges;
     QString m_rootFolderId = "root-id";
     QHash<QString, DriveFile> m_fileMetadata;
+    QHash<QString, InjectedError> m_injectedErrors;
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +163,7 @@ class TestRemoteChangeWatcher : public QObject {
 
     // Error handling
     void testApiErrorEmitsErrorSignal();
+    void testTransientApiErrorRetriesWithoutErrorSignal();
 
     // In-flight dedup
     void testInFlightDedup();
@@ -707,6 +745,24 @@ void TestRemoteChangeWatcher::testApiErrorEmitsErrorSignal() {
     m_driveClient->emitError("listChanges", "network timeout");
 
     QTRY_VERIFY(errorSpy.count() >= 1);
+}
+
+void TestRemoteChangeWatcher::testTransientApiErrorRetriesWithoutErrorSignal() {
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setPendingChanges({});
+    m_driveClient->setNextToken("token-2");
+    m_driveClient->injectOperationError(QStringLiteral("listChanges"),
+                                        QStringLiteral("HTTP/2 protocol error"));
+
+    QSignalSpy errorSpy(m_watcher, &RemoteChangeWatcher::error);
+    QSignalSpy tokenSpy(m_watcher, &RemoteChangeWatcher::changeTokenUpdated);
+
+    m_watcher->start();
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(m_watcher->changeToken(), QStringLiteral("token-2"));
 }
 
 // ---------------------------------------------------------------------------
