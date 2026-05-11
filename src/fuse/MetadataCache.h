@@ -228,10 +228,11 @@ class MetadataCache : public QObject {
     /**
      * @brief Add or update metadata in cache
      * @param metadata The metadata to store
+     * @param persistToDatabase Whether the change should also be written to the database
      *
      * Updates both in-memory cache and database.
      */
-    void setMetadata(const FuseFileMetadata& metadata);
+    void setMetadata(const FuseFileMetadata& metadata, bool persistToDatabase = true);
 
     /**
      * @brief Add or update multiple metadata entries
@@ -252,8 +253,9 @@ class MetadataCache : public QObject {
     /**
      * @brief Remove metadata from cache by file ID
      * @param fileId Google Drive file ID to remove
+     * @param removeFromDatabaseFlag Whether the entry should also be removed from the database
      */
-    void removeByFileId(const QString& fileId);
+    void removeByFileId(const QString& fileId, bool removeFromDatabaseFlag = true);
 
     /**
      * @brief Update the path of an existing entry (for renames/moves)
@@ -300,6 +302,15 @@ class MetadataCache : public QObject {
      * @param parentPath Directory path
      */
     void invalidateChildren(const QString& parentPath);
+
+    /**
+     * @brief Drop a cached subtree from memory without touching the database
+     * @param rootPath Root path of the subtree to remove from in-memory state
+     *
+     * Used when a folder move/rename has already been persisted to the database
+     * and any stale in-memory descendants should be lazily repopulated.
+     */
+    void dropSubtreeFromCache(const QString& rootPath);
 
     /**
      * @brief Clear all cached metadata

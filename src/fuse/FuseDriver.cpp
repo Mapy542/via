@@ -76,6 +76,26 @@ bool isAuthOrPermissionFailure(int httpStatus, const QString& errorMsg) {
            lowered.contains(QStringLiteral("unauthorized"));
 }
 
+FuseFileMetadata toCacheMetadata(const FuseMetadata& meta) {
+    FuseFileMetadata metadata;
+    metadata.fileId = meta.fileId;
+    metadata.path = meta.path;
+    metadata.name = meta.name;
+    metadata.remoteName = meta.remoteName;
+    metadata.nativeDocModeOverride = meta.nativeDocModeOverride;
+    metadata.parentId = meta.parentId;
+    metadata.isFolder = meta.isFolder;
+    metadata.size = meta.size;
+    metadata.mimeType = meta.mimeType;
+    metadata.remoteMimeType = meta.remoteMimeType;
+    metadata.webViewLink = meta.webViewLink;
+    metadata.createdTime = meta.createdTime;
+    metadata.modifiedTime = meta.modifiedTime;
+    metadata.cachedAt = meta.cachedAt;
+    metadata.lastAccessed = meta.lastAccessed;
+    return metadata;
+}
+
 QString remoteRenameTargetForMetadata(const FuseMetadata& meta, const QString& requestedName) {
     const QString remoteMimeType =
         meta.remoteMimeType.isEmpty() ? meta.mimeType : meta.remoteMimeType;
@@ -2000,9 +2020,11 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     newMeta.cachedAt = QDateTime::currentDateTime();
     newMeta.lastAccessed = QDateTime::currentDateTime();
 
-    if (!drv->m_database->saveFuseMetadata(newMeta)) {
+    if (!drv->saveMetadataEntry(newMeta)) {
         return -EIO;
     }
+
+    drv->invalidateFusePaths({parentPath, qpath});
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseFolderCreated(qpath); }, Qt::QueuedConnection);
@@ -2054,8 +2076,12 @@ int FuseDriver::fuseRmdir(const char* path) {
     }
 
     // Remove from metadata only after remote trash confirmed
-    drv->m_database->deleteFuseMetadata(meta.fileId);
+    if (!drv->m_database->deleteFuseMetadata(meta.fileId)) {
+        return -EIO;
+    }
     drv->m_database->deleteNativeDocState(meta.fileId);
+    drv->removeMetadataEntryFromCache(meta);
+    drv->invalidateFusePaths({getParentPath(qpath), qpath});
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseItemTrashed(qpath); }, Qt::QueuedConnection);
@@ -2116,8 +2142,12 @@ int FuseDriver::fuseUnlink(const char* path) {
     }
 
     // Remove from metadata
-    drv->m_database->deleteFuseMetadata(meta.fileId);
+    if (!drv->m_database->deleteFuseMetadata(meta.fileId)) {
+        return -EIO;
+    }
     drv->m_database->deleteNativeDocState(meta.fileId);
+    drv->removeMetadataEntryFromCache(meta);
+    drv->invalidateFusePaths({getParentPath(qpath), qpath});
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseItemTrashed(qpath); }, Qt::QueuedConnection);
@@ -2260,18 +2290,19 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         }
     }
 
+    const FuseMetadata previousMeta = meta;
+
     // Update metadata
     meta.name = newName;
     meta.remoteName = remoteNewName;
     meta.path = toLookup;
     meta.cachedAt = QDateTime::currentDateTime();
     meta.lastAccessed = QDateTime::currentDateTime();
-    drv->m_database->saveFuseMetadata(meta);
-
-    // H2 fix: recursively update paths of all descendants
-    if (meta.isFolder) {
-        drv->m_database->updateFuseChildrenPaths(meta.fileId, fromLookup, toLookup);
+    if (!drv->reconcileMovedMetadata(previousMeta, meta)) {
+        return -EIO;
     }
+
+    drv->invalidateFusePaths({fromPath, toPath, oldParentPath, newParentPath});
 
     // Emit activity signal based on operation type
     if (isMove) {
@@ -2422,7 +2453,7 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     newMeta.modifiedTime = uploadedFile.modifiedTime;
     newMeta.cachedAt = QDateTime::currentDateTime();
     newMeta.lastAccessed = QDateTime::currentDateTime();
-    if (!drv->m_database->saveFuseMetadata(newMeta)) {
+    if (!drv->saveMetadataEntry(newMeta)) {
         // ROB-06: Clean up orphaned remote file since metadata save failed
         qWarning() << "FuseDriver: saveFuseMetadata failed for" << newMeta.fileId
                    << "- deleting orphaned remote file";
@@ -2432,6 +2463,8 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
             Qt::QueuedConnection);
         return -EIO;
     }
+    drv->invalidateFusePaths({parentPath, qpath});
+
     FuseOpenFile openFile;
     openFile.fileId = uploadedFile.id;
     openFile.path = qpath;
@@ -2573,6 +2606,65 @@ bool FuseDriver::initializeFileCache() {
 
     qDebug() << "FuseDriver: File cache initialized";
     return true;
+}
+
+bool FuseDriver::saveMetadataEntry(const FuseMetadata& metadata) {
+    if (!m_database || !m_database->saveFuseMetadata(metadata)) {
+        return false;
+    }
+
+    if (m_metadataCache) {
+        m_metadataCache->setMetadata(toCacheMetadata(metadata), false);
+    }
+
+    return true;
+}
+
+void FuseDriver::removeMetadataEntryFromCache(const FuseMetadata& metadata) {
+    if (!m_metadataCache || metadata.fileId.isEmpty()) {
+        return;
+    }
+
+    m_metadataCache->removeByFileId(metadata.fileId, false);
+}
+
+bool FuseDriver::reconcileMovedMetadata(const FuseMetadata& previousMetadata,
+                                        const FuseMetadata& updatedMetadata) {
+    if (!m_database || !m_database->saveFuseMetadata(updatedMetadata)) {
+        return false;
+    }
+
+    if (updatedMetadata.isFolder) {
+        m_database->updateFuseChildrenPaths(updatedMetadata.fileId, previousMetadata.path,
+                                            updatedMetadata.path);
+    }
+
+    if (m_metadataCache) {
+        if (updatedMetadata.isFolder) {
+            m_metadataCache->dropSubtreeFromCache(previousMetadata.path);
+        }
+
+        m_metadataCache->setMetadata(toCacheMetadata(updatedMetadata), false);
+    }
+
+    return true;
+}
+
+void FuseDriver::invalidateFusePaths(const QList<QString>& paths) {
+    QSet<QString> uniquePaths;
+    for (QString path : paths) {
+        if (path.isEmpty()) {
+            continue;
+        }
+        if (!path.startsWith(QLatin1Char('/'))) {
+            path.prepend(QLatin1Char('/'));
+        }
+        uniquePaths.insert(path);
+    }
+
+    for (const QString& path : uniquePaths) {
+        invalidateFusePath(m_fuse, path);
+    }
 }
 
 bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd) {

@@ -735,6 +735,34 @@ class FuseDriver : public QObject {
     bool initializeFileCache();
 
     /**
+     * @brief Persist a metadata entry and reconcile the in-memory metadata cache
+     * @param metadata Entry to store
+     * @return true if the database write succeeded
+     */
+    bool saveMetadataEntry(const FuseMetadata& metadata);
+
+    /**
+     * @brief Remove a metadata entry from the in-memory cache after a DB delete
+     * @param metadata Entry that was deleted from the database
+     */
+    void removeMetadataEntryFromCache(const FuseMetadata& metadata);
+
+    /**
+     * @brief Reconcile a successful rename/move across DB and in-memory cache
+     * @param previousMetadata Entry state before the mutation
+     * @param updatedMetadata Entry state after the mutation
+     * @return true if the database update succeeded
+     */
+    bool reconcileMovedMetadata(const FuseMetadata& previousMetadata,
+                                const FuseMetadata& updatedMetadata);
+
+    /**
+     * @brief Invalidate one or more FUSE kernel path entries
+     * @param paths FUSE paths to invalidate
+     */
+    void invalidateFusePaths(const QList<QString>& paths);
+
+    /**
      * @brief Move dirty bytes into the pending store, refresh metadata, and wake uploads
      * @param fileId Google Drive file ID
      * @param path FUSE path for logging and metadata context

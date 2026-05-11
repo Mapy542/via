@@ -643,7 +643,7 @@ FuseFileMetadata MetadataCache::applyNativeDocModeOverride(const QString& fileId
 // Cache modification
 // ========================================
 
-void MetadataCache::setMetadata(const FuseFileMetadata& metadata) {
+void MetadataCache::setMetadata(const FuseFileMetadata& metadata, bool persistToDatabase) {
     FuseFileMetadata normalized = metadata;
     normalized.path = normalizeMetadataPath(metadata.path);
     if (normalized.remoteName.isEmpty()) {
@@ -691,8 +691,9 @@ void MetadataCache::setMetadata(const FuseFileMetadata& metadata) {
         }
     }
 
-    // Persist to database
-    saveToDatabase(normalized);
+    if (persistToDatabase) {
+        saveToDatabase(normalized);
+    }
 
     emit metadataUpdated(normalized.path);
 }
@@ -787,7 +788,7 @@ void MetadataCache::removeByPath(const QString& path) {
     emit metadataRemoved(path);
 }
 
-void MetadataCache::removeByFileId(const QString& fileId) {
+void MetadataCache::removeByFileId(const QString& fileId, bool removeFromDatabaseFlag) {
     QWriteLocker locker(&m_lock);
 
     auto pathIt = m_fileIdToPath.constFind(fileId);
@@ -818,8 +819,9 @@ void MetadataCache::removeByFileId(const QString& fileId) {
     // Unlock before database and signal operations
     locker.unlock();
 
-    // Remove from database
-    removeFromDatabase(fileId);
+    if (removeFromDatabaseFlag) {
+        removeFromDatabase(fileId);
+    }
 
     emit metadataRemoved(path);
 }
@@ -949,6 +951,46 @@ void MetadataCache::invalidateChildren(const QString& parentPath) {
                 metaIt->cachedAt = QDateTime();
             }
         }
+    }
+}
+
+void MetadataCache::dropSubtreeFromCache(const QString& rootPath) {
+    const QString normalizedRoot = normalizeMetadataPath(rootPath);
+    if (normalizedRoot.isEmpty() || normalizedRoot == QStringLiteral("/")) {
+        return;
+    }
+
+    QWriteLocker locker(&m_lock);
+
+    QSet<QString> pathsToRemove;
+    const QString subtreePrefix = normalizedRoot + QStringLiteral("/");
+    for (auto it = m_pathToMetadata.constBegin(); it != m_pathToMetadata.constEnd(); ++it) {
+        const QString candidatePath = it.key();
+        if (candidatePath == normalizedRoot || candidatePath.startsWith(subtreePrefix)) {
+            pathsToRemove.insert(candidatePath);
+        }
+    }
+
+    if (pathsToRemove.isEmpty()) {
+        return;
+    }
+
+    for (auto childrenIt = m_parentToChildren.begin(); childrenIt != m_parentToChildren.end();
+         ++childrenIt) {
+        QList<QString>& children = childrenIt.value();
+        for (const QString& path : pathsToRemove) {
+            children.removeAll(path);
+        }
+    }
+
+    for (const QString& path : pathsToRemove) {
+        auto metaIt = m_pathToMetadata.constFind(path);
+        if (metaIt != m_pathToMetadata.constEnd()) {
+            m_fileIdToPath.remove(metaIt->fileId);
+        }
+        m_pathToMetadata.remove(path);
+        m_parentToChildren.remove(path);
+        m_childrenCacheTime.remove(path);
     }
 }
 

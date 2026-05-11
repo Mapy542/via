@@ -20,6 +20,7 @@
 #include "api/GoogleDriveClient.h"
 #include "fuse/FileCache.h"
 #include "fuse/FuseDriver.h"
+#include "fuse/MetadataCache.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 
@@ -88,6 +89,10 @@ class TestFuseDriverLifecycle : public QObject {
     void init();
     void cleanup();
 
+    void testSaveMetadataEntry_UpdatesWarmRootListing();
+    void testRemoveMetadataEntryFromCache_PrunesWarmRootListing();
+    void testReconcileMovedMetadata_DropsStaleFolderSubtree();
+
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
     void testPauseSync_StagesDirtyFilesIntoPersistentStore();
@@ -96,6 +101,10 @@ class TestFuseDriverLifecycle : public QObject {
     void testNativeDocExportLimitFailure_FallsBackToBrowserShortcutOverride();
 
    private:
+    static FuseMetadata makeMetadata(const QString& fileId, const QString& path,
+                                     const QString& parentId, bool isFolder,
+                                     const QString& mimeType = QStringLiteral("text/plain"));
+    static DriveFile makeDriveFile(const FuseMetadata& metadata);
     void seedCachedFile(const QString& fileId, const QString& path, const QByteArray& content);
 
     QTemporaryDir* m_tempDir = nullptr;
@@ -103,6 +112,39 @@ class TestFuseDriverLifecycle : public QObject {
     FakeDriveClientFDL* m_driveClient = nullptr;
     FuseDriver* m_driver = nullptr;
 };
+
+FuseMetadata TestFuseDriverLifecycle::makeMetadata(const QString& fileId, const QString& path,
+                                                   const QString& parentId, bool isFolder,
+                                                   const QString& mimeType) {
+    FuseMetadata meta;
+    meta.fileId = fileId;
+    meta.path = path;
+    meta.name = QFileInfo(path).fileName();
+    meta.remoteName = meta.name;
+    meta.parentId = parentId;
+    meta.isFolder = isFolder;
+    meta.size = isFolder ? 0 : 64;
+    meta.mimeType = isFolder ? QStringLiteral("application/vnd.google-apps.folder") : mimeType;
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = QDateTime::currentDateTimeUtc();
+    meta.cachedAt = QDateTime::currentDateTimeUtc();
+    meta.lastAccessed = QDateTime::currentDateTimeUtc();
+    return meta;
+}
+
+DriveFile TestFuseDriverLifecycle::makeDriveFile(const FuseMetadata& metadata) {
+    DriveFile file;
+    file.id = metadata.fileId;
+    file.name = metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName;
+    file.parents = {metadata.parentId};
+    file.isFolder = metadata.isFolder;
+    file.size = metadata.size;
+    file.mimeType = metadata.mimeType;
+    file.createdTime = metadata.createdTime;
+    file.modifiedTime = metadata.modifiedTime;
+    file.webViewLink = metadata.webViewLink;
+    return file;
+}
 
 void TestFuseDriverLifecycle::init() {
     m_tempDir = new QTemporaryDir();
@@ -165,6 +207,89 @@ void TestFuseDriverLifecycle::seedCachedFile(const QString& fileId, const QStrin
     meta.cachedAt = QDateTime::currentDateTimeUtc();
     meta.lastAccessed = QDateTime::currentDateTimeUtc();
     QVERIFY(m_db->saveFuseMetadata(meta));
+}
+
+void TestFuseDriverLifecycle::testSaveMetadataEntry_UpdatesWarmRootListing() {
+    QVERIFY(m_driver->initializeMetadataCache());
+
+    QVERIFY(m_driver->m_metadataCache->replaceRemoteChildren(QStringLiteral("root"), {}).isEmpty());
+    QVERIFY(m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("/")));
+    QCOMPARE(m_driver->m_metadataCache->getChildren(QStringLiteral("/")).size(), 0);
+
+    const FuseMetadata createdFolder =
+        makeMetadata(QStringLiteral("created-folder"), QStringLiteral("fresh-folder"),
+                     QStringLiteral("root"), true);
+
+    QVERIFY(m_driver->saveMetadataEntry(createdFolder));
+
+    QVERIFY(m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("/")));
+    const QList<FuseFileMetadata> children =
+        m_driver->m_metadataCache->getChildren(QStringLiteral("/"));
+    QCOMPARE(children.size(), 1);
+    QCOMPARE(children.first().fileId, createdFolder.fileId);
+    QCOMPARE(children.first().path, createdFolder.path);
+    QCOMPARE(m_db->getFuseMetadataByPath(createdFolder.path).fileId, createdFolder.fileId);
+}
+
+void TestFuseDriverLifecycle::testRemoveMetadataEntryFromCache_PrunesWarmRootListing() {
+    QVERIFY(m_driver->initializeMetadataCache());
+
+    const FuseMetadata existingFile = makeMetadata(
+        QStringLiteral("cached-file"), QStringLiteral("report.txt"), QStringLiteral("root"), false);
+    QVERIFY(m_driver->saveMetadataEntry(existingFile));
+    m_driver->m_metadataCache->replaceRemoteChildren(QStringLiteral("root"),
+                                                     {makeDriveFile(existingFile)});
+    QVERIFY(m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("/")));
+    QCOMPARE(m_driver->m_metadataCache->getChildren(QStringLiteral("/")).size(), 1);
+
+    QVERIFY(m_db->deleteFuseMetadata(existingFile.fileId));
+    m_driver->removeMetadataEntryFromCache(existingFile);
+
+    QVERIFY(m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("/")));
+    QCOMPARE(m_driver->m_metadataCache->getChildren(QStringLiteral("/")).size(), 0);
+    QVERIFY(!m_driver->m_metadataCache->getMetadataByPath(existingFile.path).isValid());
+}
+
+void TestFuseDriverLifecycle::testReconcileMovedMetadata_DropsStaleFolderSubtree() {
+    QVERIFY(m_driver->initializeMetadataCache());
+
+    const FuseMetadata oldFolder = makeMetadata(QStringLiteral("folder-1"), QStringLiteral("alpha"),
+                                                QStringLiteral("root"), true);
+    const FuseMetadata childFile = makeMetadata(
+        QStringLiteral("child-1"), QStringLiteral("alpha/note.txt"), oldFolder.fileId, false);
+
+    QVERIFY(m_driver->saveMetadataEntry(oldFolder));
+    m_driver->m_metadataCache->replaceRemoteChildren(QStringLiteral("root"),
+                                                     {makeDriveFile(oldFolder)});
+    m_driver->m_metadataCache->replaceRemoteChildren(oldFolder.fileId, {makeDriveFile(childFile)});
+
+    QVERIFY(m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("/")));
+    QVERIFY(m_driver->m_metadataCache->hasChildrenCached(oldFolder.path));
+    QVERIFY(m_driver->m_metadataCache->getMetadataByPath(childFile.path).isValid());
+
+    FuseMetadata renamedFolder = oldFolder;
+    renamedFolder.path = QStringLiteral("beta");
+    renamedFolder.name = QStringLiteral("beta");
+    renamedFolder.remoteName = QStringLiteral("beta");
+    renamedFolder.cachedAt = QDateTime::currentDateTimeUtc();
+    renamedFolder.lastAccessed = QDateTime::currentDateTimeUtc();
+
+    QVERIFY(m_driver->reconcileMovedMetadata(oldFolder, renamedFolder));
+
+    QCOMPARE(m_db->getFuseMetadataByPath(QStringLiteral("beta")).fileId, oldFolder.fileId);
+    QCOMPARE(m_db->getFuseMetadataByPath(QStringLiteral("beta/note.txt")).fileId, childFile.fileId);
+
+    QVERIFY(!m_driver->m_metadataCache->getMetadataByPath(QStringLiteral("alpha")).isValid());
+    QVERIFY(
+        !m_driver->m_metadataCache->getMetadataByPath(QStringLiteral("alpha/note.txt")).isValid());
+    QVERIFY(
+        !m_driver->m_metadataCache->getMetadataByPath(QStringLiteral("beta/note.txt")).isValid());
+
+    const QList<FuseFileMetadata> rootChildren =
+        m_driver->m_metadataCache->getChildren(QStringLiteral("/"));
+    QCOMPARE(rootChildren.size(), 1);
+    QCOMPARE(rootChildren.first().path, QStringLiteral("beta"));
+    QVERIFY(!m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("beta")));
 }
 
 void TestFuseDriverLifecycle::testTruncateWithoutHandle_StagesDirtyFile() {
