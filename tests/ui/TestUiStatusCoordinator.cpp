@@ -19,6 +19,8 @@ class TestUiStatusCoordinator : public QObject {
     void cleanup();
 
     void testFuseStatusSurvivesMirrorRefresh();
+    void testDuplicateUploadStartsDoNotLeakStatus();
+    void testAuthoritativeUploadIdleClearsLeakedEdgeState();
     void testMetadataRefreshLifecycleReturnsToMounted();
     void testMetadataRefreshFailureReturnsToMounted();
     void testMetadataRefreshClearsOnLogoutAndAuthExpired();
@@ -78,6 +80,32 @@ void TestUiStatusCoordinator::testFuseStatusSurvivesMirrorRefresh() {
     status = m_coordinator->snapshot();
     QCOMPARE(status.fuseStatusText, QStringLiteral("Uploading..."));
     QVERIFY(status.combinedStatusText.contains(QStringLiteral("Uploading...")));
+}
+
+void TestUiStatusCoordinator::testDuplicateUploadStartsDoNotLeakStatus() {
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+
+    m_coordinator->onUploadStarted(QStringLiteral("file-1"), QStringLiteral("/report.txt"));
+    m_coordinator->onUploadStarted(QStringLiteral("file-1"), QStringLiteral("/report.txt"));
+
+    QCOMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Uploading..."));
+
+    m_coordinator->onUploadFinished(QStringLiteral("file-1"), QStringLiteral("/report.txt"));
+
+    QTRY_COMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Mounted"));
+}
+
+void TestUiStatusCoordinator::testAuthoritativeUploadIdleClearsLeakedEdgeState() {
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+
+    m_coordinator->onUploadStarted(QStringLiteral("file-1"), QStringLiteral("/report.txt"));
+    QCOMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Uploading..."));
+
+    m_coordinator->onUploadActivityChanged(false);
+
+    QTRY_COMPARE(m_coordinator->snapshot().fuseStatusText, QStringLiteral("Mounted"));
 }
 
 void TestUiStatusCoordinator::testMetadataRefreshLifecycleReturnsToMounted() {

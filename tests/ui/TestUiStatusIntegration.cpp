@@ -28,6 +28,7 @@ class TestUiStatusIntegration : public QObject {
     void cleanup();
 
     void testFuseUploadingStatusPropagatesToTrayAndWindow();
+    void testAuthoritativeUploadIdleClearsTrayAndWindow();
     void testMirrorStatusPropagatesWhenFuseDisabled();
     void testOfflineStatusPropagatesToTrayAndWindow();
     void testMirrorDisabledOfflineRecoveryReturnsToFuseStatus();
@@ -126,6 +127,33 @@ void TestUiStatusIntegration::testFuseUploadingStatusPropagatesToTrayAndWindow()
 
     QTRY_COMPARE(windowSummary(), expected);
     QTRY_COMPARE(traySummary(), expected);
+}
+
+void TestUiStatusIntegration::testAuthoritativeUploadIdleClearsTrayAndWindow() {
+    m_changeProcessor->start();
+    m_coordinator->updateMirrorProcessorState(m_changeProcessor->state());
+    m_coordinator->updateAuthState(true);
+    m_coordinator->updateFuseStatus(QStringLiteral("Mounted"));
+    m_coordinator->refreshMirrorStatus();
+
+    const QString mountedSummary = QStringLiteral("Mirror: Up to date | FUSE: Mounted");
+    QTRY_COMPARE(windowSummary(), mountedSummary);
+    QTRY_COMPARE(traySummary(), mountedSummary);
+
+    m_coordinator->onUploadActivityChanged(true);
+
+    const QString activeSummary = QStringLiteral("Mirror: Up to date | FUSE: Uploading...");
+    QTRY_COMPARE(windowSummary(), activeSummary);
+    QTRY_COMPARE(traySummary(), activeSummary);
+    QTRY_COMPARE(trayTooltip(), QStringLiteral("Via\n%1").arg(activeSummary));
+
+    m_coordinator->onUploadActivityChanged(false);
+
+    QTRY_COMPARE(windowSummary(), mountedSummary);
+    QTRY_COMPARE(traySummary(), mountedSummary);
+    QTRY_COMPARE(trayTooltip(), QStringLiteral("Via\n%1").arg(mountedSummary));
+    QTRY_COMPARE(trayIconImage(),
+                 ThemeHelper::trayIcon(QStringLiteral("drive-idle.svg")).pixmap(16, 16).toImage());
 }
 
 void TestUiStatusIntegration::testMirrorStatusPropagatesWhenFuseDisabled() {

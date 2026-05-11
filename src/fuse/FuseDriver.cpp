@@ -2795,6 +2795,10 @@ void FuseDriver::startBackgroundWorkers() {
                     emit uploadFinished(fileId, path);
                     emit fuseUploadFailed(path, error);
                 });
+        connect(m_dirtySyncWorker, &DirtySyncWorker::stateChanged, this,
+                [this](DirtySyncWorkerState state) {
+                    emit uploadActivityChanged(state == DirtySyncWorkerState::Uploading);
+                });
 
         m_dirtySyncThread->start();
         if (m_backgroundSyncPaused || !isDriveApiAllowed()) {

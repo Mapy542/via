@@ -1089,10 +1089,8 @@ int main(int argc, char* argv[]) {
                          &UiStatusCoordinator::onDownloadStarted);
         QObject::connect(&fuseDriver, &FuseDriver::downloadFinished, &statusCoordinator,
                          &UiStatusCoordinator::onDownloadFinished);
-        QObject::connect(&fuseDriver, &FuseDriver::uploadStarted, &statusCoordinator,
-                         &UiStatusCoordinator::onUploadStarted);
-        QObject::connect(&fuseDriver, &FuseDriver::uploadFinished, &statusCoordinator,
-                         &UiStatusCoordinator::onUploadFinished);
+        QObject::connect(&fuseDriver, &FuseDriver::uploadActivityChanged, &statusCoordinator,
+                         &UiStatusCoordinator::onUploadActivityChanged);
 
         // Wire FUSE activity signals to Recent Activity list
         QObject::connect(&fuseDriver, &FuseDriver::fuseFileCreated, &mainWindow,

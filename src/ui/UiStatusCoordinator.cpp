@@ -16,6 +16,16 @@
 
 namespace {
 
+QString uploadActivityKey(const QString& fileId, const QString& path) {
+    if (!fileId.isEmpty()) {
+        return fileId;
+    }
+    if (!path.isEmpty()) {
+        return path;
+    }
+    return QString();
+}
+
 bool snapshotsEqual(const UiStatusSnapshot& lhs, const UiStatusSnapshot& rhs) {
     return lhs.resolvedPriority == rhs.resolvedPriority &&
            lhs.resolvedStatusText == rhs.resolvedStatusText &&
@@ -43,6 +53,12 @@ bool isMeaningfulStatus(const QString& status) {
     return !status.isEmpty() && status.compare(QStringLiteral("Idle"), Qt::CaseInsensitive) != 0;
 }
 
+bool isIdleLikeFuseStatus(const QString& status) {
+    return status.isEmpty() ||
+           status.compare(QStringLiteral("Mounted"), Qt::CaseInsensitive) == 0 ||
+           status.compare(QStringLiteral("Idle"), Qt::CaseInsensitive) == 0;
+}
+
 }  // namespace
 
 UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager, bool mirrorEnabled,
@@ -56,7 +72,10 @@ UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager, bool mi
       m_statusTimer(nullptr),
       m_fuseIdleTimer(nullptr),
       m_pendingActions(0),
-      m_fuseActiveOps(0),
+      m_downloadActiveOps(0),
+      m_uploadActivityAuthoritativeSeen(false),
+      m_uploadActivityActive(false),
+      m_metadataRefreshActive(false),
       m_authenticated(false),
       m_authExpired(false),
       m_hasConflicts(false),
@@ -86,7 +105,7 @@ UiStatusCoordinator::UiStatusCoordinator(GoogleAuthManager* authManager, bool mi
     m_fuseIdleTimer->setSingleShot(true);
     m_fuseIdleTimer->setInterval(1500);
     connect(m_fuseIdleTimer, &QTimer::timeout, this, [this]() {
-        if (m_fuseActiveOps <= 0) {
+        if (!hasFuseActivity()) {
             updateFuseStatus(QStringLiteral("Mounted"));
         }
     });
@@ -113,9 +132,10 @@ void UiStatusCoordinator::setFuseEnabled(bool enabled) {
     m_fuseEnabled = enabled;
     if (!m_fuseEnabled) {
         clearFuseActivityState();
-        setFuseStatusInternal(QString());
+        m_fuseBaseStatusText.clear();
     }
 
+    refreshFuseStatusFromState();
     refreshMirrorStatusInternal();
     emitIfChanged(before);
 }
@@ -200,7 +220,8 @@ void UiStatusCoordinator::updateFuseStatus(const QString& status) {
         clearFuseActivityState();
     }
 
-    setFuseStatusInternal(status);
+    m_fuseBaseStatusText = status;
+    refreshFuseStatusFromState();
     emitIfChanged(before);
 }
 
@@ -221,7 +242,8 @@ void UiStatusCoordinator::updateAuthState(bool authenticated) {
             setMirrorStatusInternal(QStringLiteral("Not connected"));
         }
         clearFuseActivityState();
-        setFuseStatusInternal(QStringLiteral("Idle"));
+        m_fuseBaseStatusText = QStringLiteral("Idle");
+        refreshFuseStatusFromState();
     }
 
     recalcGlobalPriority();
@@ -241,7 +263,8 @@ void UiStatusCoordinator::setAuthExpired(const QString& reason) {
     m_mirrorOverrideStatus = QStringLiteral("Authentication expired");
     setMirrorStatusInternal(m_mirrorOverrideStatus);
     clearFuseActivityState();
-    setFuseStatusInternal(QStringLiteral("Idle"));
+    m_fuseBaseStatusText = QStringLiteral("Idle");
+    refreshFuseStatusFromState();
     recalcGlobalPriority();
 
     emitIfChanged(before);
@@ -271,9 +294,8 @@ void UiStatusCoordinator::onDownloadStarted(const QString& fileId) {
     Q_UNUSED(fileId)
 
     const UiStatusSnapshot before = snapshot();
-    ++m_fuseActiveOps;
-    m_fuseIdleTimer->stop();
-    setFuseStatusInternal(QStringLiteral("Downloading..."));
+    ++m_downloadActiveOps;
+    updateFuseStatusForActivityChange();
     emitIfChanged(before);
 }
 
@@ -281,67 +303,71 @@ void UiStatusCoordinator::onDownloadFinished(const QString& fileId) {
     Q_UNUSED(fileId)
 
     const UiStatusSnapshot before = snapshot();
-    m_fuseActiveOps = std::max(0, m_fuseActiveOps - 1);
-    if (m_fuseActiveOps == 0) {
-        m_fuseIdleTimer->start();
-    }
+    m_downloadActiveOps = std::max(0, m_downloadActiveOps - 1);
+    updateFuseStatusForActivityChange();
     emitIfChanged(before);
 }
 
 void UiStatusCoordinator::onUploadStarted(const QString& fileId, const QString& path) {
-    Q_UNUSED(fileId)
-    Q_UNUSED(path)
-
     const UiStatusSnapshot before = snapshot();
-    ++m_fuseActiveOps;
-    m_fuseIdleTimer->stop();
-    setFuseStatusInternal(QStringLiteral("Uploading..."));
+
+    const QString key = uploadActivityKey(fileId, path);
+    if (key.isEmpty()) {
+        m_activeUploadKeys.clear();
+    } else {
+        m_activeUploadKeys.insert(key);
+    }
+
+    updateFuseStatusForActivityChange();
     emitIfChanged(before);
 }
 
 void UiStatusCoordinator::onUploadFinished(const QString& fileId, const QString& path) {
-    Q_UNUSED(fileId)
-    Q_UNUSED(path)
-
     const UiStatusSnapshot before = snapshot();
-    m_fuseActiveOps = std::max(0, m_fuseActiveOps - 1);
-    if (m_fuseActiveOps == 0) {
-        m_fuseIdleTimer->start();
+
+    const QString key = uploadActivityKey(fileId, path);
+    if (key.isEmpty()) {
+        m_activeUploadKeys.clear();
+    } else {
+        m_activeUploadKeys.remove(key);
     }
+
+    updateFuseStatusForActivityChange();
+    emitIfChanged(before);
+}
+
+void UiStatusCoordinator::onUploadActivityChanged(bool active) {
+    const UiStatusSnapshot before = snapshot();
+
+    m_uploadActivityAuthoritativeSeen = true;
+    m_uploadActivityActive = active;
+    if (!active) {
+        m_activeUploadKeys.clear();
+    }
+
+    updateFuseStatusForActivityChange();
     emitIfChanged(before);
 }
 
 void UiStatusCoordinator::onDirtyFilesFlushed(int count) {
-    if (count > 0) {
-        updateFuseStatus(QStringLiteral("Uploading %1 files").arg(count));
-    } else {
-        updateFuseStatus(QStringLiteral("Mounted"));
-    }
+    Q_UNUSED(count)
+
+    updateFuseStatus(QStringLiteral("Mounted"));
 }
 
 void UiStatusCoordinator::onMetadataRefreshStarted() {
     const UiStatusSnapshot before = snapshot();
 
-    if (!m_metadataRefreshActive) {
-        m_metadataRefreshActive = true;
-        ++m_fuseActiveOps;
-    }
-
-    m_fuseIdleTimer->stop();
-    setFuseStatusInternal(QStringLiteral("Refreshing metadata"));
+    m_metadataRefreshActive = true;
+    updateFuseStatusForActivityChange();
     emitIfChanged(before);
 }
 
 void UiStatusCoordinator::onMetadataRefreshFinished() {
     const UiStatusSnapshot before = snapshot();
 
-    if (m_metadataRefreshActive) {
-        m_metadataRefreshActive = false;
-        m_fuseActiveOps = std::max(0, m_fuseActiveOps - 1);
-        if (m_fuseActiveOps == 0) {
-            m_fuseIdleTimer->start();
-        }
-    }
+    m_metadataRefreshActive = false;
+    updateFuseStatusForActivityChange();
 
     emitIfChanged(before);
 }
@@ -455,15 +481,72 @@ void UiStatusCoordinator::setMirrorStatusInternal(const QString& status) {
     m_mirrorPriority = priorityFromStatusText(status);
 }
 
+void UiStatusCoordinator::refreshFuseStatusFromState() {
+    QString status = m_fuseBaseStatusText;
+
+    if (!m_fuseEnabled) {
+        status.clear();
+    } else if (m_metadataRefreshActive) {
+        status = QStringLiteral("Refreshing metadata");
+    } else if (effectiveUploadActive()) {
+        status = QStringLiteral("Uploading...");
+    } else if (m_downloadActiveOps > 0) {
+        status = QStringLiteral("Downloading...");
+    }
+
+    setFuseStatusInternal(status);
+}
+
+void UiStatusCoordinator::updateFuseStatusForActivityChange() {
+    if (!m_fuseEnabled) {
+        m_fuseIdleTimer->stop();
+        refreshFuseStatusFromState();
+        return;
+    }
+
+    if (hasFuseActivity()) {
+        m_fuseIdleTimer->stop();
+        refreshFuseStatusFromState();
+        return;
+    }
+
+    if (shouldDelayFuseIdleTransition()) {
+        m_fuseIdleTimer->start();
+        return;
+    }
+
+    m_fuseIdleTimer->stop();
+    refreshFuseStatusFromState();
+}
+
 void UiStatusCoordinator::setFuseStatusInternal(const QString& status) {
     m_fuseStatusText = status;
     m_fusePriority = priorityFromStatusText(status);
 }
 
 void UiStatusCoordinator::clearFuseActivityState() {
-    m_fuseActiveOps = 0;
+    m_downloadActiveOps = 0;
+    m_uploadActivityAuthoritativeSeen = false;
+    m_uploadActivityActive = false;
+    m_activeUploadKeys.clear();
     m_metadataRefreshActive = false;
     m_fuseIdleTimer->stop();
+}
+
+bool UiStatusCoordinator::effectiveUploadActive() const {
+    if (m_uploadActivityAuthoritativeSeen) {
+        return m_uploadActivityActive;
+    }
+
+    return !m_activeUploadKeys.isEmpty();
+}
+
+bool UiStatusCoordinator::hasFuseActivity() const {
+    return m_metadataRefreshActive || effectiveUploadActive() || m_downloadActiveOps > 0;
+}
+
+bool UiStatusCoordinator::shouldDelayFuseIdleTransition() const {
+    return isIdleLikeFuseStatus(m_fuseBaseStatusText);
 }
 
 UiStatusPriority UiStatusCoordinator::effectivePriority() const {

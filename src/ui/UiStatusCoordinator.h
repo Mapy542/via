@@ -7,6 +7,7 @@
 #define UISTATUSCOORDINATOR_H
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 
 #include "sync/ChangeProcessor.h"
@@ -67,6 +68,7 @@ class UiStatusCoordinator : public QObject {
     void onDownloadFinished(const QString& fileId);
     void onUploadStarted(const QString& fileId, const QString& path);
     void onUploadFinished(const QString& fileId, const QString& path);
+    void onUploadActivityChanged(bool active);
     void onDirtyFilesFlushed(int count);
     void onMetadataRefreshStarted();
     void onMetadataRefreshFinished();
@@ -81,7 +83,12 @@ class UiStatusCoordinator : public QObject {
     void refreshMirrorStatusInternal();
     void setMirrorStatusInternal(const QString& status);
     void setFuseStatusInternal(const QString& status);
+    void refreshFuseStatusFromState();
+    void updateFuseStatusForActivityChange();
     void clearFuseActivityState();
+    bool effectiveUploadActive() const;
+    bool hasFuseActivity() const;
+    bool shouldDelayFuseIdleTransition() const;
     UiStatusPriority effectivePriority() const;
     QString combinedStatusText() const;
     QString effectiveStatusText() const;
@@ -96,7 +103,10 @@ class UiStatusCoordinator : public QObject {
     QTimer* m_fuseIdleTimer;
 
     int m_pendingActions = 0;
-    int m_fuseActiveOps = 0;
+    int m_downloadActiveOps = 0;
+    bool m_uploadActivityAuthoritativeSeen = false;
+    bool m_uploadActivityActive = false;
+    QSet<QString> m_activeUploadKeys;
     bool m_metadataRefreshActive = false;
 
     bool m_authenticated = false;
@@ -108,6 +118,7 @@ class UiStatusCoordinator : public QObject {
     QString m_authExpiredReason;
     QString m_mirrorStatusText;
     QString m_mirrorOverrideStatus;
+    QString m_fuseBaseStatusText;
     QString m_fuseStatusText;
 
     UiStatusPriority m_mirrorPriority = UiStatusPriority::Idle;

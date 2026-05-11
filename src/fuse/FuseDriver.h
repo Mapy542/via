@@ -481,6 +481,12 @@ class FuseDriver : public QObject {
      */
     void uploadFinished(const QString& fileId, const QString& path);
 
+    /**
+     * @brief Emitted when background upload activity becomes active or idle
+     * @param active true while DirtySyncWorker is actively uploading
+     */
+    void uploadActivityChanged(bool active);
+
     // ====================================================================
     // User-visible FUSE activity signals (for Recent Activity logging)
     // ====================================================================
