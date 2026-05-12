@@ -36,6 +36,7 @@
 #include "api/GoogleDriveClient.h"
 #include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
+#include "sync/TrashPolicy.h"
 #include "utils/NativeDocShortcutHandler.h"
 #include "utils/NativeDocSupport.h"
 
@@ -54,6 +55,96 @@ static inline FuseDriver* self() {
 }
 
 constexpr int FUSE_API_TIMEOUT_MS = 30000;
+
+QString logicalPathFromFusePath(const QString& fusePath) {
+    QString normalized = QDir::cleanPath(fusePath);
+    if (normalized == QStringLiteral(".")) {
+        normalized.clear();
+    }
+    if (normalized == QStringLiteral("/")) {
+        return QString();
+    }
+    if (normalized.startsWith(QLatin1Char('/'))) {
+        normalized.remove(0, 1);
+    }
+    return normalized;
+}
+
+QString joinFusePath(const QString& parentPath, const QString& childName) {
+    if (parentPath.isEmpty() || parentPath == QStringLiteral("/")) {
+        return QStringLiteral("/") + childName;
+    }
+    return QDir(parentPath).filePath(childName);
+}
+
+bool relativePathWithinSubtree(const QString& candidatePath, const QString& rootPath) {
+    const QString normalizedCandidate = QDir::cleanPath(candidatePath);
+    const QString normalizedRoot = QDir::cleanPath(rootPath);
+    if (normalizedCandidate.isEmpty() || normalizedRoot.isEmpty()) {
+        return false;
+    }
+    if (normalizedCandidate == normalizedRoot) {
+        return true;
+    }
+    return normalizedCandidate.startsWith(normalizedRoot + QLatin1Char('/'));
+}
+
+bool fillStatFromPath(const QString& absolutePath, struct stat* stbuf) {
+    const QByteArray encodedPath = QFile::encodeName(absolutePath);
+    return ::lstat(encodedPath.constData(), stbuf) == 0;
+}
+
+QString nativeDocModeOverrideForFile(const SyncDatabase* database, const QString& fileId) {
+    if (!database || fileId.isEmpty()) {
+        return QString();
+    }
+
+    return database->getNativeDocState(fileId).nativeDocModeOverride;
+}
+
+bool copyFileToPath(const QString& sourcePath, const QString& targetPath, QString* errorOut) {
+    if (sourcePath.isEmpty() || !QFileInfo::exists(sourcePath)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Local content missing for trash snapshot");
+        }
+        return false;
+    }
+
+    QDir().mkpath(QFileInfo(targetPath).dir().absolutePath());
+    QFile::remove(targetPath);
+    if (!QFile::copy(sourcePath, targetPath)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to copy local content into trash overlay");
+        }
+        return false;
+    }
+
+    QFile(targetPath).setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return true;
+}
+
+bool writeBytesToPath(const QByteArray& bytes, const QString& targetPath, QString* errorOut) {
+    QDir().mkpath(QFileInfo(targetPath).dir().absolutePath());
+
+    QFile file(targetPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create trash overlay file");
+        }
+        return false;
+    }
+
+    if (file.write(bytes) != bytes.size()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to write trash overlay file");
+        }
+        return false;
+    }
+
+    file.close();
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return true;
+}
 
 bool invokeDriveCall(GoogleDriveClient* driveClient, const std::function<void()>& call) {
     if (!driveClient) {
@@ -1438,6 +1529,10 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
 
     QString qpath = normalizePath(path);
 
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->getattrTrashOverlay(qpath, stbuf);
+    }
+
     // Root directory
     if (qpath.isEmpty() || qpath == "/") {
         stbuf->st_mode = S_IFDIR | 0755;
@@ -1601,6 +1696,10 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     filler(buf, ".", nullptr, 0, FUSE_FILL_DIR_PLUS);
     filler(buf, "..", nullptr, 0, FUSE_FILL_DIR_PLUS);
 
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->readdirTrashOverlay(qpath, buf, filler);
+    }
+
     if (!drv || !drv->m_database || !drv->m_driveClient || !drv->m_metadataCache) {
         return 0;
     }
@@ -1620,11 +1719,34 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         QList<FuseFileMetadata> cached = drv->m_metadataCache->getChildren(cacheLookupPath);
         qDebug() << "FuseDriver::readdir: Serving" << cached.size() << "entries from cache for"
                  << qpath;
+        QSet<QString> emittedNames;
         for (const FuseFileMetadata& child : cached) {
+            if (drv->isTrashFusePath(child.path)) {
+                continue;
+            }
             filler(buf, child.name.toUtf8().constData(), nullptr, 0,
                    readdirFlagsForChild(child, mode));
+            emittedNames.insert(child.name);
             queueNativeDocPrefetch(drv->m_fileCache, child, mode);
         }
+
+        if (qpath == QStringLiteral("/")) {
+            QDir overlayDir(drv->trashOverlayRoot());
+            if (overlayDir.exists()) {
+                const QFileInfoList overlayEntries = overlayDir.entryInfoList(
+                    QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                    QDir::Name);
+                for (const QFileInfo& overlayEntry : overlayEntries) {
+                    if (emittedNames.contains(overlayEntry.fileName())) {
+                        continue;
+                    }
+                    filler(buf, overlayEntry.fileName().toUtf8().constData(), nullptr, 0,
+                           overlayEntry.isDir() ? FUSE_FILL_DIR_PLUS
+                                                : static_cast<enum fuse_fill_dir_flags>(0));
+                }
+            }
+        }
+
         return 0;
     }
 
@@ -1674,12 +1796,42 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
     const QString effectiveParentId = ((qpath.isEmpty() || qpath == "/") && !apiFiles.isEmpty())
                                           ? apiFiles.first().parentId()
                                           : parentId;
-    QList<FuseFileMetadata> children =
-        drv->m_metadataCache->replaceRemoteChildren(effectiveParentId, apiFiles);
+    QList<DriveFile> filteredApiFiles;
+    filteredApiFiles.reserve(apiFiles.size());
+    for (const DriveFile& file : apiFiles) {
+        if (qpath == QStringLiteral("/") && TrashPolicy::isTrashRelativePath(file.name)) {
+            continue;
+        }
+        filteredApiFiles.append(file);
+    }
 
+    QList<FuseFileMetadata> children =
+        drv->m_metadataCache->replaceRemoteChildren(effectiveParentId, filteredApiFiles);
+
+    QSet<QString> emittedNames;
     for (const FuseFileMetadata& child : children) {
+        if (drv->isTrashFusePath(child.path)) {
+            continue;
+        }
         filler(buf, child.name.toUtf8().constData(), nullptr, 0, readdirFlagsForChild(child, mode));
+        emittedNames.insert(child.name);
         queueNativeDocPrefetch(drv->m_fileCache, child, mode);
+    }
+
+    if (qpath == QStringLiteral("/")) {
+        QDir overlayDir(drv->trashOverlayRoot());
+        if (overlayDir.exists()) {
+            const QFileInfoList overlayEntries = overlayDir.entryInfoList(
+                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+            for (const QFileInfo& overlayEntry : overlayEntries) {
+                if (emittedNames.contains(overlayEntry.fileName())) {
+                    continue;
+                }
+                filler(buf, overlayEntry.fileName().toUtf8().constData(), nullptr, 0,
+                       overlayEntry.isDir() ? FUSE_FILL_DIR_PLUS
+                                            : static_cast<enum fuse_fill_dir_flags>(0));
+            }
+        }
     }
 
     return 0;
@@ -1689,6 +1841,10 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
     auto* drv = self();
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
+
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->openTrashOverlay(qpath, fi);
+    }
 
     if (!drv || !drv->m_database || !drv->m_fileCache) {
         return -EIO;
@@ -1848,7 +2004,7 @@ int FuseDriver::fuseRead(const char* path, char* buf, size_t size, off_t offset,
     }
 
     // Update access time
-    if (drv->m_fileCache) {
+    if (drv->m_fileCache && (!openFile.cacheKey.isEmpty() || !openFile.fileId.isEmpty())) {
         drv->m_fileCache->updateAccessTime(openFile.cacheKey.isEmpty() ? openFile.fileId
                                                                        : openFile.cacheKey);
     }
@@ -1898,7 +2054,7 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
     // Mark file as dirty (for DirtySyncWorker to upload).  We bump the
     // FileCache generation on every successful write so an older upload can
     // never clear newer bytes written through the same handle.
-    if (drv->m_fileCache) {
+    if (drv->m_fileCache && !openFile.fileId.isEmpty()) {
         drv->m_fileCache->markDirty(openFile.fileId, lookupPath);
     }
 
@@ -1963,6 +2119,10 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     QString qpath = normalizePath(path);
     QString parentPath = getParentPath(qpath);
     QString folderName = getFileName(qpath);
+
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->mkdirTrashOverlay(qpath);
+    }
 
     if (!drv || !drv->m_driveClient || !drv->m_database) {
         return -EIO;
@@ -2037,6 +2197,10 @@ int FuseDriver::fuseRmdir(const char* path) {
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->rmdirTrashOverlay(qpath);
+    }
+
     if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
     }
@@ -2093,6 +2257,10 @@ int FuseDriver::fuseUnlink(const char* path) {
     auto* drv = self();
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
+
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->unlinkTrashOverlay(qpath);
+    }
 
     if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
@@ -2163,14 +2331,62 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
     QString toPath = normalizePath(to);
     QString fromLookup = fromPath.startsWith("/") ? fromPath.mid(1) : fromPath;
     QString toLookup = toPath.startsWith("/") ? toPath.mid(1) : toPath;
+    const bool fromIsTrash = drv && drv->isTrashFusePath(fromPath);
+    const bool toIsTrash = drv && drv->isTrashFusePath(toPath);
+
+    if (drv && fromIsTrash && toIsTrash) {
+        return drv->renameWithinTrashOverlay(fromPath, toPath);
+    }
 
     if (!drv || !drv->m_database || !drv->m_driveClient) {
         return -EIO;
     }
 
+    if (fromIsTrash && !toIsTrash) {
+        if (!drv->isDriveApiAllowed()) {
+            drv->emitDriveOperationBlocked(QStringLiteral("restore items from local trash"),
+                                           toPath);
+            return drv->pausedMutationErrorCode();
+        }
+
+        if (!drv->m_database->getFuseMetadataByPath(toLookup).fileId.isEmpty()) {
+            return -EEXIST;
+        }
+
+        QString error;
+        if (!drv->restoreTrashEntryToLive(fromPath, toPath, &error)) {
+            qWarning() << "FuseDriver: restore-from-trash failed" << fromPath << "->" << toPath
+                       << ":" << error;
+            return error.contains(QStringLiteral("parent"), Qt::CaseInsensitive) ? -ENOENT : -EIO;
+        }
+
+        QMetaObject::invokeMethod(
+            drv, [drv, fromPath, toPath]() { emit drv->fuseItemMoved(fromPath, toPath); },
+            Qt::QueuedConnection);
+        return 0;
+    }
+
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(fromLookup);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
+    }
+
+    if (toIsTrash) {
+        if (!drv->isDriveApiAllowed()) {
+            drv->emitDriveOperationBlocked(QStringLiteral("trash items"), fromPath);
+            return drv->pausedMutationErrorCode();
+        }
+
+        QString error;
+        if (!drv->moveLiveEntryToTrash(meta, fromPath, toPath, &error)) {
+            qWarning() << "FuseDriver: move-to-trash failed" << fromPath << "->" << toPath << ":"
+                       << error;
+            return -EIO;
+        }
+
+        QMetaObject::invokeMethod(
+            drv, [drv, fromPath]() { emit drv->fuseItemTrashed(fromPath); }, Qt::QueuedConnection);
+        return 0;
     }
 
     QString oldName = getFileName(fromPath);
@@ -2324,6 +2540,23 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
     QString qpath = normalizePath(path);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
+    if (drv && drv->isTrashFusePath(qpath)) {
+        if (fi) {
+            auto openFileOpt = drv->getOpenFile(fi->fh);
+            if (openFileOpt && openFileOpt->fileId.isEmpty() && openFileOpt->path == qpath) {
+                return (openFileOpt->localFd >= 0 && ::ftruncate(openFileOpt->localFd, size) == 0)
+                           ? 0
+                           : -EIO;
+            }
+        }
+
+        QFile overlayFile(drv->trashOverlayPathForFusePath(qpath));
+        if (!overlayFile.exists()) {
+            return -ENOENT;
+        }
+        return overlayFile.resize(size) ? 0 : -EIO;
+    }
+
     if (!drv || !drv->m_database || !drv->m_fileCache) {
         return -EIO;
     }
@@ -2371,6 +2604,10 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     QString parentPath = getParentPath(qpath);
     QString fileName = getFileName(qpath);
     QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
+
+    if (drv && drv->isTrashFusePath(qpath)) {
+        return drv->createTrashOverlay(qpath, fi);
+    }
 
     if (!drv || !drv->m_driveClient || !drv->m_fileCache) {
         return -EIO;
@@ -2618,6 +2855,576 @@ bool FuseDriver::saveMetadataEntry(const FuseMetadata& metadata) {
     }
 
     return true;
+}
+
+QString FuseDriver::trashOverlayRoot() const {
+    return QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
+                           QStringLiteral("/Via/trash"));
+}
+
+bool FuseDriver::isTrashFusePath(const QString& path) const {
+    return TrashPolicy::isTrashRelativePath(logicalPathFromFusePath(path));
+}
+
+QString FuseDriver::trashOverlayPathForFusePath(const QString& path) const {
+    const QString logicalPath = logicalPathFromFusePath(path);
+    if (logicalPath.isEmpty()) {
+        return trashOverlayRoot();
+    }
+
+    return QDir(trashOverlayRoot()).filePath(logicalPath);
+}
+
+bool FuseDriver::ensureTrashOverlayParent(const QString& path) const {
+    const QFileInfo overlayInfo(trashOverlayPathForFusePath(path));
+    QDir parentDir = overlayInfo.dir();
+    return parentDir.exists() || parentDir.mkpath(QStringLiteral("."));
+}
+
+bool FuseDriver::ensureTrashOverlayDirectory(const QString& path) const {
+    QDir dir(trashOverlayPathForFusePath(path));
+    return dir.exists() || dir.mkpath(QStringLiteral("."));
+}
+
+int FuseDriver::getattrTrashOverlay(const QString& path, struct stat* stbuf) const {
+    const QString overlayPath = trashOverlayPathForFusePath(path);
+    const QFileInfo info(overlayPath);
+    if (!info.exists() && !info.isSymLink()) {
+        return -ENOENT;
+    }
+
+    if (!fillStatFromPath(overlayPath, stbuf)) {
+        return -EIO;
+    }
+
+    return 0;
+}
+
+int FuseDriver::readdirTrashOverlay(const QString& path, void* buf, fuse_fill_dir_t filler) const {
+    const QString overlayPath = trashOverlayPathForFusePath(path);
+    const QFileInfo info(overlayPath);
+    if (!info.exists()) {
+        return -ENOENT;
+    }
+    if (!info.isDir()) {
+        return -ENOTDIR;
+    }
+
+    QDir dir(overlayPath);
+    const QFileInfoList entries = dir.entryInfoList(
+        QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+    for (const QFileInfo& entry : entries) {
+        filler(buf, entry.fileName().toUtf8().constData(), nullptr, 0,
+               entry.isDir() ? FUSE_FILL_DIR_PLUS : static_cast<enum fuse_fill_dir_flags>(0));
+    }
+
+    return 0;
+}
+
+int FuseDriver::openTrashOverlay(const QString& path, struct fuse_file_info* fi) {
+    const QString overlayPath = trashOverlayPathForFusePath(path);
+    const QFileInfo info(overlayPath);
+    if (!info.exists()) {
+        return -ENOENT;
+    }
+    if (info.isDir()) {
+        return -EISDIR;
+    }
+
+    FuseOpenFile openFile;
+    openFile.path = path;
+    openFile.writable = (fi->flags & O_WRONLY) || (fi->flags & O_RDWR);
+    openFile.dirty = false;
+    openFile.synthetic = false;
+    openFile.localFd = openLocalHandle(overlayPath, openFile.writable);
+    if (openFile.localFd < 0) {
+        return -EIO;
+    }
+    openFile.size = sizeForOpenHandle(openFile.localFd);
+
+    fi->fh = registerOpenFile(openFile);
+    emit fileAccessed(path);
+    return 0;
+}
+
+int FuseDriver::createTrashOverlay(const QString& path, struct fuse_file_info* fi) {
+    if (!ensureTrashOverlayParent(path)) {
+        return -EIO;
+    }
+
+    const QString overlayPath = trashOverlayPathForFusePath(path);
+    const QByteArray encodedPath = QFile::encodeName(overlayPath);
+    const int openFlags = (fi ? fi->flags : O_RDWR) | O_CREAT | O_TRUNC;
+    const int localFd = ::open(encodedPath.constData(), openFlags, 0600);
+    if (localFd < 0) {
+        return -EIO;
+    }
+
+    FuseOpenFile openFile;
+    openFile.path = path;
+    openFile.writable = true;
+    openFile.dirty = false;
+    openFile.synthetic = false;
+    openFile.localFd = localFd;
+    openFile.size = 0;
+
+    if (fi) {
+        fi->fh = registerOpenFile(openFile);
+    }
+
+    return 0;
+}
+
+int FuseDriver::mkdirTrashOverlay(const QString& path) const {
+    const QFileInfo info(trashOverlayPathForFusePath(path));
+    if (info.exists()) {
+        return -EEXIST;
+    }
+
+    return ensureTrashOverlayDirectory(path) ? 0 : -EIO;
+}
+
+int FuseDriver::unlinkTrashOverlay(const QString& path) const {
+    const QString overlayPath = trashOverlayPathForFusePath(path);
+    const QFileInfo info(overlayPath);
+    if (!info.exists()) {
+        return -ENOENT;
+    }
+    if (info.isDir()) {
+        return -EISDIR;
+    }
+
+    return QFile::remove(overlayPath) ? 0 : -EIO;
+}
+
+int FuseDriver::rmdirTrashOverlay(const QString& path) const {
+    const QString overlayPath = trashOverlayPathForFusePath(path);
+    const QFileInfo info(overlayPath);
+    if (!info.exists()) {
+        return -ENOENT;
+    }
+    if (!info.isDir()) {
+        return -ENOTDIR;
+    }
+
+    const QDir dir(overlayPath);
+    if (!dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System)
+             .isEmpty()) {
+        return -ENOTEMPTY;
+    }
+
+    QDir parentDir = info.dir();
+    return parentDir.rmdir(info.fileName()) ? 0 : -EIO;
+}
+
+int FuseDriver::renameWithinTrashOverlay(const QString& fromPath, const QString& toPath) const {
+    const QString fromOverlayPath = trashOverlayPathForFusePath(fromPath);
+    const QFileInfo fromInfo(fromOverlayPath);
+    if (!fromInfo.exists()) {
+        return -ENOENT;
+    }
+    if (!ensureTrashOverlayParent(toPath)) {
+        return -EIO;
+    }
+
+    const QString toOverlayPath = trashOverlayPathForFusePath(toPath);
+    const QByteArray encodedFrom = QFile::encodeName(fromOverlayPath);
+    const QByteArray encodedTo = QFile::encodeName(toOverlayPath);
+    return ::rename(encodedFrom.constData(), encodedTo.constData()) == 0 ? 0 : -EIO;
+}
+
+QString FuseDriver::visibleNameForRemoteFile(const DriveFile& file) const {
+    if (file.isShortcut) {
+        return QString();
+    }
+
+    if (!file.isGoogleDoc() || file.isFolder) {
+        return file.name;
+    }
+
+    const QString nativeDocModeOverride = nativeDocModeOverrideForFile(m_database, file.id);
+    const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+        file.mimeType, nativeDocModeOverride,
+        nativeDocModeFromString(QSettings().value("advanced/nativeDocMode", "hide").toString()));
+    if (!representation.visible) {
+        return QString();
+    }
+
+    return nativeDocVisibleName(file.name, representation);
+}
+
+bool FuseDriver::snapshotFuseMetadataToTrash(const FuseMetadata& metadata, const QString& trashPath,
+                                             QString* errorOut) {
+    const auto snapshotVisibleFile =
+        [&](const QString& fileId, qint64 size, const QString& mimeType,
+            const QString& remoteMimeType, const QString& webViewLink,
+            const QString& nativeDocModeOverride, const QString& destinationPath) -> bool {
+        const QString effectiveRemoteMimeType =
+            remoteMimeType.isEmpty() ? mimeType : remoteMimeType;
+        const QString overlayPath = trashOverlayPathForFusePath(destinationPath);
+
+        if (isNativeDocMimeType(effectiveRemoteMimeType)) {
+            const NativeDocRepresentation representation = effectiveNativeDocRepresentation(
+                effectiveRemoteMimeType, nativeDocModeOverride,
+                nativeDocModeFromString(
+                    QSettings().value("advanced/nativeDocMode", "hide").toString()));
+            if (!representation.visible) {
+                if (errorOut) {
+                    *errorOut =
+                        QStringLiteral("Hidden native document cannot be moved to local trash");
+                }
+                return false;
+            }
+
+            if (representation.synthetic) {
+                return writeBytesToPath(
+                    nativeDocShortcutPayload(webViewLink, effectiveRemoteMimeType), overlayPath,
+                    errorOut);
+            }
+
+            if (!m_fileCache) {
+                if (errorOut) {
+                    *errorOut =
+                        QStringLiteral("File cache unavailable for native-doc trash snapshot");
+                }
+                return false;
+            }
+
+            const QString exportMimeType = representation.outputMimeType;
+            QString sourcePath = m_fileCache->hasLocalContent(fileId, exportMimeType)
+                                     ? m_fileCache->getContentPath(fileId, exportMimeType)
+                                     : m_fileCache->getExportedPath(fileId, exportMimeType);
+            if (sourcePath.isEmpty() || !QFileInfo::exists(sourcePath)) {
+                if (errorOut) {
+                    *errorOut = QStringLiteral("Failed to materialize native-doc trash snapshot");
+                }
+                return false;
+            }
+
+            return copyFileToPath(sourcePath, overlayPath, errorOut);
+        }
+
+        if (!m_fileCache) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("File cache unavailable for trash snapshot");
+            }
+            return false;
+        }
+
+        QString sourcePath = m_fileCache->hasLocalContent(fileId)
+                                 ? m_fileCache->getContentPath(fileId)
+                                 : m_fileCache->getCachedPath(fileId, size);
+        if (sourcePath.isEmpty() || !QFileInfo::exists(sourcePath)) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("Failed to materialize local trash snapshot");
+            }
+            return false;
+        }
+
+        return copyFileToPath(sourcePath, overlayPath, errorOut);
+    };
+
+    if (!ensureTrashOverlayParent(trashPath)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create trash overlay parent directory");
+        }
+        return false;
+    }
+
+    if (!metadata.isFolder) {
+        return snapshotVisibleFile(metadata.fileId, metadata.size, metadata.mimeType,
+                                   metadata.remoteMimeType, metadata.webViewLink,
+                                   metadata.nativeDocModeOverride, trashPath);
+    }
+
+    if (!ensureTrashOverlayDirectory(trashPath)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create trash overlay directory");
+        }
+        return false;
+    }
+
+    if (!m_driveClient) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Google Drive client unavailable for folder trash snapshot");
+        }
+        return false;
+    }
+
+    const std::function<bool(const DriveFile&, const QString&)> snapshotTree =
+        [&](const DriveFile& file, const QString& currentTrashPath) -> bool {
+        if (file.isShortcut) {
+            return true;
+        }
+
+        if (!file.isFolder) {
+            return snapshotVisibleFile(
+                file.id, file.size, file.mimeType, file.mimeType, file.webViewLink,
+                nativeDocModeOverrideForFile(m_database, file.id), currentTrashPath);
+        }
+
+        if (!ensureTrashOverlayDirectory(currentTrashPath)) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("Failed to create local trash folder snapshot");
+            }
+            return false;
+        }
+
+        QList<DriveFile> children;
+        QString listError;
+        if (!waitForListFiles(m_driveClient, file.id, &children, &listError)) {
+            if (errorOut) {
+                *errorOut = listError;
+            }
+            return false;
+        }
+
+        for (const DriveFile& child : children) {
+            if (child.trashed || child.isShortcut) {
+                continue;
+            }
+
+            const QString childName = visibleNameForRemoteFile(child);
+            if (childName.isEmpty()) {
+                continue;
+            }
+
+            const QString childTrashPath = joinFusePath(currentTrashPath, childName);
+            const FuseMetadata existingMetadata =
+                m_database ? m_database->getFuseMetadata(child.id) : FuseMetadata();
+            if (!existingMetadata.fileId.isEmpty()) {
+                if (!snapshotFuseMetadataToTrash(existingMetadata, childTrashPath, errorOut)) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (!snapshotTree(child, childTrashPath)) {
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    DriveFile rootFile;
+    rootFile.id = metadata.fileId;
+    rootFile.name = metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName;
+    rootFile.mimeType =
+        metadata.remoteMimeType.isEmpty() ? metadata.mimeType : metadata.remoteMimeType;
+    rootFile.size = metadata.size;
+    rootFile.createdTime = metadata.createdTime;
+    rootFile.modifiedTime = metadata.modifiedTime;
+    rootFile.parents = metadata.parentId.isEmpty() ? QStringList{} : QStringList{metadata.parentId};
+    rootFile.isFolder = true;
+    rootFile.webViewLink = metadata.webViewLink;
+
+    return snapshotTree(rootFile, trashPath);
+}
+
+bool FuseDriver::moveLiveEntryToTrash(const FuseMetadata& metadata, const QString& fromPath,
+                                      const QString& toPath, QString* errorOut) {
+    if (!snapshotFuseMetadataToTrash(metadata, toPath, errorOut)) {
+        return false;
+    }
+
+    QString error;
+    bool authFailure = false;
+    if (!waitForTrash(
+            m_driveClient, metadata.fileId,
+            [&]() {
+                return invokeDriveCall(m_driveClient,
+                                       [&]() { m_driveClient->trashFile(metadata.fileId); });
+            },
+            &error, &authFailure)) {
+        if (errorOut) {
+            *errorOut = error;
+        }
+        return false;
+    }
+
+    deleteFuseMetadataSubtree(metadata.path);
+    invalidateFusePaths({fromPath, toPath, getParentPath(fromPath), getParentPath(toPath)});
+    return true;
+}
+
+bool FuseDriver::restoreTrashEntryToLive(const QString& fromPath, const QString& toPath,
+                                         QString* errorOut) {
+    if (!m_driveClient || !m_database || !m_fileCache) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Fuse restore dependencies unavailable");
+        }
+        return false;
+    }
+
+    const QString sourceOverlayPath = trashOverlayPathForFusePath(fromPath);
+    const QFileInfo sourceInfo(sourceOverlayPath);
+    if (!sourceInfo.exists()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Trash overlay entry does not exist");
+        }
+        return false;
+    }
+
+    QString parentId = QStringLiteral("root");
+    const QString destinationParentPath = getParentPath(toPath);
+    if (!destinationParentPath.isEmpty() && destinationParentPath != QStringLiteral("/")) {
+        const QString parentLookup = logicalPathFromFusePath(destinationParentPath);
+        const FuseMetadata parentMeta = m_database->getFuseMetadataByPath(parentLookup);
+        if (parentMeta.fileId.isEmpty() || !parentMeta.isFolder) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("Restore destination parent is missing");
+            }
+            return false;
+        }
+        parentId = parentMeta.fileId;
+    }
+
+    const std::function<bool(const QFileInfo&, const QString&, const QString&)> restoreTree =
+        [&](const QFileInfo& entryInfo, const QString& destinationFusePath,
+            const QString& currentParentId) -> bool {
+        const QString requestLocalPath = logicalPathFromFusePath(destinationFusePath);
+        const QString entryName = getFileName(destinationFusePath);
+
+        if (entryInfo.isDir()) {
+            QString error;
+            DriveFile createdFolder;
+            bool authFailure = false;
+            if (!waitForFolderCreate(
+                    m_driveClient, requestLocalPath,
+                    [&]() {
+                        return invokeDriveCall(m_driveClient, [&]() {
+                            m_driveClient->createFolder(entryName, currentParentId,
+                                                        requestLocalPath);
+                        });
+                    },
+                    &createdFolder, &error, &authFailure)) {
+                Q_UNUSED(authFailure)
+                if (errorOut) {
+                    *errorOut = error;
+                }
+                return false;
+            }
+
+            FuseMetadata folderMeta;
+            folderMeta.fileId = createdFolder.id;
+            folderMeta.path = requestLocalPath;
+            folderMeta.name = entryName;
+            folderMeta.remoteName = createdFolder.name.isEmpty() ? entryName : createdFolder.name;
+            folderMeta.parentId = currentParentId;
+            folderMeta.isFolder = true;
+            folderMeta.size = 0;
+            folderMeta.mimeType = createdFolder.mimeType;
+            folderMeta.createdTime = createdFolder.createdTime;
+            folderMeta.modifiedTime = createdFolder.modifiedTime;
+            folderMeta.cachedAt = QDateTime::currentDateTimeUtc();
+            folderMeta.lastAccessed = QDateTime::currentDateTimeUtc();
+            if (!saveMetadataEntry(folderMeta)) {
+                if (errorOut) {
+                    *errorOut = QStringLiteral("Failed to save restored folder metadata");
+                }
+                return false;
+            }
+
+            QDir dir(entryInfo.absoluteFilePath());
+            const QFileInfoList children = dir.entryInfoList(
+                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+            for (const QFileInfo& child : children) {
+                if (!restoreTree(child, joinFusePath(destinationFusePath, child.fileName()),
+                                 createdFolder.id)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        QString error;
+        DriveFile uploadedFile;
+        bool authFailure = false;
+        if (!waitForUpload(
+                m_driveClient, entryInfo.absoluteFilePath(), &uploadedFile,
+                [&]() {
+                    return invokeDriveCall(m_driveClient, [&]() {
+                        m_driveClient->uploadFile(entryInfo.absoluteFilePath(), currentParentId,
+                                                  entryName);
+                    });
+                },
+                &error, &authFailure)) {
+            Q_UNUSED(authFailure)
+            if (errorOut) {
+                *errorOut = error;
+            }
+            return false;
+        }
+
+        const QString canonicalCachePath = m_fileCache->getCachePathForFile(uploadedFile.id);
+        if (!canonicalCachePath.isEmpty()) {
+            copyFileToPath(entryInfo.absoluteFilePath(), canonicalCachePath, nullptr);
+            m_fileCache->recordCacheEntry(uploadedFile.id, canonicalCachePath, entryInfo.size());
+        }
+
+        FuseMetadata fileMeta;
+        fileMeta.fileId = uploadedFile.id;
+        fileMeta.path = requestLocalPath;
+        fileMeta.name = entryName;
+        fileMeta.remoteName = uploadedFile.name.isEmpty() ? entryName : uploadedFile.name;
+        fileMeta.parentId = currentParentId;
+        fileMeta.isFolder = false;
+        fileMeta.size = entryInfo.size();
+        fileMeta.mimeType = uploadedFile.mimeType;
+        fileMeta.createdTime = uploadedFile.createdTime;
+        fileMeta.modifiedTime = uploadedFile.modifiedTime;
+        fileMeta.cachedAt = QDateTime::currentDateTimeUtc();
+        fileMeta.lastAccessed = QDateTime::currentDateTimeUtc();
+        if (!saveMetadataEntry(fileMeta)) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("Failed to save restored file metadata");
+            }
+            return false;
+        }
+
+        return true;
+    };
+
+    if (!restoreTree(sourceInfo, toPath, parentId)) {
+        return false;
+    }
+
+    if (sourceInfo.isDir()) {
+        QDir(sourceOverlayPath).removeRecursively();
+    } else {
+        QFile::remove(sourceOverlayPath);
+    }
+
+    invalidateFusePaths({fromPath, toPath, getParentPath(fromPath), getParentPath(toPath)});
+    return true;
+}
+
+void FuseDriver::deleteFuseMetadataSubtree(const QString& rootPath) {
+    if (!m_database || rootPath.isEmpty()) {
+        return;
+    }
+
+    QList<FuseMetadata> allEntries = m_database->getAllFuseMetadata();
+    std::sort(allEntries.begin(), allEntries.end(),
+              [](const FuseMetadata& lhs, const FuseMetadata& rhs) {
+                  return lhs.path.size() > rhs.path.size();
+              });
+
+    for (const FuseMetadata& entry : allEntries) {
+        if (!relativePathWithinSubtree(entry.path, rootPath)) {
+            continue;
+        }
+
+        if (!entry.isFolder && m_fileCache) {
+            m_fileCache->removeFromCache(entry.fileId);
+        }
+
+        m_database->deleteNativeDocState(entry.fileId);
+        m_database->deleteFuseMetadata(entry.fileId);
+        removeMetadataEntryFromCache(entry);
+    }
 }
 
 void FuseDriver::removeMetadataEntryFromCache(const FuseMetadata& metadata) {

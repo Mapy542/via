@@ -14,6 +14,7 @@
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
+#include "sync/TrashPolicy.h"
 
 DirtySyncWorker::DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveClient,
                                  SyncDatabase* database, QObject* parent)
@@ -383,6 +384,16 @@ void DirtySyncWorker::processDirtyFiles() {
             if (m_state == DirtySyncWorkerState::Stopped && !m_flushing) {
                 break;
             }
+        }
+
+        if (TrashPolicy::isTrashRelativePath(entry.path)) {
+            qWarning() << "DirtySyncWorker: Skipping dirty trash path" << entry.path;
+            m_fileCache->clearDirty(entry.fileId, entry.generation);
+            {
+                QMutexLocker locker(&m_mutex);
+                m_retryCounts.remove(entry.fileId);
+            }
+            continue;
         }
 
         // GPT5.3 #8: skip files that exceeded max retries

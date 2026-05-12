@@ -15,6 +15,7 @@
 #include "MirrorPathResolver.h"
 #include "SyncDatabase.h"
 #include "SyncSettings.h"
+#include "TrashPolicy.h"
 #include "api/DriveChange.h"
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
@@ -462,6 +463,11 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
         item.modifiedTime =
             change.file.modifiedTime.isValid() ? change.file.modifiedTime : change.time;
 
+        if (!item.localPath.isEmpty() && TrashPolicy::isTrashRelativePath(item.localPath)) {
+            qDebug() << "Remote change dropped (trash path):" << change.fileId << item.localPath;
+            return;
+        }
+
     } else {
         // Resolve the file path
         QString path = resolvePath(change.file);
@@ -529,6 +535,9 @@ QString RemoteChangeWatcher::resolvePath(const DriveFile& file) {
         const QString resolvedPath = MirrorPathResolver::resolveRemoteLocalPath(
             parentPath, file.name, file.mimeType, nativeDocModeOverride, file.id, m_syncDatabase,
             m_settings, m_settings.syncFolder, &folderClaims);
+        if (TrashPolicy::isTrashRelativePath(resolvedPath)) {
+            return QString();
+        }
         if (file.isFolder && !resolvedPath.isEmpty()) {
             QMutexLocker locker(&m_mutex);
             m_folderIdToPath.insert(file.id, resolvedPath);
@@ -589,6 +598,9 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
                     currentPath = MirrorPathResolver::resolveRemoteLocalPath(
                         currentPath, node.name, node.mimeType, nativeDocModeOverride, node.id,
                         m_syncDatabase, m_settings, m_settings.syncFolder, &folderClaims);
+                    if (TrashPolicy::isTrashRelativePath(currentPath)) {
+                        return QString();
+                    }
                     if (node.isFolder) {
                         m_folderIdToPath.insert(node.id, currentPath);
                         folderClaims.insert(currentPath);
@@ -618,6 +630,9 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
                     currentPath = MirrorPathResolver::resolveRemoteLocalPath(
                         currentPath, node.name, node.mimeType, nativeDocModeOverride, node.id,
                         m_syncDatabase, m_settings, m_settings.syncFolder, &folderClaims);
+                    if (TrashPolicy::isTrashRelativePath(currentPath)) {
+                        return QString();
+                    }
                     if (node.isFolder) {
                         QMutexLocker locker(&m_mutex);
                         m_folderIdToPath.insert(node.id, currentPath);
@@ -657,6 +672,9 @@ QString RemoteChangeWatcher::resolvePathFromParents(const DriveFile& file) {
         currentPath = MirrorPathResolver::resolveRemoteLocalPath(
             currentPath, node.name, node.mimeType, nativeDocModeOverride, node.id, m_syncDatabase,
             m_settings, m_settings.syncFolder, &folderClaims);
+        if (TrashPolicy::isTrashRelativePath(currentPath)) {
+            return QString();
+        }
         if (node.isFolder) {
             QMutexLocker locker(&m_mutex);
             m_folderIdToPath.insert(node.id, currentPath);

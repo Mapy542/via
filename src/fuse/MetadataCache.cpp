@@ -17,6 +17,7 @@
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
 #include "sync/SyncSettings.h"
+#include "sync/TrashPolicy.h"
 #include "utils/NativeDocSupport.h"
 
 const int MetadataCache::DEFAULT_MAX_CACHE_AGE_SECONDS;
@@ -1111,11 +1112,17 @@ void MetadataCache::loadFromDatabase() {
     }
 
     QList<FuseMetadata> dbEntries = m_database->getAllFuseMetadata();
+    QList<FuseMetadata> staleTrashEntries;
 
     QWriteLocker locker(&m_lock);
 
     for (const FuseMetadata& dbMeta : dbEntries) {
         const FuseFileMetadata metadata = fromDbMetadata(dbMeta);
+
+        if (TrashPolicy::isTrashRelativePath(metadata.path)) {
+            staleTrashEntries.append(dbMeta);
+            continue;
+        }
 
         m_pathToMetadata[metadata.path] = metadata;
         m_fileIdToPath[metadata.fileId] = metadata.path;
@@ -1125,6 +1132,13 @@ void MetadataCache::loadFromDatabase() {
         if (!m_parentToChildren[parentPath].contains(metadata.path)) {
             m_parentToChildren[parentPath].append(metadata.path);
         }
+    }
+
+    locker.unlock();
+
+    for (const FuseMetadata& staleEntry : staleTrashEntries) {
+        m_database->deleteNativeDocState(staleEntry.fileId);
+        m_database->deleteFuseMetadata(staleEntry.fileId);
     }
 
     qDebug() << "MetadataCache: Loaded" << m_pathToMetadata.size() << "entries from database";
@@ -1202,6 +1216,10 @@ FuseFileMetadata MetadataCache::upsertRemoteMetadataInternal(const FuseFileMetad
         return FuseFileMetadata();
     }
 
+    if (TrashPolicy::isTrashRelativePath(resolved.path)) {
+        return FuseFileMetadata();
+    }
+
     setMetadata(resolved);
     return resolved;
 }
@@ -1238,6 +1256,10 @@ QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
         FuseFileMetadata resolved = resolveRemoteMetadata(child, parentPath, existingByFileId,
                                                           &claimedPaths, m_duplicateNameStrategy);
         if (!resolved.isValid()) {
+            continue;
+        }
+
+        if (TrashPolicy::isTrashRelativePath(resolved.path)) {
             continue;
         }
 

@@ -314,6 +314,11 @@ void FullSync::processRemoteFiles(const QList<DriveFile>& files, const QString& 
             continue;
         }
 
+        if (!ROOT_FOLDER_ID.isEmpty() && file.parents.contains(ROOT_FOLDER_ID) &&
+            TrashPolicy::isTrashRelativePath(file.name)) {
+            continue;
+        }
+
         // Store remote files to generate structure after all are fetched
         m_allRemoteItems.append(file);
         ++m_remoteFileCount;
@@ -444,6 +449,11 @@ void FullSync::buildRemoteFolderStructure() {
                     newNode->relativePath = MirrorPathResolver::resolveRemoteLocalPath(
                         parentNode->relativePath, file.name, file.mimeType, nativeDocModeOverride,
                         file.id, m_database, m_settings, m_syncFolder, &claimedPaths);
+                    if (TrashPolicy::isTrashRelativePath(newNode->relativePath)) {
+                        delete newNode;
+                        itemsToRemove.append(i);
+                        break;
+                    }
                     newNode->modifiedTime = file.modifiedTime;
                     newNode->fileId = file.id;
                     parentNode->children.insert(file.id, newNode);

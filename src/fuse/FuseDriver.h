@@ -49,6 +49,7 @@ class SyncDatabase;
 class FileCache;
 class MetadataCache;
 struct FuseMetadata;
+struct DriveFile;
 
 // Forward declaration for internal worker classes
 class DirtySyncWorker;
@@ -746,6 +747,146 @@ class FuseDriver : public QObject {
      * @return true if the database write succeeded
      */
     bool saveMetadataEntry(const FuseMetadata& metadata);
+
+    /**
+     * @brief Get the local overlay root used for FreeDesktop trash paths
+     * @return Absolute path to the trash overlay root
+     */
+    QString trashOverlayRoot() const;
+
+    /**
+     * @brief Check whether a FUSE path points inside a FreeDesktop trash subtree
+     * @param path FUSE path (leading slash optional)
+     * @return true when the path is under .Trash-<uid>
+     */
+    bool isTrashFusePath(const QString& path) const;
+
+    /**
+     * @brief Map a trash-path FUSE path onto the local overlay backing store
+     * @param path FUSE path (leading slash optional)
+     * @return Absolute overlay path for the entry
+     */
+    QString trashOverlayPathForFusePath(const QString& path) const;
+
+    /**
+     * @brief Ensure the parent directory for a trash overlay path exists
+     * @param path FUSE path (leading slash optional)
+     * @return true if the parent directory exists or was created
+     */
+    bool ensureTrashOverlayParent(const QString& path) const;
+
+    /**
+     * @brief Ensure a trash overlay directory exists
+     * @param path FUSE path (leading slash optional)
+     * @return true if the directory exists or was created
+     */
+    bool ensureTrashOverlayDirectory(const QString& path) const;
+
+    /**
+     * @brief Fill stat information for a trash overlay entry
+     * @param path FUSE path (leading slash optional)
+     * @param stbuf Output stat buffer
+     * @return 0 on success, or a negative errno-style value
+     */
+    int getattrTrashOverlay(const QString& path, struct stat* stbuf) const;
+
+    /**
+     * @brief List a trash overlay directory
+     * @param path FUSE path (leading slash optional)
+     * @param buf FUSE directory buffer
+     * @param filler FUSE filler callback
+     * @return 0 on success, or a negative errno-style value
+     */
+    int readdirTrashOverlay(const QString& path, void* buf, fuse_fill_dir_t filler) const;
+
+    /**
+     * @brief Open an existing trash overlay file
+     * @param path FUSE path (leading slash optional)
+     * @param fi FUSE file info
+     * @return 0 on success, or a negative errno-style value
+     */
+    int openTrashOverlay(const QString& path, struct fuse_file_info* fi);
+
+    /**
+     * @brief Create a trash overlay file and register a FUSE handle for it
+     * @param path FUSE path (leading slash optional)
+     * @param fi FUSE file info
+     * @return 0 on success, or a negative errno-style value
+     */
+    int createTrashOverlay(const QString& path, struct fuse_file_info* fi);
+
+    /**
+     * @brief Create a trash overlay directory
+     * @param path FUSE path (leading slash optional)
+     * @return 0 on success, or a negative errno-style value
+     */
+    int mkdirTrashOverlay(const QString& path) const;
+
+    /**
+     * @brief Remove a trash overlay file
+     * @param path FUSE path (leading slash optional)
+     * @return 0 on success, or a negative errno-style value
+     */
+    int unlinkTrashOverlay(const QString& path) const;
+
+    /**
+     * @brief Remove an empty trash overlay directory
+     * @param path FUSE path (leading slash optional)
+     * @return 0 on success, or a negative errno-style value
+     */
+    int rmdirTrashOverlay(const QString& path) const;
+
+    /**
+     * @brief Rename a path wholly within the trash overlay
+     * @param fromPath Source FUSE path
+     * @param toPath Destination FUSE path
+     * @return 0 on success, or a negative errno-style value
+     */
+    int renameWithinTrashOverlay(const QString& fromPath, const QString& toPath) const;
+
+    /**
+     * @brief Snapshot a live FUSE entry into local trash and trash the remote item
+     * @param metadata Live metadata entry being trashed
+     * @param fromPath Live FUSE path
+     * @param toPath Trash-destination FUSE path
+     * @param errorOut Optional error message on failure
+     * @return true if the live item was moved into local trash and remotely trashed
+     */
+    bool moveLiveEntryToTrash(const FuseMetadata& metadata, const QString& fromPath,
+                              const QString& toPath, QString* errorOut = nullptr);
+
+    /**
+     * @brief Restore a local trash-overlay entry back into the live Drive tree
+     * @param fromPath Trash-overlay FUSE path
+     * @param toPath Live-destination FUSE path
+     * @param errorOut Optional error message on failure
+     * @return true if the entry was restored into Drive and removed from the overlay
+     */
+    bool restoreTrashEntryToLive(const QString& fromPath, const QString& toPath,
+                                 QString* errorOut = nullptr);
+
+    /**
+     * @brief Snapshot a live metadata entry into the local trash overlay
+     * @param metadata Metadata entry to snapshot
+     * @param trashPath Trash-destination FUSE path
+     * @param errorOut Optional error message on failure
+     * @return true if the snapshot succeeded
+     */
+    bool snapshotFuseMetadataToTrash(const FuseMetadata& metadata, const QString& trashPath,
+                                     QString* errorOut = nullptr);
+
+    /**
+     * @brief Remove live metadata/cache entries for a trashed subtree
+     * @param rootPath Relative FUSE metadata path at the subtree root
+     */
+    void deleteFuseMetadataSubtree(const QString& rootPath);
+
+    /**
+     * @brief Resolve the FUSE-visible name for a remote Drive file
+     * @param file Remote Drive file metadata
+     * @return Visible name used in the FUSE filesystem
+     */
+    QString visibleNameForRemoteFile(const DriveFile& file) const;
 
     /**
      * @brief Remove a metadata entry from the in-memory cache after a DB delete

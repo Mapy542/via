@@ -18,6 +18,7 @@
 #include "api/DriveFile.h"
 #include "api/GoogleDriveClient.h"
 #include "sync/SyncDatabase.h"
+#include "sync/TrashPolicy.h"
 #include "utils/NativeDocSupport.h"
 
 namespace {
@@ -42,6 +43,43 @@ int transientRetryDelayMs(int consecutiveFailures) {
         delayMs = qMin(delayMs * 2, kTransientRetryMaxDelayMs);
     }
     return delayMs;
+}
+
+bool resolvesToTrashRelativePath(const DriveFile& file, const MetadataCache* metadataCache,
+                                 const SyncDatabase* database) {
+    if (file.name.isEmpty()) {
+        return false;
+    }
+
+    const QString parentId = file.parentId();
+    if (parentId.isEmpty()) {
+        return TrashPolicy::isTrashRelativePath(file.name);
+    }
+
+    QString parentPath;
+    if (metadataCache) {
+        const QString rootId = metadataCache->rootFolderId();
+        if (parentId == QStringLiteral("root") || (!rootId.isEmpty() && parentId == rootId)) {
+            parentPath = QStringLiteral("/");
+        } else {
+            parentPath = metadataCache->getPathByFileId(parentId);
+        }
+    }
+
+    if (parentPath.isEmpty() && database) {
+        const FuseMetadata parentMeta = database->getFuseMetadata(parentId);
+        if (!parentMeta.path.isEmpty()) {
+            parentPath = QDir::cleanPath(parentMeta.path);
+        }
+    }
+
+    if (parentPath.isEmpty()) {
+        return TrashPolicy::isTrashRelativePath(file.name);
+    }
+
+    const QString candidatePath =
+        parentPath == QStringLiteral("/") ? file.name : QDir(parentPath).filePath(file.name);
+    return TrashPolicy::isTrashRelativePath(candidatePath);
 }
 }  // namespace
 
@@ -480,6 +518,10 @@ QString MetadataRefreshWorker::resolveDisplayPath(const QString& fileId,
 bool MetadataRefreshWorker::shouldProcess(const DriveFile& file) const {
     // Skip files not owned by user (shared files)
     if (!file.ownedByMe) {
+        return false;
+    }
+
+    if (resolvesToTrashRelativePath(file, m_metadataCache, m_database)) {
         return false;
     }
 

@@ -137,6 +137,7 @@ class TestFullSync : public QObject {
     // Remote tree building
     void testRemoteTreeSingleFile();
     void testRemoteTreeNestedFolder();
+    void testRemoteTreeSkipsTrashArtifacts();
     void testRemoteDuplicateFilesUseFileIdSuffix();
     void testRemoteDuplicateFoldersKeepDistinctDescendants();
     void testRemoteTreeNativeDocRepresentationModes_data();
@@ -442,6 +443,24 @@ void TestFullSync::testRemoteTreeNestedFolder() {
         }
     }
     QVERIFY(foundNested);
+}
+
+void TestFullSync::testRemoteTreeSkipsTrashArtifacts() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+    m_fullSync->setSyncFolder(syncDir);
+
+    FakeDriveClientForFS::FilePage page;
+    page.files.append(makeFile("trash-folder", ".Trash-1000", "root-id-123", true));
+    page.files.append(makeFile("trash-child", "report.txt", "trash-folder"));
+    page.nextPageToken = "";
+    m_driveClient->filePages.append(page);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSync();
+
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
+    QVERIFY(m_changeQueue->isEmpty());
 }
 
 void TestFullSync::testRemoteDuplicateFilesUseFileIdSuffix() {

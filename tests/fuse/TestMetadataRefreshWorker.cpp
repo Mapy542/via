@@ -111,6 +111,7 @@ class TestMetadataRefreshWorker : public QObject {
     void testModifiedChange_EmitsResolvedPath();
     void testDeletedChange_EmitsStoredPathBeforeRemoval();
     void testCreatedChange_FallsBackToFileNameWhenPathUnavailable();
+    void testTrashChange_IsIgnored();
     void testTransientApiErrorRetriesWithoutExternalError();
     void testInFlightRequestDefersExtraCheck();
 
@@ -289,6 +290,34 @@ void TestMetadataRefreshWorker::testCreatedChange_FallsBackToFileNameWhenPathUna
     const QList<QVariant> args = changeSpy.takeFirst();
     QCOMPARE(args.at(0).toString(), QStringLiteral("orphan.txt"));
     QCOMPARE(args.at(1).toString(), QStringLiteral("created"));
+}
+
+void TestMetadataRefreshWorker::testTrashChange_IsIgnored() {
+    QSignalSpy detailedSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+    QSignalSpy genericSpy(m_worker, &MetadataRefreshWorker::changeProcessed);
+
+    DriveFile trashFolder;
+    trashFolder.id = QStringLiteral("trash-folder-1");
+    trashFolder.name = QStringLiteral(".Trash-1000");
+    trashFolder.parents = {QStringLiteral("root")};
+    trashFolder.isFolder = true;
+    trashFolder.mimeType = QStringLiteral("application/vnd.google-apps.folder");
+    trashFolder.ownedByMe = true;
+    trashFolder.modifiedTime = QDateTime::currentDateTimeUtc();
+    trashFolder.createdTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = QStringLiteral("trash-change-1");
+    change.fileId = trashFolder.id;
+    change.time = QDateTime::currentDateTimeUtc();
+    change.file = trashFolder;
+
+    m_driveClient->emitChangesBatch({change});
+
+    QCOMPARE(detailedSpy.count(), 0);
+    QCOMPARE(genericSpy.count(), 0);
+    QVERIFY(!m_cache->getMetadataByPath(QStringLiteral(".Trash-1000")).isValid());
+    QVERIFY(m_db->getFuseMetadataByPath(QStringLiteral(".Trash-1000")).fileId.isEmpty());
 }
 
 void TestMetadataRefreshWorker::testTransientApiErrorRetriesWithoutExternalError() {

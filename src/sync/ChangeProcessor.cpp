@@ -17,6 +17,7 @@
 #include "SyncActionQueue.h"
 #include "SyncDatabase.h"
 #include "SyncSettings.h"
+#include "TrashPolicy.h"
 #include "api/GoogleDriveClient.h"
 #include "utils/NativeDocSupport.h"
 
@@ -453,6 +454,11 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
         return false;
     }
 
+    if (!localPath.isEmpty() && TrashPolicy::isTrashRelativePath(localPath)) {
+        qDebug() << "Validation failed - trash path ignored:" << localPath;
+        return false;
+    }
+
     const QString changeId = localPath.isEmpty() ? fileId : localPath;
 
     // Validation Step 1: File not in operation
@@ -514,6 +520,25 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
             return false;
         }
         return true;
+    }
+
+    if (change.changeType == ChangeType::Move && !change.moveDestination.isEmpty() &&
+        TrashPolicy::isTrashRelativePath(change.moveDestination)) {
+        qDebug() << "Validation failed - trash destination ignored:" << change.moveDestination;
+        return false;
+    }
+
+    if (change.changeType == ChangeType::Rename && !change.renameTo.isEmpty()) {
+        QString parentPath = QFileInfo(localPath).path();
+        if (parentPath == QStringLiteral(".")) {
+            parentPath.clear();
+        }
+        const QString renamedPath =
+            parentPath.isEmpty() ? change.renameTo : QDir(parentPath).filePath(change.renameTo);
+        if (TrashPolicy::isTrashRelativePath(renamedPath)) {
+            qDebug() << "Validation failed - trash rename ignored:" << renamedPath;
+            return false;
+        }
     }
 
     // Validation Step 3: File date modified > db recorded last sync time + 2 sec

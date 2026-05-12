@@ -142,6 +142,7 @@ class TestRemoteChangeWatcher : public QObject {
     void testInterpretDeleteChange_Trashed();
     void testInterpretDeleteChange_Removed();
     void testInterpretModifyChange();
+    void testInterpretModifyChange_TrashPathDropped();
     void testInterpretModifyChange_ReusesExistingDuplicateAlias();
     void testInterpretModifyChange_UsesDuplicateFolderAliasForChild();
     void testInterpretModifyChange_DisambiguatesAgainstLocalFile();
@@ -402,6 +403,38 @@ void TestRemoteChangeWatcher::testInterpretModifyChange() {
     QCOMPARE(item.changeType, ChangeType::Modify);
     QCOMPARE(item.localPath, QString("hello.txt"));
     QCOMPARE(item.origin, ChangeOrigin::Remote);
+}
+
+void TestRemoteChangeWatcher::testInterpretModifyChange_TrashPathDropped() {
+    QHash<QString, QString> folderMap;
+    folderMap.insert("root-id", "");
+    m_watcher->setFolderIdToPath(folderMap);
+
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setRootFolderId(QStringLiteral("root-id"));
+    m_driveClient->setNextToken("token-2");
+
+    DriveFile modifiedFile;
+    modifiedFile.id = "trash-folder-1";
+    modifiedFile.name = ".Trash-1000";
+    modifiedFile.mimeType = "application/vnd.google-apps.folder";
+    modifiedFile.isFolder = true;
+    modifiedFile.ownedByMe = true;
+    modifiedFile.parents = {"root-id"};
+    modifiedFile.modifiedTime = QDateTime::currentDateTimeUtc();
+
+    DriveChange change;
+    change.changeId = "change-trash-1";
+    change.fileId = modifiedFile.id;
+    change.removed = false;
+    change.file = modifiedFile;
+    change.time = QDateTime::currentDateTimeUtc();
+
+    m_driveClient->setPendingChanges({change});
+    m_watcher->start();
+    m_watcher->checkNow();
+
+    QTRY_VERIFY_WITH_TIMEOUT(m_changeQueue->isEmpty(), 2000);
 }
 
 void TestRemoteChangeWatcher::testInterpretModifyChange_ReusesExistingDuplicateAlias() {

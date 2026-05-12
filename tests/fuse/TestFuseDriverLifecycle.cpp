@@ -32,9 +32,30 @@ class FakeDriveClientFDL : public GoogleDriveClient {
 
     QByteArray exportPayload = QByteArray("exported native doc");
     int exportCallCount = 0;
+    int uploadCallCount = 0;
+    int createFolderCallCount = 0;
     QString lastExportFileId;
     QString lastExportMimeType;
+    QList<QString> trashedFileIds;
+    QHash<QString, QList<DriveFile>> listedFilesByParentId;
+    QList<QString> uploadedLocalPaths;
+    QList<QString> uploadedParentIds;
+    QList<QString> uploadedNames;
+    QList<QString> createdFolderNames;
+    QList<QString> createdFolderParentIds;
 
+    int nextGeneratedId = 0;
+
+    QString makeGeneratedId(const QString& prefix) {
+        ++nextGeneratedId;
+        return QStringLiteral("%1-%2").arg(prefix).arg(nextGeneratedId);
+    }
+
+    void listFiles(const QString& folderId = "root",
+                   const QString& pageToken = QString()) override {
+        Q_UNUSED(pageToken)
+        emit filesListed(listedFilesByParentId.value(folderId), QString());
+    }
     void downloadFile(const QString&, const QString&) override {}
     void exportFile(const QString& fileId, const QString& exportMimeType,
                     const QString& localPath) override {
@@ -52,12 +73,50 @@ class FakeDriveClientFDL : public GoogleDriveClient {
 
         emit fileDownloaded(fileId, localPath);
     }
-    void uploadFile(const QString&, const QString&, const QString&) override {}
+    void uploadFile(const QString& localPath, const QString& parentId,
+                    const QString& fileName) override {
+        ++uploadCallCount;
+        uploadedLocalPaths.append(localPath);
+        uploadedParentIds.append(parentId);
+        uploadedNames.append(fileName);
+
+        DriveFile file;
+        file.id = makeGeneratedId(QStringLiteral("upload"));
+        file.name = fileName;
+        file.parents = {parentId};
+        file.isFolder = false;
+        file.size = QFileInfo(localPath).size();
+        file.mimeType = QStringLiteral("application/octet-stream");
+        file.createdTime = QDateTime::currentDateTimeUtc();
+        file.modifiedTime = file.createdTime;
+
+        emit fileUploadedDetailed(file, localPath);
+    }
     void updateFile(const QString&, const QString&) override {}
     void moveFile(const QString&, const QString&, const QString&) override {}
     void renameFile(const QString&, const QString&) override {}
     void deleteFile(const QString&) override {}
-    void createFolder(const QString&, const QString&, const QString&) override {}
+    void trashFile(const QString& fileId) override {
+        trashedFileIds.append(fileId);
+        emit fileTrashed(fileId);
+    }
+    void createFolder(const QString& name, const QString& parentId,
+                      const QString& localPath) override {
+        ++createFolderCallCount;
+        createdFolderNames.append(name);
+        createdFolderParentIds.append(parentId);
+
+        DriveFile folder;
+        folder.id = makeGeneratedId(QStringLiteral("folder"));
+        folder.name = name;
+        folder.parents = {parentId};
+        folder.isFolder = true;
+        folder.mimeType = QStringLiteral("application/vnd.google-apps.folder");
+        folder.createdTime = QDateTime::currentDateTimeUtc();
+        folder.modifiedTime = folder.createdTime;
+
+        emit folderCreatedDetailed(folder, localPath);
+    }
     QJsonArray getParentsByFileId(const QString&) override { return {}; }
     QString getFolderIdByPath(const QString&) override { return {}; }
 };
@@ -92,6 +151,10 @@ class TestFuseDriverLifecycle : public QObject {
     void testSaveMetadataEntry_UpdatesWarmRootListing();
     void testRemoveMetadataEntryFromCache_PrunesWarmRootListing();
     void testReconcileMovedMetadata_DropsStaleFolderSubtree();
+    void testMoveLiveEntryToTrash_SnapshotsLocalFileAndClearsLiveState();
+    void testMoveLiveEntryToTrash_SnapshotsFolderChildrenAndClearsSubtree();
+    void testRestoreTrashEntryToLive_UploadsLocalFileAndRemovesOverlay();
+    void testRestoreTrashEntryToLive_RecreatesFolderTreeAndCachesFiles();
 
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
@@ -290,6 +353,157 @@ void TestFuseDriverLifecycle::testReconcileMovedMetadata_DropsStaleFolderSubtree
     QCOMPARE(rootChildren.size(), 1);
     QCOMPARE(rootChildren.first().path, QStringLiteral("beta"));
     QVERIFY(!m_driver->m_metadataCache->hasChildrenCached(QStringLiteral("beta")));
+}
+
+void TestFuseDriverLifecycle::testMoveLiveEntryToTrash_SnapshotsLocalFileAndClearsLiveState() {
+    const QString fileId = QStringLiteral("trash-file-1");
+    const QString logicalPath = QStringLiteral("report.txt");
+    const QByteArray fileContent("draft report");
+
+    seedCachedFile(fileId, logicalPath, fileContent);
+
+    const FuseMetadata meta = m_db->getFuseMetadata(fileId);
+    QVERIFY(!meta.fileId.isEmpty());
+
+    QString error;
+    QVERIFY(m_driver->moveLiveEntryToTrash(meta, QStringLiteral("/report.txt"),
+                                           QStringLiteral("/.Trash-1000/files/report.txt"),
+                                           &error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QCOMPARE(m_driveClient->trashedFileIds, QList<QString>{fileId});
+
+    const QString overlayPath =
+        m_driver->trashOverlayPathForFusePath(QStringLiteral("/.Trash-1000/files/report.txt"));
+    QVERIFY(QFile::exists(overlayPath));
+
+    QFile overlayFile(overlayPath);
+    QVERIFY(overlayFile.open(QIODevice::ReadOnly));
+    QCOMPARE(overlayFile.readAll(), fileContent);
+    overlayFile.close();
+
+    QVERIFY(m_db->getFuseMetadata(fileId).fileId.isEmpty());
+    QVERIFY(m_db->getFuseMetadataByPath(logicalPath).fileId.isEmpty());
+    QVERIFY(!m_driver->fileCache()->isCached(fileId));
+    QVERIFY(!m_driver->fileCache()->isDirty(fileId));
+}
+
+void TestFuseDriverLifecycle::testMoveLiveEntryToTrash_SnapshotsFolderChildrenAndClearsSubtree() {
+    const FuseMetadata folderMeta = makeMetadata(
+        QStringLiteral("folder-trash-1"), QStringLiteral("project"), QStringLiteral("root"), true);
+    QVERIFY(m_db->saveFuseMetadata(folderMeta));
+
+    const QString childFileId = QStringLiteral("folder-trash-child-1");
+    const QByteArray childContent("board contents");
+    const QString childCachePath = m_driver->fileCache()->getCachePathForFile(childFileId);
+    QVERIFY(!childCachePath.isEmpty());
+    QVERIFY(QDir().mkpath(QFileInfo(childCachePath).dir().absolutePath()));
+
+    QFile childFile(childCachePath);
+    QVERIFY(childFile.open(QIODevice::WriteOnly));
+    QCOMPARE(childFile.write(childContent), childContent.size());
+    childFile.close();
+    QVERIFY(
+        m_driver->fileCache()->recordCacheEntry(childFileId, childCachePath, childContent.size()));
+
+    FuseMetadata childMeta = makeMetadata(childFileId, QStringLiteral("project/board.kicad_pcb"),
+                                          folderMeta.fileId, false);
+    childMeta.size = childContent.size();
+    QVERIFY(m_db->saveFuseMetadata(childMeta));
+
+    m_driveClient->listedFilesByParentId.insert(folderMeta.fileId, {makeDriveFile(childMeta)});
+
+    QString error;
+    QVERIFY(m_driver->moveLiveEntryToTrash(folderMeta, QStringLiteral("/project"),
+                                           QStringLiteral("/.Trash-1000/files/project"), &error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QCOMPARE(m_driveClient->trashedFileIds, QList<QString>{folderMeta.fileId});
+
+    const QString childOverlayPath = m_driver->trashOverlayPathForFusePath(
+        QStringLiteral("/.Trash-1000/files/project/board.kicad_pcb"));
+    QVERIFY(QFile::exists(childOverlayPath));
+
+    QFile overlayFile(childOverlayPath);
+    QVERIFY(overlayFile.open(QIODevice::ReadOnly));
+    QCOMPARE(overlayFile.readAll(), childContent);
+    overlayFile.close();
+
+    QVERIFY(m_db->getFuseMetadata(folderMeta.fileId).fileId.isEmpty());
+    QVERIFY(m_db->getFuseMetadata(childFileId).fileId.isEmpty());
+    QVERIFY(m_db->getFuseMetadataByPath(QStringLiteral("project")).fileId.isEmpty());
+    QVERIFY(
+        m_db->getFuseMetadataByPath(QStringLiteral("project/board.kicad_pcb")).fileId.isEmpty());
+    QVERIFY(!m_driver->fileCache()->isCached(childFileId));
+}
+
+void TestFuseDriverLifecycle::testRestoreTrashEntryToLive_UploadsLocalFileAndRemovesOverlay() {
+    const QString trashFusePath = QStringLiteral("/.Trash-1000/files/restored.txt");
+    const QString overlayPath = m_driver->trashOverlayPathForFusePath(trashFusePath);
+    const QByteArray overlayContent("recovered bytes");
+
+    QVERIFY(QDir().mkpath(QFileInfo(overlayPath).dir().absolutePath()));
+    QFile overlayFile(overlayPath);
+    QVERIFY(overlayFile.open(QIODevice::WriteOnly));
+    QCOMPARE(overlayFile.write(overlayContent), overlayContent.size());
+    overlayFile.close();
+
+    QString error;
+    QVERIFY(
+        m_driver->restoreTrashEntryToLive(trashFusePath, QStringLiteral("/restored.txt"), &error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QCOMPARE(m_driveClient->uploadCallCount, 1);
+    QCOMPARE(m_driveClient->uploadedLocalPaths, QList<QString>{overlayPath});
+    QVERIFY(!QFile::exists(overlayPath));
+
+    const QString restoredFileId = QStringLiteral("upload-1");
+    const FuseMetadata restoredMeta = m_db->getFuseMetadataByPath(QStringLiteral("restored.txt"));
+    QCOMPARE(restoredMeta.fileId, restoredFileId);
+    QVERIFY(m_driver->fileCache()->isCached(restoredFileId));
+
+    QFile cachedFile(m_driver->fileCache()->getCachePathForFile(restoredFileId));
+    QVERIFY(cachedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(cachedFile.readAll(), overlayContent);
+    cachedFile.close();
+}
+
+void TestFuseDriverLifecycle::testRestoreTrashEntryToLive_RecreatesFolderTreeAndCachesFiles() {
+    const QString folderTrashPath = QStringLiteral("/.Trash-1000/files/project");
+    const QString folderOverlayPath = m_driver->trashOverlayPathForFusePath(folderTrashPath);
+    QVERIFY(QDir().mkpath(folderOverlayPath));
+
+    const QString childOverlayPath = folderOverlayPath + QStringLiteral("/board.kicad_pcb");
+    const QByteArray childContent("restored board");
+    QFile childFile(childOverlayPath);
+    QVERIFY(childFile.open(QIODevice::WriteOnly));
+    QCOMPARE(childFile.write(childContent), childContent.size());
+    childFile.close();
+
+    QString error;
+    QVERIFY(m_driver->restoreTrashEntryToLive(folderTrashPath, QStringLiteral("/project"), &error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QCOMPARE(m_driveClient->createFolderCallCount, 1);
+    QCOMPARE(m_driveClient->createdFolderNames, QList<QString>{QStringLiteral("project")});
+    QCOMPARE(m_driveClient->uploadCallCount, 1);
+    QCOMPARE(m_driveClient->uploadedNames, QList<QString>{QStringLiteral("board.kicad_pcb")});
+    QVERIFY(!QDir(folderOverlayPath).exists());
+
+    const FuseMetadata restoredFolder = m_db->getFuseMetadataByPath(QStringLiteral("project"));
+    QCOMPARE(restoredFolder.fileId, QStringLiteral("folder-1"));
+    QVERIFY(restoredFolder.isFolder);
+
+    const FuseMetadata restoredChild =
+        m_db->getFuseMetadataByPath(QStringLiteral("project/board.kicad_pcb"));
+    QCOMPARE(restoredChild.fileId, QStringLiteral("upload-2"));
+    QCOMPARE(restoredChild.parentId, restoredFolder.fileId);
+    QVERIFY(m_driver->fileCache()->isCached(restoredChild.fileId));
+
+    QFile cachedChild(m_driver->fileCache()->getCachePathForFile(restoredChild.fileId));
+    QVERIFY(cachedChild.open(QIODevice::ReadOnly));
+    QCOMPARE(cachedChild.readAll(), childContent);
+    cachedChild.close();
 }
 
 void TestFuseDriverLifecycle::testTruncateWithoutHandle_StagesDirtyFile() {

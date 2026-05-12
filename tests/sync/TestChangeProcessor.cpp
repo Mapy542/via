@@ -95,6 +95,7 @@ class TestChangeProcessor : public QObject {
     void testValidateChange_LocalRenameMissingFileIdRejected();
     void testValidateChange_DuplicatePendingActionSkipped();
     void testValidateChange_LocalModifySameHashSkipped();
+    void testValidateChange_TrashPathRejected();
     void testDetermineAndQueueActions_LocalModifyNativeDocQueuesConflictCopyAndRefresh();
     void testDetermineAndQueueActions_LocalDeleteNativeDocStillTrashesRemote();
     void testDetermineAndQueueActions_LocalMoveNativeDocStillMovesRemote();
@@ -354,6 +355,19 @@ void TestChangeProcessor::testRemoteModifyPathChangeReclassifiesMove() {
     QCOMPARE(action.actionType, SyncActionType::MoveLocal);
     QCOMPARE(action.localPath, QString("ILOVEYOUSENDNUDES.pwmx"));
     QCOMPARE(action.moveDestination, QString("mario/ILOVEYOUSENDNUDES.pwmx"));
+}
+
+void TestChangeProcessor::testValidateChange_TrashPathRejected() {
+    ChangeQueueItem localTrashChange =
+        makeChange(ChangeType::Modify, ChangeOrigin::Local,
+                   QStringLiteral(".Trash-1000/files/report.txt"), QStringLiteral("trash-id-1"));
+    QVERIFY(!m_processor->validateChange(localTrashChange));
+
+    ChangeQueueItem remoteMoveToTrash =
+        makeChange(ChangeType::Move, ChangeOrigin::Remote, QStringLiteral("report.txt"),
+                   QStringLiteral("trash-id-2"));
+    remoteMoveToTrash.moveDestination = QStringLiteral(".Trash-1000/files/report.txt");
+    QVERIFY(!m_processor->validateChange(remoteMoveToTrash));
 }
 
 void TestChangeProcessor::testConflictDetection_LocalAndRemoteModify() {

@@ -169,6 +169,7 @@ class TestDirtySyncWorker : public QObject {
     void testSyncNow_UploadsFileWithReadOnlyHandle();
     void testSyncNow_DefersFileWithWritableHandle();
     void testSyncNow_UploadUsesImmutableSnapshot();
+    void testSyncNow_SkipsTrashRelativeDirtyPath();
 
    private:
     void createCacheFile(const QString& fileId);
@@ -730,6 +731,24 @@ void TestDirtySyncWorker::testSyncNow_UploadUsesImmutableSnapshot() {
     pendingFile.close();
 
     QVERIFY(m_driveClient->lastUploadLocalPath.contains(QStringLiteral("/snapshots/")));
+}
+
+void TestDirtySyncWorker::testSyncNow_SkipsTrashRelativeDirtyPath() {
+    const QString fid = QStringLiteral("trash-dirty-1");
+    createCacheFileWithContent(fid, QByteArray("trash bytes"));
+    m_fileCache->markDirty(fid, QStringLiteral(".Trash-1000/files/trash.txt"));
+
+    QSignalSpy cycleSpy(m_worker, &DirtySyncWorker::syncCycleCompleted);
+
+    m_worker->start();
+
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(m_fileCache->getDirtyFiles().isEmpty(), 5000);
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 0);
+    QVERIFY(m_fileCache->isCached(fid));
+
+    m_worker->stop();
 }
 
 QTEST_MAIN(TestDirtySyncWorker)
