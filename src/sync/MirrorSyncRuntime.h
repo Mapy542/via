@@ -81,6 +81,7 @@ class MirrorSyncRuntime : public QObject {
     void setChangeToken(const QString& token);
     void setConflictResolutionStrategy(ConflictResolutionStrategy strategy);
     void setPeriodicLocalFullSyncInterval(int intervalMs);
+    void reloadSyncSettings();
     void resolveConflict(const QString& localPath, ConflictResolutionStrategy strategy);
 
     void start();

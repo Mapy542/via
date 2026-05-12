@@ -17,6 +17,7 @@
 #include <QTimer>
 
 #include "SyncSettings.h"
+#include "SyncWorkThrottle.h"
 
 class ChangeQueue;
 class GoogleDriveClient;
@@ -146,6 +147,11 @@ class RemoteChangeWatcher : public QObject {
      */
     void checkNow();
 
+    /**
+     * @brief Reload cached sync settings for live mirror updates
+     */
+    void reloadSettings();
+
    signals:
     /**
      * @brief Emitted when watcher state changes
@@ -180,9 +186,11 @@ class RemoteChangeWatcher : public QObject {
                            bool hasMorePages);
     void onStartPageTokenReceived(const QString& token);
     void onApiError(const QString& operation, const QString& error);
+    void processPendingChangeBatch();
 
    private:
     void processChange(const DriveChange& change);
+    void finalizePendingChangeBatch();
     QString resolvePath(const DriveFile& file);
     QString resolvePathFromParents(const DriveFile& file);
     bool shouldProcess(const DriveFile& file,
@@ -207,8 +215,14 @@ class RemoteChangeWatcher : public QObject {
     // Track recently processed file IDs to avoid re-queueing
     mutable QHash<QString, QDateTime> m_recentlyProcessedFileIds;
     static const int DEDUP_WINDOW_SECS = 60;  // Skip re-queueing same file within 60 seconds
+    static const int CHANGE_BATCH_SLICE_SIZE = 32;
 
     SyncSettings m_settings;
+    SyncWorkThrottle m_batchThrottle;
+    QList<DriveChange> m_pendingChanges;
+    QString m_pendingToken;
+    bool m_pendingHasMorePages = false;
+    int m_pendingChangeIndex = 0;
 
     // Default polling interval (30 seconds as per flow chart)
     static const int DEFAULT_POLL_INTERVAL_MS = 30000;

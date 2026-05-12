@@ -311,6 +311,11 @@ void MirrorSyncRuntime::setPeriodicLocalFullSyncInterval(int intervalMs) {
     }
 }
 
+void MirrorSyncRuntime::reloadSyncSettings() {
+    invokeBlocking(m_remoteWatcher, [this]() { m_remoteWatcher->reloadSettings(); });
+    invokeBlocking(m_changeProcessor, [this]() { m_changeProcessor->reloadSettings(); });
+}
+
 void MirrorSyncRuntime::resolveConflict(const QString& localPath,
                                         ConflictResolutionStrategy strategy) {
     invokeBlocking(m_changeProcessor, [this, localPath, strategy]() {

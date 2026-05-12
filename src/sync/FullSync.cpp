@@ -59,6 +59,8 @@ void persistObservedNativeDocState(SyncDatabase* database, const DriveFile& file
 
 }  // namespace
 
+const int FullSync::LOCAL_SCAN_SLICE_SIZE;
+
 FullSync::FullSync(ChangeQueue* changeQueue, SyncDatabase* database, GoogleDriveClient* driveClient,
                    ChangeProcessor* changeProcessor, QObject* parent)
     : QObject(parent),
@@ -148,14 +150,17 @@ void FullSync::startInternal(Mode mode) {
         m_localFileCount = 0;
         m_remoteFileCount = 0;
         m_orphanCount = 0;
+        m_localScanQueuedCount = 0;
         m_allRemoteItems.clear();
         m_discoveredLocalPaths.clear();
         m_discoveredLocalPaths.clear();
         m_currentPageToken.clear();
+        m_localScanIterator.reset();
 
         m_state.store(State::ScanningLocal);
         m_mode = mode;
         m_settings = SyncSettings::load();
+        m_localScanThrottle.setSettings(m_settings);
 
         // get true root file ID:
         if (m_mode == Mode::Full && m_driveClient) {
@@ -181,6 +186,8 @@ void FullSync::cancel() {
     QMutexLocker locker(&m_mutex);
     m_cancelled = true;
     m_state.store(State::Idle);
+    m_localScanIterator.reset();
+    m_localScanThrottle.reset();
     locker.unlock();
 
     qInfo() << "FullSync cancelled";
@@ -192,11 +199,14 @@ void FullSync::clearPendingState() {
     m_allRemoteItems.clear();
     m_discoveredLocalPaths.clear();
     m_currentPageToken.clear();
+    m_localScanIterator.reset();
+    m_localScanThrottle.reset();
     delete m_remoteTree;
     m_remoteTree = nullptr;
     m_localFileCount = 0;
     m_remoteFileCount = 0;
     m_orphanCount = 0;
+    m_localScanQueuedCount = 0;
     qInfo() << "FullSync: pending discovery state cleared (account sign-out)";
 }
 
@@ -206,17 +216,25 @@ void FullSync::scanLocalFiles() {
         if (m_cancelled) {
             return;
         }
+
+        if (!m_localScanIterator) {
+            qInfo() << "Scanning local files in:" << m_syncFolder;
+            emit progressUpdated("Scanning local files...", 0, 0);
+            m_localScanIterator = std::make_unique<QDirIterator>(
+                m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
+                QDirIterator::Subdirectories);
+        }
     }
 
-    qInfo() << "Scanning local files in:" << m_syncFolder;
-    emit progressUpdated("Scanning local files...", 0, 0);
+    const int entryDelayMs = m_localScanThrottle.nextDelayMs();
+    if (entryDelayMs > 0) {
+        QTimer::singleShot(entryDelayMs, this, &FullSync::scanLocalFiles);
+        return;
+    }
 
-    // Iterate through all files and directories in the sync folder
-    QDirIterator it(m_syncFolder, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
-                    QDirIterator::Subdirectories);
-
-    int count = 0;
-    while (it.hasNext()) {
+    int processedThisSlice = 0;
+    while (m_localScanIterator && m_localScanIterator->hasNext() &&
+           processedThisSlice < LOCAL_SCAN_SLICE_SIZE) {
         {
             QMutexLocker locker(&m_mutex);
             if (m_cancelled) {
@@ -224,7 +242,7 @@ void FullSync::scanLocalFiles() {
             }
         }
 
-        QString path = it.next();
+        QString path = m_localScanIterator->next();
         QFileInfo info(path);
 
         // Skip files matching ignore patterns
@@ -239,21 +257,32 @@ void FullSync::scanLocalFiles() {
         }
 
         queueLocalFile(path, info.isDir());
-        ++count;
+        ++m_localScanQueuedCount;
+        ++processedThisSlice;
 
         // Emit progress every 100 files
-        if (count % 100 == 0) {
-            emit progressUpdated("Scanning local files...", count, 0);
+        if (m_localScanQueuedCount % 100 == 0) {
+            emit progressUpdated("Scanning local files...", m_localScanQueuedCount, 0);
         }
     }
 
+    const bool hasMoreLocalEntries = m_localScanIterator && m_localScanIterator->hasNext();
+
     {
         QMutexLocker locker(&m_mutex);
-        m_localFileCount = count;
+        m_localFileCount = m_localScanQueuedCount;
+        if (!hasMoreLocalEntries) {
+            m_localScanIterator.reset();
+        }
     }
 
-    qInfo() << "Local scan complete:" << count << "files found";
-    emit progressUpdated("Local scan complete", count, count);
+    if (hasMoreLocalEntries) {
+        QTimer::singleShot(m_localScanThrottle.nextDelayMs(), this, &FullSync::scanLocalFiles);
+        return;
+    }
+
+    qInfo() << "Local scan complete:" << m_localScanQueuedCount << "files found";
+    emit progressUpdated("Local scan complete", m_localScanQueuedCount, m_localScanQueuedCount);
 
     if (m_mode == Mode::LocalOnly) {
         finishSync();

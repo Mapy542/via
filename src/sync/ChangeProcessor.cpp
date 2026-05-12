@@ -92,6 +92,8 @@ ChangeProcessor::ChangeProcessor(ChangeQueue* changeQueue, SyncActionQueue* sync
         connect(m_changeQueue, &ChangeQueue::itemsAvailable, this,
                 &ChangeProcessor::onItemsAvailable);
     }
+
+    m_requeueThrottle.setSettings(m_cachedSettings);
 }
 
 ChangeProcessor::~ChangeProcessor() {
@@ -123,6 +125,11 @@ QString ChangeProcessor::syncFolder() const {
 
 void ChangeProcessor::onSyncFolderChanged(const QString& path) {
     setSyncFolder(path);
+}
+
+void ChangeProcessor::reloadSettings() {
+    m_cachedSettings = SyncSettings::load();
+    m_requeueThrottle.setSettings(m_cachedSettings);
 }
 
 QList<ConflictInfo> ChangeProcessor::unresolvedConflicts() const {
@@ -167,7 +174,7 @@ void ChangeProcessor::start() {
         }
     }
 
-    m_cachedSettings = SyncSettings::load();
+    reloadSettings();
     emit stateChanged(State::Running);
 
     qInfo() << "ChangeProcessor started";
@@ -176,7 +183,7 @@ void ChangeProcessor::start() {
 
     // Start processing immediately if there are items
     if (shouldSchedule) {
-        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        scheduleProcessNextChange();
     }
 }
 
@@ -188,6 +195,8 @@ void ChangeProcessor::stop() {
     }
 
     emit stateChanged(State::Stopped);
+
+    m_requeueThrottle.reset();
 
     qInfo() << "ChangeProcessor stopped";
 }
@@ -216,6 +225,8 @@ void ChangeProcessor::pause() {
 
     emit stateChanged(State::Paused);
 
+    m_requeueThrottle.reset();
+
     qInfo() << "ChangeProcessor paused";
 }
 
@@ -235,11 +246,13 @@ void ChangeProcessor::resume() {
 
     emit stateChanged(State::Running);
 
+    reloadSettings();
+
     qInfo() << "ChangeProcessor resumed";
 
     // Resume processing
     if (shouldSchedule) {
-        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        scheduleProcessNextChange();
     }
 }
 
@@ -258,8 +271,12 @@ void ChangeProcessor::onItemsAvailable() {
     }
 
     if (shouldSchedule) {
-        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        scheduleProcessNextChange();
     }
+}
+
+void ChangeProcessor::scheduleProcessNextChange() {
+    QTimer::singleShot(m_requeueThrottle.nextDelayMs(), this, &ChangeProcessor::processNextChange);
 }
 
 bool ChangeProcessor::disarmIfIdleAndCheckForPendingWork() {
@@ -361,7 +378,7 @@ void ChangeProcessor::processNextChange() {
     ChangeQueueItem change = m_changeQueue->dequeue();
     if (!change.isValid()) {
         // Invalid item, continue to next
-        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        scheduleProcessNextChange();
         return;
     }
 
@@ -372,7 +389,7 @@ void ChangeProcessor::processNextChange() {
     // Step 1: Validate the change
     if (!validateChange(change)) {
         emit changeSkipped(change.localPath, "Validation failed, skipping change");
-        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        scheduleProcessNextChange();
         return;
     }
 
@@ -381,7 +398,7 @@ void ChangeProcessor::processNextChange() {
         qWarning() << "Change skipped - unresolved conflict exists:" << change.localPath;
         appendConflictVersionForChange(change);
         emit changeSkipped(change.localPath, "Unresolved conflict exists, queued as new version");
-        QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+        scheduleProcessNextChange();
         return;
     }
 
@@ -408,7 +425,7 @@ void ChangeProcessor::processNextChange() {
     }
 
     // Continue processing next change
-    QTimer::singleShot(0, this, &ChangeProcessor::processNextChange);
+    scheduleProcessNextChange();
 }
 
 bool ChangeProcessor::validateChange(ChangeQueueItem& change) {

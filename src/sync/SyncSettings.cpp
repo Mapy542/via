@@ -15,6 +15,8 @@ constexpr const char* kSyncModeKey = "sync/syncMode";
 constexpr const char* kConflictStrategyKey = "sync/conflictStrategy";
 constexpr const char* kDuplicateNameStrategyKey = "sync/duplicateNameStrategy";
 constexpr const char* kRemotePollIntervalKey = "sync/remotePollIntervalMs";
+constexpr const char* kMirrorDormantTimeKey = "sync/mirrorDormantTimeMs";
+constexpr const char* kMirrorDutyCycleKey = "sync/mirrorDutyCyclePct";
 constexpr const char* kNativeDocModeKey = "advanced/nativeDocMode";
 
 QString syncModeFromLegacy(int value) {
@@ -91,12 +93,34 @@ SyncSettings SyncSettings::load() {
 
     settings.ignorePatterns = defaultIgnorePatterns();
 
-    int pollInterval = qsettings.value(kRemotePollIntervalKey, 30000).toInt();
+    int pollInterval =
+        qsettings.value(kRemotePollIntervalKey, DEFAULT_REMOTE_POLL_INTERVAL_MS).toInt();
     if (pollInterval > 0) {
         settings.remotePollIntervalMs = pollInterval;
     }
 
+    settings.mirrorDormantTimeMs = normalizeMirrorDormantTimeMs(
+        qsettings.value(kMirrorDormantTimeKey, DEFAULT_MIRROR_DORMANT_TIME_MS).toInt());
+    settings.mirrorDutyCyclePercent = normalizeMirrorDutyCyclePercent(
+        qsettings.value(kMirrorDutyCycleKey, DEFAULT_MIRROR_DUTY_CYCLE_PERCENT).toInt());
+
     return settings;
+}
+
+int SyncSettings::normalizeMirrorDormantTimeMs(int value) {
+    if (value < MIN_MIRROR_DORMANT_TIME_MS || value > MAX_MIRROR_DORMANT_TIME_MS) {
+        return DEFAULT_MIRROR_DORMANT_TIME_MS;
+    }
+
+    return value;
+}
+
+int SyncSettings::normalizeMirrorDutyCyclePercent(int value) {
+    if (value < MIN_MIRROR_DUTY_CYCLE_PERCENT || value > MAX_MIRROR_DUTY_CYCLE_PERCENT) {
+        return DEFAULT_MIRROR_DUTY_CYCLE_PERCENT;
+    }
+
+    return value;
 }
 
 QStringList SyncSettings::defaultIgnorePatterns() {

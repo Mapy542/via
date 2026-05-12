@@ -84,6 +84,7 @@ class TestChangeProcessor : public QObject {
     void testPauseWhileIdleDefersQueuedWorkUntilResume();
     void testResumeWithQueuedWorkProcessesOnce();
     void testPauseResumeCyclesDoNotMissOrDuplicateWork();
+    void testMirrorThrottleDelaysQueuedReentry();
     void testValidationFailureDoesNotBreakActiveLoop();
     void testIdleRecheckRearmsWhenWorkArrives();
 
@@ -923,6 +924,33 @@ void TestChangeProcessor::testPauseResumeCyclesDoNotMissOrDuplicateWork() {
 
     QCoreApplication::processEvents();
     QCOMPARE(processedSpy.count(), 1);
+}
+
+void TestChangeProcessor::testMirrorThrottleDelaysQueuedReentry() {
+    QSettings settings;
+    settings.setValue("sync/mirrorDormantTimeMs", 80);
+    settings.setValue("sync/mirrorDutyCyclePct", 1);
+    settings.sync();
+
+    m_processor->start();
+    QTRY_VERIFY(!m_processor->m_processingActive);
+
+    QSignalSpy processedSpy(m_processor, &ChangeProcessor::changeProcessed);
+
+    for (int index = 0; index < 40; ++index) {
+        const QString relPath = QStringLiteral("throttle-%1.txt").arg(index);
+        QFile file(m_tempDir->filePath(relPath));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write("data") > 0);
+        file.close();
+
+        m_changeQueue->enqueue(makeChange(ChangeType::Modify, ChangeOrigin::Local, relPath));
+    }
+
+    QTRY_VERIFY_WITH_TIMEOUT(processedSpy.count() > 0, 200);
+    QTest::qWait(20);
+    QVERIFY(processedSpy.count() < 40);
+    QTRY_COMPARE_WITH_TIMEOUT(processedSpy.count(), 40, 4000);
 }
 
 void TestChangeProcessor::testValidationFailureDoesNotBreakActiveLoop() {

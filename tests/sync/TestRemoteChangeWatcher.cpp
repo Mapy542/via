@@ -169,6 +169,7 @@ class TestRemoteChangeWatcher : public QObject {
     // In-flight dedup
     void testInFlightDedup();
     void testDeferredCheckDuringProcessing();
+    void testMirrorThrottleSlicesLargeRemoteBatch();
 
    private:
     QTemporaryDir* m_tempDir = nullptr;
@@ -869,6 +870,53 @@ void TestRemoteChangeWatcher::testDeferredCheckDuringProcessing() {
     QTRY_VERIFY_WITH_TIMEOUT(m_driveClient->listChangesCallCount >= 2, 500);
     QCOMPARE(m_driveClient->listChangesCallCount, 2);
     QCOMPARE(m_driveClient->lastListChangesToken, QString("new-token"));
+}
+
+void TestRemoteChangeWatcher::testMirrorThrottleSlicesLargeRemoteBatch() {
+    QSettings settings;
+    settings.setValue("sync/mirrorDormantTimeMs", 80);
+    settings.setValue("sync/mirrorDutyCyclePct", 1);
+    settings.sync();
+    m_watcher->reloadSettings();
+
+    QHash<QString, QString> folderMap;
+    folderMap.insert("root-id", "");
+    m_watcher->setFolderIdToPath(folderMap);
+    m_watcher->setChangeToken("old-token");
+
+    QList<DriveChange> changes;
+    for (int index = 0; index < 80; ++index) {
+        DriveFile file;
+        file.id = QStringLiteral("file-%1").arg(index);
+        file.name = QStringLiteral("remote-%1.txt").arg(index);
+        file.mimeType = QStringLiteral("text/plain");
+        file.ownedByMe = true;
+        file.parents = {QStringLiteral("root-id")};
+        file.modifiedTime = QDateTime::currentDateTimeUtc();
+
+        DriveChange change;
+        change.changeId = QStringLiteral("change-%1").arg(index);
+        change.fileId = file.id;
+        change.removed = false;
+        change.file = file;
+        change.time = QDateTime::currentDateTimeUtc();
+        changes.append(change);
+    }
+
+    m_driveClient->setPendingChanges(changes);
+    m_driveClient->setNextToken("new-token");
+
+    QSignalSpy changeSpy(m_watcher, &RemoteChangeWatcher::changeDetected);
+    QSignalSpy tokenSpy(m_watcher, &RemoteChangeWatcher::changeTokenUpdated);
+
+    m_watcher->start();
+
+    QTRY_VERIFY_WITH_TIMEOUT(changeSpy.count() > 0, 200);
+    QTest::qWait(20);
+    QVERIFY(changeSpy.count() < changes.size());
+    QTRY_COMPARE_WITH_TIMEOUT(changeSpy.count(), changes.size(), 4000);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 4000);
+    QCOMPARE(m_watcher->changeToken(), QStringLiteral("new-token"));
 }
 
 QTEST_MAIN(TestRemoteChangeWatcher)

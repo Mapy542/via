@@ -133,6 +133,7 @@ class TestFullSync : public QObject {
     void testLocalScanQueuesFiles();
     void testLocalScanQueuesSubdirectories();
     void testLocalScanEmptyFolder();
+    void testLocalScanThrottleSlicesLargeTree();
 
     // Remote tree building
     void testRemoteTreeSingleFile();
@@ -384,6 +385,34 @@ void TestFullSync::testLocalScanEmptyFolder() {
     auto args = completedSpy.first();
     QCOMPARE(args.at(0).toInt(), 0);  // localCount
     QVERIFY(m_changeQueue->isEmpty());
+}
+
+void TestFullSync::testLocalScanThrottleSlicesLargeTree() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+
+    for (int index = 0; index < 96; ++index) {
+        QFile file(syncDir + "/file" + QString::number(index) + ".txt");
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write("content") > 0);
+        file.close();
+    }
+
+    QSettings settings;
+    settings.setValue("sync/mirrorDormantTimeMs", 80);
+    settings.setValue("sync/mirrorDutyCyclePct", 1);
+    settings.sync();
+
+    m_fullSync->setSyncFolder(syncDir);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSyncLocal();
+
+    QTRY_VERIFY_WITH_TIMEOUT(m_changeQueue->count() > 0, 200);
+    QTest::qWait(20);
+    QVERIFY(m_changeQueue->count() < 96);
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 4000);
+    QCOMPARE(m_changeQueue->count(), 96);
 }
 
 // ---------------------------------------------------------------------------

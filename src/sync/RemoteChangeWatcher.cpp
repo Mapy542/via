@@ -78,6 +78,7 @@ int transientRetryDelayMs(int consecutiveFailures) {
 }  // namespace
 
 const int RemoteChangeWatcher::DEFAULT_POLL_INTERVAL_MS;
+const int RemoteChangeWatcher::CHANGE_BATCH_SLICE_SIZE;
 
 RemoteChangeWatcher::RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveClient* driveClient,
                                          SyncDatabase* syncDatabase, QObject* parent)
@@ -90,6 +91,7 @@ RemoteChangeWatcher::RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveCl
       m_waitingForToken(false) {
     // Configure polling timer
     m_settings = SyncSettings::load();
+    m_batchThrottle.setSettings(m_settings);
     m_pollingTimer->setInterval(m_settings.remotePollIntervalMs > 0
                                     ? m_settings.remotePollIntervalMs
                                     : DEFAULT_POLL_INTERVAL_MS);
@@ -190,6 +192,11 @@ void RemoteChangeWatcher::stop() {
     m_changesRequestInFlight = false;
     m_pendingCheckRequested = false;
     m_consecutiveTransientFailures = 0;
+    m_pendingChanges.clear();
+    m_pendingToken.clear();
+    m_pendingHasMorePages = false;
+    m_pendingChangeIndex = 0;
+    m_batchThrottle.reset();
 
     locker.unlock();
 
@@ -240,6 +247,16 @@ void RemoteChangeWatcher::resume() {
     checkNow();
 }
 
+void RemoteChangeWatcher::reloadSettings() {
+    QMutexLocker locker(&m_mutex);
+
+    m_settings = SyncSettings::load();
+    m_batchThrottle.setSettings(m_settings);
+    if (m_settings.remotePollIntervalMs > 0) {
+        m_pollingTimer->setInterval(m_settings.remotePollIntervalMs);
+    }
+}
+
 void RemoteChangeWatcher::checkNow() {
     QMutexLocker locker(&m_mutex);
 
@@ -286,14 +303,55 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
         if (m_state != State::Running) {
             m_changesRequestInFlight = false;
             m_pendingCheckRequested = false;
+            m_pendingChanges.clear();
+            m_pendingToken.clear();
+            m_pendingHasMorePages = false;
+            m_pendingChangeIndex = 0;
             return;
         }
+
+        m_pendingChanges = changes;
+        m_pendingToken = newToken;
+        m_pendingHasMorePages = hasMorePages;
+        m_pendingChangeIndex = 0;
     }
 
-    // Process each change
-    for (const DriveChange& change : changes) {
-        processChange(change);
+    if (changes.isEmpty()) {
+        finalizePendingChangeBatch();
+        return;
     }
+
+    processPendingChangeBatch();
+}
+
+void RemoteChangeWatcher::processPendingChangeBatch() {
+    const int entryDelayMs = m_batchThrottle.nextDelayMs();
+    if (entryDelayMs > 0) {
+        QTimer::singleShot(entryDelayMs, this, &RemoteChangeWatcher::processPendingChangeBatch);
+        return;
+    }
+
+    int processedCount = 0;
+
+    while (m_pendingChangeIndex < m_pendingChanges.size() &&
+           processedCount < CHANGE_BATCH_SLICE_SIZE) {
+        processChange(m_pendingChanges.at(m_pendingChangeIndex));
+        ++m_pendingChangeIndex;
+        ++processedCount;
+    }
+
+    if (m_pendingChangeIndex < m_pendingChanges.size()) {
+        QTimer::singleShot(m_batchThrottle.nextDelayMs(), this,
+                           &RemoteChangeWatcher::processPendingChangeBatch);
+        return;
+    }
+
+    finalizePendingChangeBatch();
+}
+
+void RemoteChangeWatcher::finalizePendingChangeBatch() {
+    const QString newToken = m_pendingToken;
+    const bool hasMorePages = m_pendingHasMorePages;
 
     bool runDeferredCheck = false;
     bool tokenUpdated = false;
@@ -308,6 +366,10 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
         runDeferredCheck = m_pendingCheckRequested;
         m_pendingCheckRequested = false;
         m_consecutiveTransientFailures = 0;
+        m_pendingChanges.clear();
+        m_pendingToken.clear();
+        m_pendingHasMorePages = false;
+        m_pendingChangeIndex = 0;
     }
 
     emit changeTokenUpdated(newToken);

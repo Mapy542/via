@@ -103,6 +103,8 @@ class TestSettingsWindow : public QObject {
     void testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen();
     void testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisabled();
     void testBothSyncSystemsCanBeDisabled();
+    void testDuplicateNameStrategyLivesInCommonTabAndStaysEditable();
+    void testMirrorPerformanceControlsPersistWithoutRestartPrompt();
     void testNativeDocModeRestartPromptMentionsMirrorRebuild();
 
    private:
@@ -315,6 +317,99 @@ void TestSettingsWindow::testBothSyncSystemsCanBeDisabled() {
 
     QSettings settings;
     QCOMPARE(settings.value("advanced/syncSystem").toString(), QStringLiteral("none"));
+}
+
+void TestSettingsWindow::testDuplicateNameStrategyLivesInCommonTabAndStaysEditable() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* tabWidget = window.findChild<QTabWidget*>();
+    auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
+    auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
+    auto* duplicateNameCombo = window.findChild<QComboBox*>("settingsDuplicateNameCombo");
+
+    QVERIFY(tabWidget != nullptr);
+    QVERIFY(mirrorEnabledCheck != nullptr);
+    QVERIFY(fuseEnabledCheck != nullptr);
+    QVERIFY(duplicateNameCombo != nullptr);
+
+    bool foundCommonTab = false;
+    for (int index = 0; index < tabWidget->count(); ++index) {
+        if (tabWidget->tabText(index) == QStringLiteral("Common")) {
+            foundCommonTab = true;
+            break;
+        }
+    }
+    QVERIFY(foundCommonTab);
+
+    mirrorEnabledCheck->setChecked(false);
+    fuseEnabledCheck->setChecked(false);
+
+    QVERIFY(duplicateNameCombo->isEnabled());
+
+    const int numericSuffixIndex = duplicateNameCombo->findData(QStringLiteral("numeric-suffix"));
+    QVERIFY(numericSuffixIndex >= 0);
+    duplicateNameCombo->setCurrentIndex(numericSuffixIndex);
+
+    window.saveSettings();
+
+    {
+        QSettings settings;
+        QCOMPARE(settings.value("sync/duplicateNameStrategy").toString(),
+                 QStringLiteral("numeric-suffix"));
+    }
+
+    SettingsWindow reopenedWindow(nullptr, nullptr);
+    auto* reopenedDuplicateNameCombo =
+        reopenedWindow.findChild<QComboBox*>("settingsDuplicateNameCombo");
+
+    QVERIFY(reopenedDuplicateNameCombo != nullptr);
+    QCOMPARE(reopenedDuplicateNameCombo->currentData().toString(),
+             QStringLiteral("numeric-suffix"));
+}
+
+void TestSettingsWindow::testMirrorPerformanceControlsPersistWithoutRestartPrompt() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* dormantTimeSpin = window.findChild<QSpinBox*>("settingsMirrorDormantTimeSpin");
+    auto* dutyCycleSpin = window.findChild<QSpinBox*>("settingsMirrorDutyCycleSpin");
+    auto* applyButton = window.findChild<QPushButton*>("settingsApplyButton");
+
+    QVERIFY(dormantTimeSpin != nullptr);
+    QVERIFY(dutyCycleSpin != nullptr);
+    QVERIFY(applyButton != nullptr);
+
+    window.show();
+    QTRY_VERIFY(window.isVisible());
+
+    dormantTimeSpin->setValue(250);
+    dutyCycleSpin->setValue(35);
+
+    bool promptSeen = false;
+    QTimer::singleShot(0, [&promptSeen]() {
+        if (auto* messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            promptSeen = true;
+            messageBox->reject();
+        }
+    });
+
+    applyButton->click();
+
+    QVERIFY(!promptSeen);
+
+    {
+        QSettings settings;
+        QCOMPARE(settings.value("sync/mirrorDormantTimeMs").toInt(), 250);
+        QCOMPARE(settings.value("sync/mirrorDutyCyclePct").toInt(), 35);
+    }
+
+    SettingsWindow reopenedWindow(nullptr, nullptr);
+    auto* reopenedDormantTimeSpin =
+        reopenedWindow.findChild<QSpinBox*>("settingsMirrorDormantTimeSpin");
+    auto* reopenedDutyCycleSpin =
+        reopenedWindow.findChild<QSpinBox*>("settingsMirrorDutyCycleSpin");
+
+    QVERIFY(reopenedDormantTimeSpin != nullptr);
+    QVERIFY(reopenedDutyCycleSpin != nullptr);
+    QCOMPARE(reopenedDormantTimeSpin->value(), 250);
+    QCOMPARE(reopenedDutyCycleSpin->value(), 35);
 }
 
 void TestSettingsWindow::testNativeDocModeRestartPromptMentionsMirrorRebuild() {

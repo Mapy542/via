@@ -119,6 +119,7 @@ class SettingsWindow : public QDialog {
     void setupUi();
     void setupLoginTab();
     void setupMirrorTab();
+    void setupCommonTab();
     void setupFuseTab();
     void setupMiscTab();
     void updateStorageInfo();
@@ -158,8 +159,13 @@ class SettingsWindow : public QDialog {
     QLineEdit* m_syncFolderEdit;
     QPushButton* m_browseFolderButton;
     QComboBox* m_syncModeCombo;
-    QComboBox* m_duplicateNameCombo;
     QComboBox* m_conflictResolutionCombo;
+    QSpinBox* m_mirrorDormantTimeSpin;
+    QSpinBox* m_mirrorDutyCycleSpin;
+
+    // Common tab widgets
+    QWidget* m_commonTab;
+    QComboBox* m_duplicateNameCombo;
 
     // Fuse tab widgets
     QWidget* m_fuseTab;

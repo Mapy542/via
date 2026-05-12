@@ -21,6 +21,7 @@
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
 #include "sync/RuntimePauseController.h"
+#include "sync/SyncSettings.h"
 #include "utils/AutostartManager.h"
 
 namespace {
@@ -118,11 +119,13 @@ void SettingsWindow::setupUi() {
 
     setupLoginTab();
     setupMirrorTab();
+    setupCommonTab();
     setupFuseTab();
     setupMiscTab();
 
     m_tabWidget->addTab(m_loginTab, "Login");
     m_tabWidget->addTab(m_mirrorTab, "Mirror");
+    m_tabWidget->addTab(m_commonTab, "Common");
     m_tabWidget->addTab(m_fuseTab, "Fuse");
     m_tabWidget->addTab(m_miscTab, "Misc");
 
@@ -411,33 +414,6 @@ void SettingsWindow::setupMirrorTab() {
 
     layout->addWidget(syncModeGroup);
 
-    QGroupBox* duplicateNamesGroup = new QGroupBox("Duplicate Remote Names", m_mirrorTab);
-    QVBoxLayout* duplicateNamesLayout = new QVBoxLayout(duplicateNamesGroup);
-
-    QLabel* duplicateNamesLabel =
-        new QLabel("Choose how Via names duplicate Drive files within one folder:", m_mirrorTab);
-    duplicateNamesLayout->addWidget(duplicateNamesLabel);
-
-    QHBoxLayout* duplicateComboLayout = new QHBoxLayout();
-    m_duplicateNameCombo = new QComboBox(m_mirrorTab);
-    m_duplicateNameCombo->addItem("Append Drive file ID (example: report_abcd1234.txt)",
-                                  "file-id-suffix");
-    m_duplicateNameCombo->addItem("Append numbered suffix (example: report (1).txt)",
-                                  "numeric-suffix");
-    duplicateComboLayout->addWidget(m_duplicateNameCombo);
-    duplicateComboLayout->addStretch();
-    duplicateNamesLayout->addLayout(duplicateComboLayout);
-
-    QLabel* duplicateInfoLabel = new QLabel(
-        "<i>The first file to claim a name keeps the original path. Additional duplicates are "
-        "given a unique local name when they are written locally.</i>",
-        m_mirrorTab);
-    duplicateInfoLabel->setWordWrap(true);
-    duplicateInfoLabel->setTextFormat(Qt::RichText);
-    duplicateNamesLayout->addWidget(duplicateInfoLabel);
-
-    layout->addWidget(duplicateNamesGroup);
-
     // Conflict resolution group
     QGroupBox* conflictGroup = new QGroupBox("Conflict Resolution", m_mirrorTab);
     QVBoxLayout* conflictLayout = new QVBoxLayout(conflictGroup);
@@ -469,11 +445,82 @@ void SettingsWindow::setupMirrorTab() {
 
     layout->addWidget(conflictGroup);
 
+    QGroupBox* performanceGroup = new QGroupBox("Performance", m_mirrorTab);
+    QFormLayout* performanceLayout = new QFormLayout(performanceGroup);
+
+    m_mirrorDormantTimeSpin = new QSpinBox(m_mirrorTab);
+    m_mirrorDormantTimeSpin->setObjectName("settingsMirrorDormantTimeSpin");
+    m_mirrorDormantTimeSpin->setRange(SyncSettings::MIN_MIRROR_DORMANT_TIME_MS,
+                                      SyncSettings::MAX_MIRROR_DORMANT_TIME_MS);
+    m_mirrorDormantTimeSpin->setSingleStep(50);
+    m_mirrorDormantTimeSpin->setSuffix(" ms");
+    m_mirrorDormantTimeSpin->setSpecialValueText("Off");
+    m_mirrorDormantTimeSpin->setToolTip(
+        "How long mirror sync stays dormant after using its active budget.");
+    performanceLayout->addRow("Dormant time:", m_mirrorDormantTimeSpin);
+
+    m_mirrorDutyCycleSpin = new QSpinBox(m_mirrorTab);
+    m_mirrorDutyCycleSpin->setObjectName("settingsMirrorDutyCycleSpin");
+    m_mirrorDutyCycleSpin->setRange(SyncSettings::MIN_MIRROR_DUTY_CYCLE_PERCENT,
+                                    SyncSettings::MAX_MIRROR_DUTY_CYCLE_PERCENT);
+    m_mirrorDutyCycleSpin->setSuffix(" %");
+    m_mirrorDutyCycleSpin->setToolTip("How much worker time mirror sync can use before it yields.");
+    performanceLayout->addRow("Duty cycle:", m_mirrorDutyCycleSpin);
+
+    QLabel* performanceInfoLabel = new QLabel(
+        "<i>Use a non-zero dormant time and lower duty cycle to reduce sustained mirror-sync "
+        "CPU and disk usage during large reconnaissance passes. 100% duty cycle preserves the "
+        "current always-on behavior.</i>",
+        m_mirrorTab);
+    performanceInfoLabel->setObjectName("settingsMirrorPerformanceInfoLabel");
+    performanceInfoLabel->setWordWrap(true);
+    performanceInfoLabel->setTextFormat(Qt::RichText);
+    performanceLayout->addRow(performanceInfoLabel);
+
+    layout->addWidget(performanceGroup);
+
     // Connect buttons
     connect(m_browseFolderButton, &QPushButton::clicked, this,
             &SettingsWindow::onBrowseFolderClicked);
     connect(m_mirrorEnabledCheck, &QCheckBox::toggled, this,
             &SettingsWindow::updateSyncSystemWidgets);
+}
+
+void SettingsWindow::setupCommonTab() {
+    m_commonTab = new QWidget();
+    QVBoxLayout* layout = new QVBoxLayout(m_commonTab);
+
+    QGroupBox* duplicateNamesGroup = new QGroupBox("Duplicate File Endings", m_commonTab);
+    QVBoxLayout* duplicateNamesLayout = new QVBoxLayout(duplicateNamesGroup);
+
+    QLabel* duplicateNamesLabel = new QLabel(
+        "Choose how Via renames duplicate Drive files when the original local name is already "
+        "claimed:",
+        m_commonTab);
+    duplicateNamesLabel->setWordWrap(true);
+    duplicateNamesLayout->addWidget(duplicateNamesLabel);
+
+    QHBoxLayout* duplicateComboLayout = new QHBoxLayout();
+    m_duplicateNameCombo = new QComboBox(m_commonTab);
+    m_duplicateNameCombo->setObjectName("settingsDuplicateNameCombo");
+    m_duplicateNameCombo->addItem("Append Drive file ID (example: report_abcd1234.txt)",
+                                  "file-id-suffix");
+    m_duplicateNameCombo->addItem("Append numbered suffix (example: report (1).txt)",
+                                  "numeric-suffix");
+    duplicateComboLayout->addWidget(m_duplicateNameCombo);
+    duplicateComboLayout->addStretch();
+    duplicateNamesLayout->addLayout(duplicateComboLayout);
+
+    QLabel* duplicateInfoLabel = new QLabel(
+        "<i>This naming rule applies anywhere Via materializes duplicate Drive files, including "
+        "mirror sync and the FUSE view.</i>",
+        m_commonTab);
+    duplicateInfoLabel->setWordWrap(true);
+    duplicateInfoLabel->setTextFormat(Qt::RichText);
+    duplicateNamesLayout->addWidget(duplicateInfoLabel);
+
+    layout->addWidget(duplicateNamesGroup);
+    layout->addStretch();
 }
 
 void SettingsWindow::setupFuseTab() {
@@ -676,7 +723,6 @@ void SettingsWindow::updateSyncSystemWidgets() {
     m_syncFolderEdit->setEnabled(mirrorEnabled);
     m_browseFolderButton->setEnabled(mirrorEnabled);
     m_syncModeCombo->setEnabled(mirrorEnabled);
-    m_duplicateNameCombo->setEnabled(mirrorEnabled);
     m_conflictResolutionCombo->setEnabled(mirrorEnabled);
 
     m_fuseMountPointEdit->setEnabled(fuseEnabled);
@@ -782,6 +828,13 @@ void SettingsWindow::loadSettings() {
         setComboById(m_conflictResolutionCombo, "keep-both");
     }
 
+    m_mirrorDormantTimeSpin->setValue(SyncSettings::normalizeMirrorDormantTimeMs(
+        m_settings.value("sync/mirrorDormantTimeMs", SyncSettings::DEFAULT_MIRROR_DORMANT_TIME_MS)
+            .toInt()));
+    m_mirrorDutyCycleSpin->setValue(SyncSettings::normalizeMirrorDutyCyclePercent(
+        m_settings.value("sync/mirrorDutyCyclePct", SyncSettings::DEFAULT_MIRROR_DUTY_CYCLE_PERCENT)
+            .toInt()));
+
     // Misc settings
     m_startOnLoginCheck->setChecked(m_settings.value("advanced/startOnLogin", false).toBool());
     m_showNotificationsCheck->setChecked(
@@ -835,6 +888,10 @@ void SettingsWindow::saveSettings() {
                         m_duplicateNameCombo->currentData().toString());
     m_settings.setValue("sync/conflictStrategy",
                         m_conflictResolutionCombo->currentData().toString());
+    m_settings.setValue("sync/mirrorDormantTimeMs", SyncSettings::normalizeMirrorDormantTimeMs(
+                                                        m_mirrorDormantTimeSpin->value()));
+    m_settings.setValue("sync/mirrorDutyCyclePct", SyncSettings::normalizeMirrorDutyCyclePercent(
+                                                       m_mirrorDutyCycleSpin->value()));
 
     // Misc settings
     m_settings.setValue("advanced/startOnLogin", m_startOnLoginCheck->isChecked());

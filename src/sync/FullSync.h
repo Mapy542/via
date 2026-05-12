@@ -17,13 +17,16 @@
 #include <QObject>
 #include <QSet>
 #include <atomic>
+#include <memory>
 
 #include "SyncSettings.h"
+#include "SyncWorkThrottle.h"
 
 class ChangeQueue;
 class SyncDatabase;
 class GoogleDriveClient;
 class ChangeProcessor;
+class QDirIterator;
 struct DriveFile;
 
 /**
@@ -258,7 +261,11 @@ class FullSync : public QObject {
     int m_localFileCount;
     int m_remoteFileCount;
     int m_orphanCount;
+    int m_localScanQueuedCount = 0;
     QSet<QString> m_discoveredLocalPaths;  ///< Set of local paths discovered to avoid duplicates
+    std::unique_ptr<QDirIterator> m_localScanIterator;
+    SyncWorkThrottle m_localScanThrottle;
+    static const int LOCAL_SCAN_SLICE_SIZE = 32;
 
     // Remote file discovery state
     QList<DriveFile> m_allRemoteItems;  ///< All remote files discovered

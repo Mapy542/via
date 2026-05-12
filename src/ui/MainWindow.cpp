@@ -484,6 +484,10 @@ void MainWindow::onSettingsClicked() {
                 &MainWindow::clearCacheRequested);
         connect(m_settingsWindow, &SettingsWindow::restartRequested, this,
                 &MainWindow::restartRequested);
+        if (m_mirrorSyncRuntime) {
+            connect(m_settingsWindow, &SettingsWindow::settingsChanged, m_mirrorSyncRuntime,
+                    &MirrorSyncRuntime::reloadSyncSettings);
+        }
     }
     m_settingsWindow->show();
     m_settingsWindow->raise();

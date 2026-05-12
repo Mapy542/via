@@ -17,6 +17,7 @@
 #include <QSet>
 
 #include "SyncSettings.h"
+#include "SyncWorkThrottle.h"
 
 class ChangeQueue;
 class SyncActionQueue;
@@ -239,6 +240,11 @@ class ChangeProcessor : public QObject {
      */
     void onSyncFolderChanged(const QString& path);
 
+    /**
+     * @brief Reload cached sync settings for live mirror updates
+     */
+    void reloadSettings();
+
    signals:
     /**
      * @brief Emitted when processor state changes
@@ -360,6 +366,11 @@ class ChangeProcessor : public QObject {
     ConflictInfo storeManualConflict(const ConflictInfo& conflict);
 
     /**
+     * @brief Schedule the next processing pass using the configured throttle
+     */
+    void scheduleProcessNextChange();
+
+    /**
      * @brief Append a new conflict version for an incoming change
      * @param change Incoming change for a conflicted path
      */
@@ -386,6 +397,7 @@ class ChangeProcessor : public QObject {
     // Configuration
     ConflictResolutionStrategy m_conflictStrategy;
     SyncSettings m_cachedSettings;
+    SyncWorkThrottle m_requeueThrottle;
     QString m_syncFolder;
 
     // Files currently being processed by Sync Action Thread
