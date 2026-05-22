@@ -478,6 +478,7 @@ void SettingsWindow::setupMirrorTab() {
     performanceLayout->addRow(performanceInfoLabel);
 
     layout->addWidget(performanceGroup);
+    layout->addStretch();
 
     // Connect buttons
     connect(m_browseFolderButton, &QPushButton::clicked, this,
@@ -520,6 +521,39 @@ void SettingsWindow::setupCommonTab() {
     duplicateNamesLayout->addWidget(duplicateInfoLabel);
 
     layout->addWidget(duplicateNamesGroup);
+
+    QGroupBox* nativeDocGroup = new QGroupBox("Native Documents", m_commonTab);
+    QVBoxLayout* nativeDocLayout = new QVBoxLayout(nativeDocGroup);
+
+    QLabel* nativeDocLabel = new QLabel(
+        "Choose how Google-native docs are materialized locally:", m_commonTab);
+    nativeDocLabel->setObjectName("settingsNativeDocModeLabel");
+    nativeDocLabel->setWordWrap(true);
+    nativeDocLayout->addWidget(nativeDocLabel);
+
+    QHBoxLayout* nativeDocComboLayout = new QHBoxLayout();
+    m_nativeDocModeCombo = new QComboBox(m_commonTab);
+    m_nativeDocModeCombo->setObjectName("settingsNativeDocModeCombo");
+    m_nativeDocModeCombo->addItem("Hide (don't materialize locally)", "hide");
+    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)",
+                                  "browser-shortcut");
+    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)",
+                                  "open-document");
+    m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
+    nativeDocComboLayout->addWidget(m_nativeDocModeCombo);
+    nativeDocComboLayout->addStretch();
+    nativeDocLayout->addLayout(nativeDocComboLayout);
+
+    QLabel* nativeDocInfoLabel = new QLabel(
+        "<i>This shared setting applies to mirror sync and FUSE. Native-document shortcuts "
+        "and exports are always materialized read-only.</i>",
+        m_commonTab);
+    nativeDocInfoLabel->setObjectName("settingsNativeDocModeInfoLabel");
+    nativeDocInfoLabel->setWordWrap(true);
+    nativeDocInfoLabel->setTextFormat(Qt::RichText);
+    nativeDocLayout->addWidget(nativeDocInfoLabel);
+
+    layout->addWidget(nativeDocGroup);
     layout->addStretch();
 }
 
@@ -531,8 +565,8 @@ void SettingsWindow::setupFuseTab() {
     m_fuseEnabledCheck->setObjectName("settingsFuseEnabledCheck");
     layout->addWidget(m_fuseEnabledCheck);
 
-    QGroupBox* fuseGroup = new QGroupBox("Virtual File System (FUSE)", m_fuseTab);
-    QVBoxLayout* fuseLayout = new QVBoxLayout(fuseGroup);
+    QGroupBox* mountGroup = new QGroupBox("Mount Point", m_fuseTab);
+    QVBoxLayout* mountGroupLayout = new QVBoxLayout(mountGroup);
 
     QHBoxLayout* mountLayout = new QHBoxLayout();
     mountLayout->addWidget(new QLabel("Mount point:", m_fuseTab));
@@ -540,7 +574,12 @@ void SettingsWindow::setupFuseTab() {
     m_fuseMountPointEdit->setPlaceholderText(QDir::homePath() + "/GoogleDriveFuse");
     m_fuseMountPointEdit->setEnabled(false);
     mountLayout->addWidget(m_fuseMountPointEdit);
-    fuseLayout->addLayout(mountLayout);
+    mountGroupLayout->addLayout(mountLayout);
+
+    layout->addWidget(mountGroup);
+
+    QGroupBox* cacheGroup = new QGroupBox("Cache and Maintenance", m_fuseTab);
+    QVBoxLayout* cacheGroupLayout = new QVBoxLayout(cacheGroup);
 
     QHBoxLayout* cacheSizeLayout = new QHBoxLayout();
     QLabel* cacheSizeLabel = new QLabel("Evictable FUSE cache target:", m_fuseTab);
@@ -558,7 +597,7 @@ void SettingsWindow::setupFuseTab() {
     m_cacheUsageLabel->setToolTip(fuseCacheTooltip());
     cacheSizeLayout->addWidget(m_cacheUsageLabel);
     cacheSizeLayout->addStretch();
-    fuseLayout->addLayout(cacheSizeLayout);
+    cacheGroupLayout->addLayout(cacheSizeLayout);
 
     QLabel* cacheInfoLabel = new QLabel(
         "<i>This target applies only to evictable cached files. Pending uploads are stored "
@@ -567,40 +606,16 @@ void SettingsWindow::setupFuseTab() {
         m_fuseTab);
     cacheInfoLabel->setWordWrap(true);
     cacheInfoLabel->setTextFormat(Qt::RichText);
-    fuseLayout->addWidget(cacheInfoLabel);
-
-    QHBoxLayout* nativeDocLayout = new QHBoxLayout();
-    QLabel* nativeDocLabel = new QLabel("Google-native docs representation:", m_fuseTab);
-    nativeDocLabel->setObjectName("settingsNativeDocModeLabel");
-    nativeDocLayout->addWidget(nativeDocLabel);
-    m_nativeDocModeCombo = new QComboBox(m_fuseTab);
-    m_nativeDocModeCombo->setObjectName("settingsNativeDocModeCombo");
-    m_nativeDocModeCombo->addItem("Hide (don't materialize locally)", "hide");
-    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)", "browser-shortcut");
-    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)", "open-document");
-    m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
-    m_nativeDocModeCombo->setEnabled(false);
-    nativeDocLayout->addWidget(m_nativeDocModeCombo);
-    nativeDocLayout->addStretch();
-    fuseLayout->addLayout(nativeDocLayout);
-
-    QLabel* nativeDocInfoLabel = new QLabel(
-        "<i>This setting applies to mirror sync and FUSE. Native-document shortcuts and "
-        "exports are always materialized read-only.</i>",
-        m_fuseTab);
-    nativeDocInfoLabel->setObjectName("settingsNativeDocModeInfoLabel");
-    nativeDocInfoLabel->setWordWrap(true);
-    nativeDocInfoLabel->setTextFormat(Qt::RichText);
-    fuseLayout->addWidget(nativeDocInfoLabel);
+    cacheGroupLayout->addWidget(cacheInfoLabel);
 
     m_clearCacheButton = new QPushButton("Restart and Clear Cache", m_fuseTab);
     m_clearCacheButton->setEnabled(false);
     QHBoxLayout* clearLayout = new QHBoxLayout();
     clearLayout->addWidget(m_clearCacheButton);
     clearLayout->addStretch();
-    fuseLayout->addLayout(clearLayout);
+    cacheGroupLayout->addLayout(clearLayout);
 
-    layout->addWidget(fuseGroup);
+    layout->addWidget(cacheGroup);
     layout->addStretch();
 
     connect(m_fuseEnabledCheck, &QCheckBox::toggled, this,
@@ -718,7 +733,6 @@ void SettingsWindow::setCurrentSyncSystem(const QString& syncSystem) {
 void SettingsWindow::updateSyncSystemWidgets() {
     const bool mirrorEnabled = m_mirrorEnabledCheck && m_mirrorEnabledCheck->isChecked();
     const bool fuseEnabled = m_fuseEnabledCheck && m_fuseEnabledCheck->isChecked();
-    const bool nativeDocEnabled = mirrorEnabled || fuseEnabled;
 
     m_syncFolderEdit->setEnabled(mirrorEnabled);
     m_browseFolderButton->setEnabled(mirrorEnabled);
@@ -730,7 +744,7 @@ void SettingsWindow::updateSyncSystemWidgets() {
     m_cacheUsageLabel->setEnabled(fuseEnabled);
     m_clearCacheButton->setEnabled(fuseEnabled);
 
-    m_nativeDocModeCombo->setEnabled(nativeDocEnabled);
+    m_nativeDocModeCombo->setEnabled(true);
 }
 
 void SettingsWindow::captureRestartSettingSnapshots() {

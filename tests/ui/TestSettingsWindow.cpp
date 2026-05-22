@@ -4,6 +4,7 @@
  */
 
 #include <QApplication>
+#include <QGroupBox>
 #include <QLabel>
 #include <QMessageBox>
 #include <QSettings>
@@ -89,6 +90,37 @@ class FakeDriveClientForSettingsWindow : public GoogleDriveClient {
     FailureMode m_failureMode = FailureMode::Auth;
 };
 
+namespace {
+QWidget* findTabPage(QTabWidget* tabWidget, const QString& title) {
+    if (!tabWidget) {
+        return nullptr;
+    }
+
+    for (int index = 0; index < tabWidget->count(); ++index) {
+        if (tabWidget->tabText(index) == title) {
+            return tabWidget->widget(index);
+        }
+    }
+
+    return nullptr;
+}
+
+QString owningTabText(QTabWidget* tabWidget, QWidget* widget) {
+    if (!tabWidget || !widget) {
+        return QString();
+    }
+
+    for (QWidget* current = widget; current != nullptr; current = current->parentWidget()) {
+        const int index = tabWidget->indexOf(current);
+        if (index >= 0) {
+            return tabWidget->tabText(index);
+        }
+    }
+
+    return QString();
+}
+}  // namespace
+
 class TestSettingsWindow : public QObject {
     Q_OBJECT
 
@@ -101,11 +133,14 @@ class TestSettingsWindow : public QObject {
     void testAutoPauseCheckboxPersistsAndUpdatesController();
     void testWindowStaysUsableWhenAboutInfoAuthFailsOnOpen();
     void testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen();
+    void testMirrorTabEndsWithStretchToAvoidCompression();
     void testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisabled();
     void testBothSyncSystemsCanBeDisabled();
-    void testDuplicateNameStrategyLivesInCommonTabAndStaysEditable();
+    void testCommonTabOwnsSharedSettingsAndKeepsThemEditable();
+    void testFuseTabSplitsSettingsIntoMountAndCacheGroups();
     void testMirrorPerformanceControlsPersistWithoutRestartPrompt();
     void testNativeDocModeRestartPromptMentionsMirrorRebuild();
+    void testNativeDocModeRestartPromptDefersWhenSyncSystemsAreDisabled();
 
    private:
     static void acceptNextMessageBox();
@@ -279,13 +314,33 @@ void TestSettingsWindow::testWindowStaysUsableWhenAboutInfoNonAuthFailsOnOpen() 
     QVERIFY(clientIdEdit->isEnabled());
 }
 
+void TestSettingsWindow::testMirrorTabEndsWithStretchToAvoidCompression() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* tabWidget = window.findChild<QTabWidget*>();
+
+    QVERIFY(tabWidget != nullptr);
+
+    auto* mirrorTab = findTabPage(tabWidget, QStringLiteral("Mirror"));
+    QVERIFY(mirrorTab != nullptr);
+
+    auto* mirrorLayout = qobject_cast<QVBoxLayout*>(mirrorTab->layout());
+    QVERIFY(mirrorLayout != nullptr);
+    QVERIFY(mirrorLayout->count() > 0);
+
+    auto* lastItem = mirrorLayout->itemAt(mirrorLayout->count() - 1);
+    QVERIFY(lastItem != nullptr);
+    QVERIFY(lastItem->spacerItem() != nullptr);
+}
+
 void TestSettingsWindow::testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisabled() {
     SettingsWindow window(nullptr, nullptr);
+    auto* tabWidget = window.findChild<QTabWidget*>();
     auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
     auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
     auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
     auto* nativeDocInfoLabel = window.findChild<QLabel*>("settingsNativeDocModeInfoLabel");
 
+    QVERIFY(tabWidget != nullptr);
     QVERIFY(mirrorEnabledCheck != nullptr);
     QVERIFY(fuseEnabledCheck != nullptr);
     QVERIFY(nativeDocCombo != nullptr);
@@ -294,6 +349,7 @@ void TestSettingsWindow::testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisa
     mirrorEnabledCheck->setChecked(true);
     fuseEnabledCheck->setChecked(false);
 
+    QCOMPARE(owningTabText(tabWidget, nativeDocCombo), QStringLiteral("Common"));
     QVERIFY(nativeDocCombo->isEnabled());
     QVERIFY(nativeDocInfoLabel->text().contains(QStringLiteral("mirror sync and FUSE")));
 }
@@ -311,43 +367,51 @@ void TestSettingsWindow::testBothSyncSystemsCanBeDisabled() {
     mirrorEnabledCheck->setChecked(false);
     fuseEnabledCheck->setChecked(false);
 
-    QVERIFY(!nativeDocCombo->isEnabled());
+    QVERIFY(nativeDocCombo->isEnabled());
+
+    const int browserShortcutIndex = nativeDocCombo->findData(QStringLiteral("browser-shortcut"));
+    QVERIFY(browserShortcutIndex >= 0);
+    nativeDocCombo->setCurrentIndex(browserShortcutIndex);
 
     window.saveSettings();
 
     QSettings settings;
     QCOMPARE(settings.value("advanced/syncSystem").toString(), QStringLiteral("none"));
+    QCOMPARE(settings.value("advanced/nativeDocMode").toString(),
+             QStringLiteral("browser-shortcut"));
 }
 
-void TestSettingsWindow::testDuplicateNameStrategyLivesInCommonTabAndStaysEditable() {
+void TestSettingsWindow::testCommonTabOwnsSharedSettingsAndKeepsThemEditable() {
     SettingsWindow window(nullptr, nullptr);
     auto* tabWidget = window.findChild<QTabWidget*>();
     auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
     auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
     auto* duplicateNameCombo = window.findChild<QComboBox*>("settingsDuplicateNameCombo");
+    auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
 
     QVERIFY(tabWidget != nullptr);
     QVERIFY(mirrorEnabledCheck != nullptr);
     QVERIFY(fuseEnabledCheck != nullptr);
     QVERIFY(duplicateNameCombo != nullptr);
+    QVERIFY(nativeDocCombo != nullptr);
 
-    bool foundCommonTab = false;
-    for (int index = 0; index < tabWidget->count(); ++index) {
-        if (tabWidget->tabText(index) == QStringLiteral("Common")) {
-            foundCommonTab = true;
-            break;
-        }
-    }
-    QVERIFY(foundCommonTab);
+    QVERIFY(findTabPage(tabWidget, QStringLiteral("Common")) != nullptr);
+    QCOMPARE(owningTabText(tabWidget, duplicateNameCombo), QStringLiteral("Common"));
+    QCOMPARE(owningTabText(tabWidget, nativeDocCombo), QStringLiteral("Common"));
 
     mirrorEnabledCheck->setChecked(false);
     fuseEnabledCheck->setChecked(false);
 
     QVERIFY(duplicateNameCombo->isEnabled());
+    QVERIFY(nativeDocCombo->isEnabled());
 
     const int numericSuffixIndex = duplicateNameCombo->findData(QStringLiteral("numeric-suffix"));
     QVERIFY(numericSuffixIndex >= 0);
     duplicateNameCombo->setCurrentIndex(numericSuffixIndex);
+
+    const int openDocumentIndex = nativeDocCombo->findData(QStringLiteral("open-document"));
+    QVERIFY(openDocumentIndex >= 0);
+    nativeDocCombo->setCurrentIndex(openDocumentIndex);
 
     window.saveSettings();
 
@@ -355,15 +419,44 @@ void TestSettingsWindow::testDuplicateNameStrategyLivesInCommonTabAndStaysEditab
         QSettings settings;
         QCOMPARE(settings.value("sync/duplicateNameStrategy").toString(),
                  QStringLiteral("numeric-suffix"));
+        QCOMPARE(settings.value("advanced/nativeDocMode").toString(),
+                 QStringLiteral("open-document"));
     }
 
     SettingsWindow reopenedWindow(nullptr, nullptr);
     auto* reopenedDuplicateNameCombo =
         reopenedWindow.findChild<QComboBox*>("settingsDuplicateNameCombo");
+    auto* reopenedNativeDocCombo =
+        reopenedWindow.findChild<QComboBox*>("settingsNativeDocModeCombo");
 
     QVERIFY(reopenedDuplicateNameCombo != nullptr);
+    QVERIFY(reopenedNativeDocCombo != nullptr);
     QCOMPARE(reopenedDuplicateNameCombo->currentData().toString(),
              QStringLiteral("numeric-suffix"));
+    QCOMPARE(reopenedNativeDocCombo->currentData().toString(),
+             QStringLiteral("open-document"));
+}
+
+void TestSettingsWindow::testFuseTabSplitsSettingsIntoMountAndCacheGroups() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* tabWidget = window.findChild<QTabWidget*>();
+
+    QVERIFY(tabWidget != nullptr);
+
+    auto* fuseTab = findTabPage(tabWidget, QStringLiteral("Fuse"));
+    QVERIFY(fuseTab != nullptr);
+
+    const QList<QGroupBox*> groupBoxes =
+        fuseTab->findChildren<QGroupBox*>(QString(), Qt::FindDirectChildrenOnly);
+    QStringList groupTitles;
+    for (auto* groupBox : groupBoxes) {
+        groupTitles.append(groupBox->title());
+    }
+
+    QCOMPARE(groupBoxes.size(), 2);
+    QVERIFY(groupTitles.contains(QStringLiteral("Mount Point")));
+    QVERIFY(groupTitles.contains(QStringLiteral("Cache and Maintenance")));
+    QVERIFY(!groupTitles.contains(QStringLiteral("Virtual File System (FUSE)")));
 }
 
 void TestSettingsWindow::testMirrorPerformanceControlsPersistWithoutRestartPrompt() {
@@ -453,6 +546,50 @@ void TestSettingsWindow::testNativeDocModeRestartPromptMentionsMirrorRebuild() {
     QVERIFY(promptInfo.contains(QStringLiteral("native-document artifacts")));
     QVERIFY(promptInfo.contains(QStringLiteral("sync folder")));
     QVERIFY(promptInfo.contains(QStringLiteral("next launch")));
+}
+
+void TestSettingsWindow::testNativeDocModeRestartPromptDefersWhenSyncSystemsAreDisabled() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
+    auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
+    auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
+    auto* applyButton = window.findChild<QPushButton*>("settingsApplyButton");
+
+    QVERIFY(mirrorEnabledCheck != nullptr);
+    QVERIFY(fuseEnabledCheck != nullptr);
+    QVERIFY(nativeDocCombo != nullptr);
+    QVERIFY(applyButton != nullptr);
+
+    window.show();
+    QTRY_VERIFY(window.isVisible());
+
+    mirrorEnabledCheck->setChecked(false);
+    fuseEnabledCheck->setChecked(false);
+
+    QVERIFY(nativeDocCombo->isEnabled());
+
+    const int textIndex = nativeDocCombo->findData(QStringLiteral("text"));
+    QVERIFY(textIndex >= 0);
+    nativeDocCombo->setCurrentIndex(textIndex);
+
+    bool promptSeen = false;
+    QString promptText;
+    QString promptInfo;
+    QTimer::singleShot(0, [&promptSeen, &promptText, &promptInfo]() {
+        if (auto* messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            promptSeen = true;
+            promptText = messageBox->text();
+            promptInfo = messageBox->informativeText();
+            messageBox->reject();
+        }
+    });
+
+    applyButton->click();
+
+    QVERIFY(promptSeen);
+    QVERIFY(promptText.contains(QStringLiteral("restart to take effect"), Qt::CaseInsensitive));
+    QVERIFY(promptInfo.contains(
+        QStringLiteral("next time mirror or FUSE sync is enabled"), Qt::CaseInsensitive));
 }
 
 QTEST_MAIN(TestSettingsWindow)

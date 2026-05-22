@@ -166,6 +166,7 @@ class SettingsWindow : public QDialog {
     // Common tab widgets
     QWidget* m_commonTab;
     QComboBox* m_duplicateNameCombo;
+    QComboBox* m_nativeDocModeCombo;
 
     // Fuse tab widgets
     QWidget* m_fuseTab;
@@ -173,7 +174,6 @@ class SettingsWindow : public QDialog {
     QLineEdit* m_fuseMountPointEdit;
     QSpinBox* m_cacheSize;
     QLabel* m_cacheUsageLabel;
-    QComboBox* m_nativeDocModeCombo;
     QPushButton* m_clearCacheButton;
 
     // Misc tab widgets
