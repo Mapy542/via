@@ -27,7 +27,7 @@ Before you can use Via, you need to create Google API credentials:
 Now enter these credentials in Via:
 
 1. Open **Settings** (or it will open automatically on first launch)
-2. Go to the **Account** tab
+2. Go to the **Login** tab
 3. Enter your **Client ID** in the first field
 4. Enter your **Client Secret** in the second field
 5. Click **Save API Credentials**
@@ -48,13 +48,13 @@ By default, your Google Drive files sync to:
 ~/GoogleDrive
 ```
 
-You can change this location in **Settings > Sync > Sync Folder**.
+You can change this location in **Settings > Mirror > Sync Folder**.
 
 ## Features
 
 ### Automatic Synchronization
 
-Once signed in, Via automatically:
+Once signed in and with mirror sync enabled, Via automatically:
 
 - **Downloads** new and modified files from Google Drive
 - **Uploads** changes you make to local files
@@ -74,23 +74,33 @@ Via runs in your system tray for quick access:
 
 #### Tray Menu Options
 
-- **Open Google Drive Folder** - Opens your sync folder
+- **Open Google Drive Folder** - Opens your mirror sync folder
 - **Pause Sync** / **Resume Sync** - Temporarily stop/start syncing
-- **Sync Now** - Trigger immediate sync
+- **Sync Now** - Trigger an immediate mirror sync pass
 - **Recent Changes** - View recent file activity
-- **Settings** - Open settings window
+- **Recent Notifications** - Review recent desktop notifications from the tray
+- **Open Via** - Show the main window
+- **Settings** - Open the settings window
 - **Quit** - Exit Via
 
-### Selective Sync
+### Mirror Sync
 
-Don't want to sync everything? Use selective sync:
+Mirror sync maintains a local working folder that Via keeps aligned with Google Drive.
 
-1. Go to **Settings > Sync**
-2. Click **Refresh** to load your folders
-3. Uncheck folders you don't want to sync locally
-4. Click **Apply**
+#### Configuring Mirror Sync
 
-Only checked folders will sync to your computer.
+1. Go to **Settings > Mirror**
+2. Check **"Enable mirror sync"**
+3. Set the **Sync Folder**
+4. Choose a **Sync Mode**
+5. Choose a **Conflict Resolution** strategy
+6. Optionally adjust **Performance** settings for dormant time and duty cycle
+
+| Sync Mode              | Description                                                        |
+| ---------------------- | ------------------------------------------------------------------ |
+| **Keep Newest**        | Bidirectional sync using modification times to decide the winner   |
+| **Remote Read-Only**   | Download changes from Drive, but never upload local changes        |
+| **Remote No Delete**   | Bidirectional sync without propagating local deletions to Drive    |
 
 ### Virtual File System (FUSE)
 
@@ -98,10 +108,11 @@ FUSE lets you browse all your Google Drive files without downloading them all:
 
 #### Enabling FUSE
 
-1. Go to **Settings > Advanced**
-2. Check **"Enable FUSE virtual file system"**
-3. Set the mount point (default: `~/GoogleDriveFuse`)
-4. Click **Apply**
+1. Go to **Settings > Fuse**
+2. Check **"Enable FUSE sync"**
+3. Set the mount point in the **Mount Point** group (default: `~/GoogleDriveFuse`)
+4. Optionally adjust the cache target in **Cache and Maintenance**
+5. Click **Apply**
 
 #### Using FUSE
 
@@ -114,42 +125,34 @@ Navigate to the mount point in your file manager. You'll see all your Google Dri
 
 #### Google-Native Documents
 
-Google Docs, Sheets, Slides, and other native Google documents don't have downloadable file content. Via offers several options for how they appear in the FUSE mount:
+Google Docs, Sheets, Slides, and other native Google documents don't have downloadable file content. Via offers several options for how they appear locally in both the mirror sync folder and the FUSE view:
 
-1. Go to **Settings > Advanced**
-2. Under the FUSE group, find **"Native Google docs"**
+1. Go to **Settings > Common**
+2. Open the **Native Documents** group
 3. Select a mode:
 
 | Mode                       | Description                                            |
 | -------------------------- | ------------------------------------------------------ |
-| **Hide** (default)         | Native docs are invisible in the FUSE mount            |
+| **Hide** (default)         | Native docs are not materialized locally               |
 | **Browser shortcuts**      | Appear as `.gdoc`, `.gsheet`, `.gslides` stub files    |
 | **OpenDocument snapshots** | Exported as `.odt`, `.ods`, `.odp` read-only snapshots |
 | **Text snapshots**         | Exported as `.md`, `.csv`, `.txt` read-only snapshots  |
 
 **Important notes:**
 
+- This shared setting applies to both mirror sync and FUSE
 - Via registers custom MIME types for browser shortcuts on startup so file managers can open them through Via
-- Changing this setting requires a restart of Via
-- Mode changes clear the FUSE metadata cache (mirror sync is not affected)
+- Changing this setting may require a restart of Via; enabled sync systems rebuild their local native-document artifacts on next launch
+- If both mirror sync and FUSE are disabled, Via stores the choice and applies it the next time you enable one
 - Native doc files are always **read-only** in all modes
 - Export snapshots are limited to 10 MB by Google (a tray notification appears if export fails)
 - Some native types (Forms, Scripts, Sites) are only available in browser-shortcut mode
 
-### Offline Access
+### Offline Behavior
 
-Make files available without internet:
-
-#### Marking Files for Offline
-
-1. In the Settings > Advanced, configure offline files
-2. Or through the application's offline manager
-
-#### Benefits
-
-- Access important files without internet
-- Files stay synced when you're back online
-- Choose which files to pre-download
+- Mirror sync keeps files in your local sync folder, so they remain available offline.
+- FUSE can reopen files that are already cached locally, but Via does not provide a separate offline-manager workflow.
+- Via can automatically pause network sync while offline, on metered networks, or in power saver mode. Configure this in **Settings > Misc > Runtime Pause**.
 
 ### Conflict Resolution
 
@@ -176,30 +179,42 @@ Via keeps you informed with desktop notifications:
 
 To disable notifications:
 
-1. Go to **Settings > Advanced**
+1. Go to **Settings > Misc**
 2. Uncheck **"Show desktop notifications"**
 
 ## Settings Reference
 
-### Account Tab
+### Login Tab
 
 - **Google API Credentials** - Enter your OAuth Client ID and Secret from Google Cloud Console
 - **Sign In / Sign Out** - Manage your Google account connection
 - **Storage Usage** - View your Google Drive storage
 
-### Sync Tab
+### Mirror Tab
 
 - **Sync Folder** - Where Google Drive files are stored locally
-- **Selective Sync** - Choose which folders to sync
+- **Sync Mode** - Choose between Keep Newest, Remote Read-Only, and Remote No Delete
+- **Conflict Resolution** - Choose how Via resolves simultaneous local and remote edits
+- **Performance** - Tune mirror dormant time and duty cycle
 
-### Advanced Tab
+### Common Tab
+
+- **Duplicate File Endings** - Choose how Via renames duplicate Drive files locally
+- **Native Documents** - Choose how Google-native documents are materialized for mirror sync and FUSE
+
+### Fuse Tab
+
+- **Enable FUSE Sync** - Turn the virtual file system on or off
+- **Mount Point** - Choose where the FUSE view is mounted
+- **Cache and Maintenance** - Set the evictable cache target and clear cached FUSE files on restart
+
+### Misc Tab
 
 - **Start on Login** - Launch Via when you log in
+- **Appearance** - Choose the tray icon theme override
 - **Notifications** - Enable/disable desktop notifications
 - **Runtime Pause** - Turn off automatic pausing for offline, metered-network, and power-saver conditions when you want Via to keep syncing anyway
-- **FUSE** - Enable virtual file system
-- **Cache Size** - Maximum local cache size
-- **Debug Mode** - Enable detailed logging (./local/share/Via/logs/)
+- **Debug** - Enable detailed logging (`~/.local/share/Via/logs/`)
 
 ## Troubleshooting
 
@@ -222,14 +237,15 @@ To disable notifications:
 **Causes:**
 
 - Sync is paused
-- File is in an ignored pattern (.git..., drive native files (docs), etc)
+- File matches an ignored pattern or the current native-document representation mode hides it
 - Network issues
 
 **Solutions:**
 
 1. Check if sync is paused (resume if needed)
 2. Click "Sync Now" to force sync
-3. Check the activity log for errors
+3. Check the current native-document mode if the missing file is a Google Doc, Sheet, Slide, or other native type
+4. Check the activity log for errors
 
 ### FUSE Not Working
 
@@ -299,7 +315,7 @@ or
 
 To help troubleshoot issues:
 
-1. Enable debug mode in Settings > Advanced
+1. Enable debug mode in **Settings > Misc > Debug**
 2. Reproduce the issue
 3. Find logs in `~/.local/share/Via/logs/`
 4. Include relevant log excerpts in your issue report
@@ -328,9 +344,9 @@ Via stores data in standard XDG directories:
 
 | Location              | Contents                                        |
 | --------------------- | ----------------------------------------------- |
-| `~/.config/Via/`      | Application settings, API credentials (encoded) |
-| `~/.local/share/Via/` | Sync database, logs                             |
-| `~/.cache/Via/`       | File cache, temporary data                      |
+| `~/.config/Via/`      | Application settings                            |
+| `~/.local/share/Via/` | Sync database, logs, secure token fallback file |
+| `~/.cache/Via/`       | FUSE cache, temporary data                      |
 | `~/GoogleDrive/`      | Your synced files (configurable)                |
 | `~/GoogleDriveFuse/`  | FUSE mount point (configurable)                 |
 
@@ -340,4 +356,4 @@ Settings are stored in `~/.config/Via/Via.conf` using the INI format.
 
 ### Security Note
 
-OAuth credentials and tokens are stored with basic obfuscation. For maximum security, ensure proper file permissions on your home directory.
+OAuth credentials and tokens are stored in the system keyring when available. If no supported keyring backend is available, Via falls back to a 0600-permissioned file at `~/.local/share/Via/secure_tokens.json`.

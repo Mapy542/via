@@ -8,7 +8,7 @@ This guide covers the project layout, build system, tooling, architecture, threa
 # Install dependencies (Ubuntu/Debian)
 sudo apt-get install build-essential cmake pkg-config \
     qt6-base-dev qt6-networkauth-dev libqt6sql6-sqlite \
-    libfuse3-dev libsecret-1-dev libdbus-1-dev
+    libfuse3-dev libsecret-1-dev libdbus-1-dev qtkeychain-qt6-dev
 
 # Configure, build, and test
 cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
@@ -55,6 +55,7 @@ via/
 ├── tests/
 │   ├── sync/                   # Sync subsystem unit tests
 │   ├── fuse/                   # FUSE subsystem unit tests
+│   ├── ui/                     # UI regression tests
 │   └── utils/                  # Utility and startup-policy tests
 ├── res/                        # Qt resources, icons, .desktop file
 ├── docs/                       # Documentation
@@ -80,9 +81,11 @@ The API client is a `QObject` that uses `QNetworkAccessManager` for HTTP request
 | File                       | Purpose                                                                |
 | -------------------------- | ---------------------------------------------------------------------- |
 | `GoogleAuthManager.h/.cpp` | OAuth 2.0 authorization code flow using `QOAuth2AuthorizationCodeFlow` |
-| `TokenStorage.h/.cpp`      | Secure storage for refresh/access tokens                               |
+| `TokenStorage.h/.cpp`      | Secure storage for OAuth tokens and client credentials via QtKeychain with a 0600 file fallback |
 
 **Qt version notes:** `setTokenUrl()` and `serverReportedErrorOccurred()` are only available in Qt 6.9+. These calls are guarded with `#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)`.
+
+On Linux, QtKeychain typically uses libsecret or KWallet. If no supported keyring backend is available, Via falls back to `secure_tokens.json` under `QStandardPaths::AppDataLocation`.
 
 ### `src/sync/` — Synchronization Engine
 
@@ -97,7 +100,7 @@ The API client is a `QObject` that uses `QNetworkAccessManager` for HTTP request
 | `SyncActionThread.h/.cpp`    | Worker thread that executes sync actions                                                                                                                                                      |
 | `FullSync.h/.cpp`            | Full reconciliation pass (initial sync)                                                                                                                                                       |
 | `FileFilter.h/.cpp`          | File/folder ignore rules                                                                                                                                                                      |
-| `SyncSettings.h/.cpp`        | Sync configuration (bandwidth, selective sync, etc.)                                                                                                                                          |
+| `SyncSettings.h/.cpp`        | Shared mirror-sync configuration including sync mode, conflict policy, duplicate naming, native-doc mode, and mirror duty-cycle controls                                                                 |
 
 ### `src/fuse/` — Virtual Filesystem
 
@@ -115,7 +118,7 @@ The API client is a `QObject` that uses `QNetworkAccessManager` for HTTP request
 | File                       | Purpose                           |
 | -------------------------- | --------------------------------- |
 | `MainWindow.h/.cpp`        | Main application window           |
-| `SettingsWindow.h/.cpp`    | Settings dialog                   |
+| `SettingsWindow.h/.cpp`    | Settings dialog with Login, Mirror, Common, Fuse, and Misc tabs |
 | `SystemTrayManager.h/.cpp` | System tray icon and context menu |
 | `ConflictDialog.h/.cpp`    | Conflict resolution UI            |
 
@@ -224,6 +227,7 @@ The build produces:
 | CMake        | ≥ 3.20                                    | Build system                         |
 | C++ compiler | C++20                                     | GCC 10+ or Clang 10+                 |
 | Qt 6         | ≥ 6.2 (CI uses 6.7.3, local may use 6.9+) | UI, networking, SQL, auth, threading |
+| Qt6Keychain  | `qtkeychain-qt6-dev`                      | OS keyring integration for tokens and credentials |
 | FUSE 3       | `libfuse3-dev`                            | Virtual filesystem                   |
 | pkg-config   | —                                         | Finding FUSE3                        |
 

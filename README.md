@@ -11,7 +11,8 @@ Not affiliated with Google or Google Drive.
 - **Virtual File System (FUSE)**: Access Google Drive files as if they were on your local disk without allocating local storage
 - **Mirror Mode**: Optionally keep a full local copy of your Google Drive for offline access and performant read/write operations
 - **On-Demand Access**: Files are downloaded only when you need them in Fuse sync
-- **Offline Access**: Cached FUSE files are available offline and sync back when you're online, and mirror mode allows full local copies
+- **Shared Native Document Controls**: Choose how Google-native docs appear across mirror sync and FUSE from one setting
+- **Offline Access**: Mirror sync keeps a full local copy when enabled, and already-cached FUSE files remain available offline
 - **Conflict Resolution**: Automatic detection and handling of file conflicts
 - **Native Filesystem Integration**: Works with file system for access in all applications or cli
 - **Interface**: Easy to use GUI with system tray integration for quick access and notifications
@@ -87,22 +88,25 @@ To use Via, you need to set up Google API credentials:
 2. Create a new project or select an existing one
 3. Enable the Google Drive API
 4. Create OAuth 2.0 credentials (Desktop application)
-5. Download the credentials JSON file
-6. In Via settings, enter your Client ID and Client Secret
+5. Copy the Client ID and Client Secret from the created credential
+6. In Via settings, enter that Client ID and Client Secret
 
 Since the software runs on your client, there is no way to distribute a common key securely. You bring your own key for this program to work.
 (For quick testing you may be able to borrow the API keys stored in Gnome G-Drive connector, or KIO-GDrive)
+
+OAuth credentials and tokens are stored in the system keyring when one is available. If no supported keyring backend is available, Via falls back to a local secure store under `~/.local/share/Via/`.
 
 ### Settings
 
 Access settings through the main window or system tray menu:
 
-- **API Settings**: Supply client key and secret.
-- **Mirror Sync**: Control Mirror sync settings
-- **FUSE Sync**: Enable virtual file system access
-- **MISC**: Configure desktop notifications, theme, startup, etc
+- **Login**: Supply client credentials, sign in or out, and view storage usage.
+- **Mirror**: Configure the sync folder, sync mode, conflict resolution, and mirror performance.
+- **Common**: Configure duplicate-name handling and shared native-document representation for mirror sync and FUSE.
+- **Fuse**: Enable FUSE sync, set the mount point, and manage cache behavior.
+- **Misc**: Configure startup, appearance, notifications, runtime pause behavior, and debug logging.
 
-  Note you may run a mirror sync folder and a fuse sync folder simultanously, or just 1 of the methods. Only 1 account is supported at a time.
+  Note you may run mirror sync and FUSE together, or enable only one of them. Only 1 account is supported at a time.
 
 ## Other Information
 
@@ -133,7 +137,7 @@ Access settings through the main window or system tray menu:
 
 ### Debug Logging
 
-Enable debug logging in Settings > Advanced > Enable debug logging
+Enable debug logging in Settings > Misc > Debug > Enable debug logging
 
 Logs are stored in: `~/.local/share/Via/logs/`
 
