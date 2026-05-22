@@ -39,6 +39,7 @@
 #include <QWaitCondition>
 
 #include "api/DriveFile.h"
+#include "sync/SyncSettings.h"
 
 // Forward declarations
 class FileCache;
@@ -224,6 +225,11 @@ class DirtySyncWorker : public QObject {
      */
     void syncNow();
 
+    /**
+     * @brief Reload shared sync settings for live policy changes
+     */
+    void reloadSettings();
+
    signals:
     /**
      * @brief Emitted when state changes
@@ -353,6 +359,9 @@ class DirtySyncWorker : public QObject {
 
     // Retry tracking  (GPT5.3 #8)
     QMap<QString, int> m_retryCounts;
+
+    // Shared sync policy
+    SyncSettings m_syncSettings;
 
     // Flush state
     bool m_flushing;

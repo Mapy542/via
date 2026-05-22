@@ -384,36 +384,6 @@ void SettingsWindow::setupMirrorTab() {
 
     layout->addWidget(folderGroup);
 
-    // Sync mode group
-    QGroupBox* syncModeGroup = new QGroupBox("Sync Mode", m_mirrorTab);
-    QVBoxLayout* syncModeLayout = new QVBoxLayout(syncModeGroup);
-
-    QLabel* syncModeLabel = new QLabel("Choose how files are synchronized:", m_mirrorTab);
-    syncModeLayout->addWidget(syncModeLabel);
-
-    QHBoxLayout* syncModeComboLayout = new QHBoxLayout();
-    m_syncModeCombo = new QComboBox(m_mirrorTab);
-    m_syncModeCombo->addItem("Keep Newest (bidirectional sync)", "keep-newest");
-    m_syncModeCombo->addItem("Remote Read-Only (download only, never upload)", "remote-read-only");
-    m_syncModeCombo->addItem("Remote No Delete (sync but don't delete remote files)",
-                             "remote-no-delete");
-    syncModeComboLayout->addWidget(m_syncModeCombo);
-    syncModeComboLayout->addStretch();
-    syncModeLayout->addLayout(syncModeComboLayout);
-
-    QLabel* syncModeInfoLabel = new QLabel(
-        "<i><b>Keep Newest:</b> Full bidirectional sync - uploads and downloads based on "
-        "modification time.<br>"
-        "<b>Remote Read-Only:</b> Only downloads from remote, local changes are never uploaded.<br>"
-        "<b>Remote No Delete:</b> Bidirectional sync but local file deletions won't delete remote "
-        "files.</i>",
-        m_mirrorTab);
-    syncModeInfoLabel->setWordWrap(true);
-    syncModeInfoLabel->setTextFormat(Qt::RichText);
-    syncModeLayout->addWidget(syncModeInfoLabel);
-
-    layout->addWidget(syncModeGroup);
-
     // Conflict resolution group
     QGroupBox* conflictGroup = new QGroupBox("Conflict Resolution", m_mirrorTab);
     QVBoxLayout* conflictLayout = new QVBoxLayout(conflictGroup);
@@ -491,6 +461,42 @@ void SettingsWindow::setupCommonTab() {
     m_commonTab = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(m_commonTab);
 
+    QGroupBox* syncModeGroup = new QGroupBox("Sync Mode", m_commonTab);
+    QVBoxLayout* syncModeLayout = new QVBoxLayout(syncModeGroup);
+
+    QLabel* syncModeLabel =
+        new QLabel("Choose how mirror sync and FUSE handle Drive mutations:", m_commonTab);
+    syncModeLabel->setObjectName("settingsSyncModeLabel");
+    syncModeLabel->setWordWrap(true);
+    syncModeLayout->addWidget(syncModeLabel);
+
+    QHBoxLayout* syncModeComboLayout = new QHBoxLayout();
+    m_syncModeCombo = new QComboBox(m_commonTab);
+    m_syncModeCombo->setObjectName("settingsSyncModeCombo");
+    m_syncModeCombo->addItem("Keep Newest (bidirectional sync)", "keep-newest");
+    m_syncModeCombo->addItem("Remote Read-Only (download only, never upload)", "remote-read-only");
+    m_syncModeCombo->addItem("Remote No Delete (sync but don't delete remote files)",
+                             "remote-no-delete");
+    syncModeComboLayout->addWidget(m_syncModeCombo);
+    syncModeComboLayout->addStretch();
+    syncModeLayout->addLayout(syncModeComboLayout);
+
+    QLabel* syncModeInfoLabel = new QLabel(
+        "<i>This shared setting applies to mirror sync and FUSE.<br>"
+        "<b>Keep Newest:</b> Full bidirectional sync - uploads and downloads based on "
+        "modification time.<br>"
+        "<b>Remote Read-Only:</b> Mirror never uploads local changes, and FUSE blocks "
+        "Drive-mutating operations.<br>"
+        "<b>Remote No Delete:</b> Mirror keeps syncing but preserves remote files, and FUSE "
+        "blocks delete/trash operations.</i>",
+        m_commonTab);
+    syncModeInfoLabel->setObjectName("settingsSyncModeInfoLabel");
+    syncModeInfoLabel->setWordWrap(true);
+    syncModeInfoLabel->setTextFormat(Qt::RichText);
+    syncModeLayout->addWidget(syncModeInfoLabel);
+
+    layout->addWidget(syncModeGroup);
+
     QGroupBox* duplicateNamesGroup = new QGroupBox("Duplicate File Endings", m_commonTab);
     QVBoxLayout* duplicateNamesLayout = new QVBoxLayout(duplicateNamesGroup);
 
@@ -525,8 +531,8 @@ void SettingsWindow::setupCommonTab() {
     QGroupBox* nativeDocGroup = new QGroupBox("Native Documents", m_commonTab);
     QVBoxLayout* nativeDocLayout = new QVBoxLayout(nativeDocGroup);
 
-    QLabel* nativeDocLabel = new QLabel(
-        "Choose how Google-native docs are materialized locally:", m_commonTab);
+    QLabel* nativeDocLabel =
+        new QLabel("Choose how Google-native docs are materialized locally:", m_commonTab);
     nativeDocLabel->setObjectName("settingsNativeDocModeLabel");
     nativeDocLabel->setWordWrap(true);
     nativeDocLayout->addWidget(nativeDocLabel);
@@ -535,10 +541,8 @@ void SettingsWindow::setupCommonTab() {
     m_nativeDocModeCombo = new QComboBox(m_commonTab);
     m_nativeDocModeCombo->setObjectName("settingsNativeDocModeCombo");
     m_nativeDocModeCombo->addItem("Hide (don't materialize locally)", "hide");
-    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)",
-                                  "browser-shortcut");
-    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)",
-                                  "open-document");
+    m_nativeDocModeCombo->addItem("Browser shortcuts (.gdoc, .gsheet, ...)", "browser-shortcut");
+    m_nativeDocModeCombo->addItem("OpenDocument snapshots (.odt, .ods, ...)", "open-document");
     m_nativeDocModeCombo->addItem("Text snapshots (.md, .csv, ...)", "text");
     nativeDocComboLayout->addWidget(m_nativeDocModeCombo);
     nativeDocComboLayout->addStretch();
@@ -736,7 +740,6 @@ void SettingsWindow::updateSyncSystemWidgets() {
 
     m_syncFolderEdit->setEnabled(mirrorEnabled);
     m_browseFolderButton->setEnabled(mirrorEnabled);
-    m_syncModeCombo->setEnabled(mirrorEnabled);
     m_conflictResolutionCombo->setEnabled(mirrorEnabled);
 
     m_fuseMountPointEdit->setEnabled(fuseEnabled);
@@ -1066,8 +1069,6 @@ void SettingsWindow::setStorageInfoState(StorageInfoState state, const QString& 
 
 bool SettingsWindow::checkRestartRequired() const {
     if (m_syncFolderEdit->text() != m_originalSyncFolder)
-        return true;
-    if (m_syncModeCombo->currentData().toString() != m_originalSyncMode)
         return true;
     if (m_duplicateNameCombo->currentData().toString() != m_originalDuplicateNameStrategy)
         return true;

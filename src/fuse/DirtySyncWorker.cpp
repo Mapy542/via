@@ -32,6 +32,7 @@ DirtySyncWorker::DirtySyncWorker(FileCache* fileCache, GoogleDriveClient* driveC
       m_uploadInProgress(false),
       m_uploadDone(false),
       m_uploadSuccess(false),
+      m_syncSettings(SyncSettings::load()),
       m_flushing(false) {
     // Configure sync timer
     m_syncTimer->setInterval(m_syncIntervalMs);
@@ -270,6 +271,12 @@ void DirtySyncWorker::syncNow() {
     processDirtyFiles();
 }
 
+void DirtySyncWorker::reloadSettings() {
+    QMutexLocker locker(&m_mutex);
+    m_syncSettings = SyncSettings::load();
+    qInfo() << "DirtySyncWorker: Reloaded sync settings, mode=" << m_syncSettings.syncMode;
+}
+
 // ============================================================================
 // Private Slots
 // ============================================================================
@@ -349,6 +356,16 @@ void DirtySyncWorker::processDirtyFiles() {
         qDebug() << "DirtySyncWorker: No dirty files to process";
         emit syncCycleCompleted(0, 0);
         return;
+    }
+
+    {
+        QMutexLocker locker(&m_mutex);
+        if (!m_syncSettings.allowsRemoteMutation(RemoteMutationType::Upload)) {
+            qInfo() << "DirtySyncWorker: Deferring" << dirtyFiles.size()
+                    << "dirty files because sync mode blocks uploads";
+            emit syncCycleCompleted(0, 0);
+            return;
+        }
     }
 
     qInfo() << "DirtySyncWorker: Processing" << dirtyFiles.size() << "dirty files";

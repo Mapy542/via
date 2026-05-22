@@ -844,6 +844,7 @@ FuseDriver::FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, Q
       m_metadataRefreshWorker(nullptr),
       m_pauseController(nullptr),
       m_backgroundSyncPaused(false),
+      m_syncSettings(SyncSettings::load()),
       m_nextFileHandle(1) {
     // Set default mount point
     m_mountPoint = QDir::homePath() + "/GoogleDriveFuse";
@@ -1279,6 +1280,19 @@ void FuseDriver::refreshMetadata() {
     }
 }
 
+void FuseDriver::reloadSyncSettings() {
+    {
+        QMutexLocker locker(&m_syncSettingsMutex);
+        m_syncSettings = SyncSettings::load();
+    }
+
+    if (m_dirtySyncWorker) {
+        QMetaObject::invokeMethod(m_dirtySyncWorker, "reloadSettings", Qt::QueuedConnection);
+    }
+
+    qInfo() << "FuseDriver: Reloaded sync settings, mode=" << currentSyncSettings().syncMode;
+}
+
 void FuseDriver::pauseSync() {
     m_backgroundSyncPaused = true;
 
@@ -1319,6 +1333,13 @@ void FuseDriver::flushDirtyFiles() {
     }
 
     qInfo() << "FuseDriver: Flushing" << dirtyFiles.size() << "dirty files";
+
+    if (!currentSyncSettings().allowsRemoteMutation(RemoteMutationType::Upload)) {
+        qInfo() << "FuseDriver: Leaving" << dirtyFiles.size()
+                << "dirty files pending because sync mode blocks uploads";
+        emit dirtyFilesFlushed(0);
+        return;
+    }
 
     int uploadedCount = 0;
     for (const DirtyFileEntry& entry : dirtyFiles) {
@@ -1389,14 +1410,68 @@ int FuseDriver::pausedMutationErrorCode() const {
     return -EAGAIN;
 }
 
-void FuseDriver::emitDriveOperationBlocked(const QString& action, const QString& path) {
-    const QString message = m_pauseController
-                                ? m_pauseController->blockedOperationMessage(action)
-                                : QStringLiteral("Drive access is currently unavailable.");
+int FuseDriver::enforceSyncModeForRemoteMutation(RemoteMutationType mutation, const QString& action,
+                                                 const QString& path) {
+    const SyncSettings settings = currentSyncSettings();
+    if (settings.allowsRemoteMutation(mutation)) {
+        return 0;
+    }
+
+    const SyncMode syncMode = settings.syncModeValue();
+    emitDriveOperationBlocked(action, path, syncModeBlockedMessage(syncMode, action));
+    return syncModeBlockedErrorCode(syncMode);
+}
+
+SyncSettings FuseDriver::currentSyncSettings() const {
+    QMutexLocker locker(&m_syncSettingsMutex);
+    return m_syncSettings;
+}
+
+int FuseDriver::syncModeBlockedErrorCode(SyncMode syncMode) {
+    switch (syncMode) {
+        case SyncMode::RemoteReadOnly:
+            return -EROFS;
+        case SyncMode::RemoteNoDelete:
+            return -EPERM;
+        case SyncMode::KeepNewest:
+            break;
+    }
+
+    return -EACCES;
+}
+
+QString FuseDriver::syncModeBlockedMessage(SyncMode syncMode, const QString& action) {
+    switch (syncMode) {
+        case SyncMode::RemoteReadOnly:
+            return QStringLiteral(
+                       "Sync mode is Remote Read-Only, so Via blocks %1 from the "
+                       "FUSE mount.")
+                .arg(action);
+        case SyncMode::RemoteNoDelete:
+            return QStringLiteral(
+                       "Sync mode is Remote No Delete, so Via blocks %1 from the "
+                       "FUSE mount.")
+                .arg(action);
+        case SyncMode::KeepNewest:
+            break;
+    }
+
+    return QStringLiteral("The current sync mode blocks this Drive mutation.");
+}
+
+void FuseDriver::emitDriveOperationBlocked(const QString& action, const QString& path,
+                                           const QString& message) {
+    const QString resolvedMessage =
+        message.isEmpty()
+            ? (m_pauseController ? m_pauseController->blockedOperationMessage(action)
+                                 : QStringLiteral("Drive access is currently unavailable."))
+            : message;
 
     QMetaObject::invokeMethod(
         this,
-        [this, action, path, message]() { emit driveOperationBlocked(action, path, message); },
+        [this, action, path, resolvedMessage]() {
+            emit driveOperationBlocked(action, path, resolvedMessage);
+        },
         Qt::QueuedConnection);
 }
 
@@ -1933,6 +2008,14 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         return -ENOENT;
     }
 
+    if ((fi->flags & O_WRONLY) || (fi->flags & O_RDWR)) {
+        const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+            RemoteMutationType::Upload, QStringLiteral("modify files"), qpath);
+        if (syncModeError != 0) {
+            return syncModeError;
+        }
+    }
+
     // Get cached file path (may trigger download)
     if (!drv->isDriveApiAllowed() && !drv->m_fileCache->hasLocalContent(meta.fileId)) {
         drv->emitDriveOperationBlocked(QStringLiteral("download uncached files"), qpath);
@@ -2040,6 +2123,12 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
         return -EACCES;
     }
 
+    const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+        RemoteMutationType::Upload, QStringLiteral("modify files"), openFile.path);
+    if (syncModeError != 0) {
+        return syncModeError;
+    }
+
     if (openFile.localFd < 0) {
         return -EIO;
     }
@@ -2133,6 +2222,12 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
         return drv->pausedMutationErrorCode();
     }
 
+    const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+        RemoteMutationType::CreateFolder, QStringLiteral("create folders"), qpath);
+    if (syncModeError != 0) {
+        return syncModeError;
+    }
+
     // Get parent folder ID
     QString parentId = "root";
     if (!parentPath.isEmpty() && parentPath != "/") {
@@ -2210,6 +2305,12 @@ int FuseDriver::fuseRmdir(const char* path) {
         return drv->pausedMutationErrorCode();
     }
 
+    const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+        RemoteMutationType::Trash, QStringLiteral("trash folders"), qpath);
+    if (syncModeError != 0) {
+        return syncModeError;
+    }
+
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
         return -ENOENT;
@@ -2269,6 +2370,12 @@ int FuseDriver::fuseUnlink(const char* path) {
     if (!drv->isDriveApiAllowed()) {
         drv->emitDriveOperationBlocked(QStringLiteral("trash files"), qpath);
         return drv->pausedMutationErrorCode();
+    }
+
+    const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+        RemoteMutationType::Trash, QStringLiteral("trash files"), qpath);
+    if (syncModeError != 0) {
+        return syncModeError;
     }
 
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
@@ -2349,6 +2456,13 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
             return drv->pausedMutationErrorCode();
         }
 
+        const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+            RemoteMutationType::CreateFile, QStringLiteral("restore items from local trash"),
+            toPath);
+        if (syncModeError != 0) {
+            return syncModeError;
+        }
+
         if (!drv->m_database->getFuseMetadataByPath(toLookup).fileId.isEmpty()) {
             return -EEXIST;
         }
@@ -2375,6 +2489,12 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         if (!drv->isDriveApiAllowed()) {
             drv->emitDriveOperationBlocked(QStringLiteral("trash items"), fromPath);
             return drv->pausedMutationErrorCode();
+        }
+
+        const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+            RemoteMutationType::Trash, QStringLiteral("trash items"), fromPath);
+        if (syncModeError != 0) {
+            return syncModeError;
         }
 
         QString error;
@@ -2408,6 +2528,21 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
                                                               : QStringLiteral("rename items"));
         drv->emitDriveOperationBlocked(action, fromPath);
         return drv->pausedMutationErrorCode();
+    }
+
+    if (isMove) {
+        const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+            RemoteMutationType::Move, QStringLiteral("move items"), fromPath);
+        if (syncModeError != 0) {
+            return syncModeError;
+        }
+    }
+    if (isRename) {
+        const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+            RemoteMutationType::Rename, QStringLiteral("rename items"), fromPath);
+        if (syncModeError != 0) {
+            return syncModeError;
+        }
     }
 
     // LOG-02: When both move and rename are needed, issue a single atomic PATCH request
@@ -2571,6 +2706,12 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
         return -EACCES;
     }
 
+    const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+        RemoteMutationType::Upload, QStringLiteral("modify files"), qpath);
+    if (syncModeError != 0) {
+        return syncModeError;
+    }
+
     bool openedViaHandle = false;
     FuseOpenFile openFile;
     if (fi) {
@@ -2616,6 +2757,12 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     if (!drv->isDriveApiAllowed()) {
         drv->emitDriveOperationBlocked(QStringLiteral("create files"), qpath);
         return drv->pausedMutationErrorCode();
+    }
+
+    const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+        RemoteMutationType::CreateFile, QStringLiteral("create files"), qpath);
+    if (syncModeError != 0) {
+        return syncModeError;
     }
 
     // Get parent folder ID

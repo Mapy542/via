@@ -10,6 +10,22 @@
 #include <QString>
 #include <QStringList>
 
+enum class SyncMode {
+    KeepNewest,
+    RemoteReadOnly,
+    RemoteNoDelete,
+};
+
+enum class RemoteMutationType {
+    Upload,
+    CreateFile,
+    CreateFolder,
+    Rename,
+    Move,
+    Delete,
+    Trash,
+};
+
 struct SyncSettings {
     static constexpr int DEFAULT_REMOTE_POLL_INTERVAL_MS = 30000;
     static constexpr int DEFAULT_MIRROR_DORMANT_TIME_MS = 0;
@@ -30,11 +46,15 @@ struct SyncSettings {
     int mirrorDutyCyclePercent = DEFAULT_MIRROR_DUTY_CYCLE_PERCENT;
 
     static SyncSettings load();
+    static QString normalizeSyncModeId(const QString& value);
+    static SyncMode syncModeFromString(const QString& value);
     static int normalizeMirrorDormantTimeMs(int value);
     static int normalizeMirrorDutyCyclePercent(int value);
 
-    bool isRemoteReadOnly() const { return syncMode == "remote-read-only"; }
-    bool isRemoteNoDelete() const { return syncMode == "remote-no-delete"; }
+    SyncMode syncModeValue() const { return syncModeFromString(syncMode); }
+    bool allowsRemoteMutation(RemoteMutationType mutation) const;
+    bool isRemoteReadOnly() const { return syncModeValue() == SyncMode::RemoteReadOnly; }
+    bool isRemoteNoDelete() const { return syncModeValue() == SyncMode::RemoteNoDelete; }
 
     static QStringList defaultIgnorePatterns();
 };

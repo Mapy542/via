@@ -33,10 +33,13 @@ class FakeDriveClientFDL : public GoogleDriveClient {
     QByteArray exportPayload = QByteArray("exported native doc");
     int exportCallCount = 0;
     int uploadCallCount = 0;
+    int updateCallCount = 0;
     int createFolderCallCount = 0;
     QString lastExportFileId;
     QString lastExportMimeType;
     QList<QString> trashedFileIds;
+    QList<QString> updatedFileIds;
+    QList<QString> updatedLocalPaths;
     QHash<QString, QList<DriveFile>> listedFilesByParentId;
     QList<QString> uploadedLocalPaths;
     QList<QString> uploadedParentIds;
@@ -92,7 +95,18 @@ class FakeDriveClientFDL : public GoogleDriveClient {
 
         emit fileUploadedDetailed(file, localPath);
     }
-    void updateFile(const QString&, const QString&) override {}
+    void updateFile(const QString& fileId, const QString& localPath) override {
+        ++updateCallCount;
+        updatedFileIds.append(fileId);
+        updatedLocalPaths.append(localPath);
+
+        DriveFile file;
+        file.id = fileId;
+        file.name = QFileInfo(localPath).fileName();
+        file.size = QFileInfo(localPath).size();
+        file.modifiedTime = QDateTime::currentDateTimeUtc();
+        emit fileUpdated(file);
+    }
     void moveFile(const QString&, const QString&, const QString&) override {}
     void renameFile(const QString&, const QString&) override {}
     void deleteFile(const QString&) override {}
@@ -160,6 +174,9 @@ class TestFuseDriverLifecycle : public QObject {
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
     void testPauseSync_StagesDirtyFilesIntoPersistentStore();
     void testRegisterOpenFile_TracksWritableHandlesSeparately();
+    void testReloadSyncSettings_RemoteReadOnlyBlocksMutations();
+    void testReloadSyncSettings_RemoteNoDeleteOnlyBlocksDeletes();
+    void testFlushDirtyFiles_RemoteReadOnlyPreservesPendingUploads();
     void testNativeDocReportedSize_DoesNotMaterializeExportOnFirstStat();
     void testNativeDocExportLimitFailure_FallsBackToBrowserShortcutOverride();
 
@@ -635,6 +652,94 @@ void TestFuseDriverLifecycle::testRegisterOpenFile_TracksWritableHandlesSeparate
 
     QVERIFY(!m_driver->fileCache()->hasOpenHandles(fileId));
     QVERIFY(!m_driver->fileCache()->hasOpenWritableHandles(fileId));
+}
+
+void TestFuseDriverLifecycle::testReloadSyncSettings_RemoteReadOnlyBlocksMutations() {
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-read-only");
+    settings.sync();
+    m_driver->reloadSyncSettings();
+
+    QSignalSpy blockedSpy(m_driver, &FuseDriver::driveOperationBlocked);
+
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Upload,
+                                                        QStringLiteral("modify files"),
+                                                        QStringLiteral("/report.txt")),
+             -EROFS);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::CreateFile,
+                                                        QStringLiteral("create files"),
+                                                        QStringLiteral("/new.txt")),
+             -EROFS);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Move,
+                                                        QStringLiteral("move items"),
+                                                        QStringLiteral("/archive/report.txt")),
+             -EROFS);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Trash,
+                                                        QStringLiteral("trash files"),
+                                                        QStringLiteral("/report.txt")),
+             -EROFS);
+
+    QTRY_COMPARE_WITH_TIMEOUT(blockedSpy.count(), 4, 1000);
+    for (const auto& args : blockedSpy) {
+        QVERIFY(args.at(2).toString().contains(QStringLiteral("Remote Read-Only")));
+    }
+}
+
+void TestFuseDriverLifecycle::testReloadSyncSettings_RemoteNoDeleteOnlyBlocksDeletes() {
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-no-delete");
+    settings.sync();
+    m_driver->reloadSyncSettings();
+
+    QSignalSpy blockedSpy(m_driver, &FuseDriver::driveOperationBlocked);
+
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Upload,
+                                                        QStringLiteral("modify files"),
+                                                        QStringLiteral("/report.txt")),
+             0);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::CreateFolder,
+                                                        QStringLiteral("create folders"),
+                                                        QStringLiteral("/archive")),
+             0);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Rename,
+                                                        QStringLiteral("rename items"),
+                                                        QStringLiteral("/report.txt")),
+             0);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Delete,
+                                                        QStringLiteral("delete files"),
+                                                        QStringLiteral("/report.txt")),
+             -EPERM);
+    QCOMPARE(m_driver->enforceSyncModeForRemoteMutation(RemoteMutationType::Trash,
+                                                        QStringLiteral("trash files"),
+                                                        QStringLiteral("/report.txt")),
+             -EPERM);
+
+    QTRY_COMPARE_WITH_TIMEOUT(blockedSpy.count(), 2, 1000);
+    for (const auto& args : blockedSpy) {
+        QVERIFY(args.at(2).toString().contains(QStringLiteral("Remote No Delete")));
+    }
+}
+
+void TestFuseDriverLifecycle::testFlushDirtyFiles_RemoteReadOnlyPreservesPendingUploads() {
+    const QString fileId = QStringLiteral("flush-read-only");
+    const QString logicalPath = QStringLiteral("flush-read-only.txt");
+
+    seedCachedFile(fileId, logicalPath, QByteArray("flush bytes"));
+    m_driver->fileCache()->markDirty(fileId, logicalPath);
+
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-read-only");
+    settings.sync();
+    m_driver->reloadSyncSettings();
+
+    QSignalSpy flushedSpy(m_driver, &FuseDriver::dirtyFilesFlushed);
+
+    m_driver->flushDirtyFiles();
+
+    QCOMPARE(m_driveClient->updateCallCount, 0);
+    QVERIFY(m_driver->fileCache()->isDirty(fileId));
+    QTRY_COMPARE_WITH_TIMEOUT(flushedSpy.count(), 1, 1000);
+    QCOMPARE(flushedSpy.first().at(0).toInt(), 0);
 }
 
 void TestFuseDriverLifecycle::testNativeDocReportedSize_DoesNotMaterializeExportOnFirstStat() {

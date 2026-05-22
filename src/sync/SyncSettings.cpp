@@ -48,6 +48,27 @@ QString conflictStrategyFromLegacy(int value) {
 }
 }  // namespace
 
+QString SyncSettings::normalizeSyncModeId(const QString& value) {
+    if (value == QStringLiteral("remote-read-only") ||
+        value == QStringLiteral("remote-no-delete") || value == QStringLiteral("keep-newest")) {
+        return value;
+    }
+
+    return QStringLiteral("keep-newest");
+}
+
+SyncMode SyncSettings::syncModeFromString(const QString& value) {
+    const QString normalized = normalizeSyncModeId(value);
+    if (normalized == QStringLiteral("remote-read-only")) {
+        return SyncMode::RemoteReadOnly;
+    }
+    if (normalized == QStringLiteral("remote-no-delete")) {
+        return SyncMode::RemoteNoDelete;
+    }
+
+    return SyncMode::KeepNewest;
+}
+
 SyncSettings SyncSettings::load() {
     SyncSettings settings;
     QSettings qsettings;
@@ -66,7 +87,7 @@ SyncSettings SyncSettings::load() {
     if (syncMode.isEmpty()) {
         syncMode = "keep-newest";
     }
-    settings.syncMode = syncMode;
+    settings.syncMode = normalizeSyncModeId(syncMode);
 
     QString conflictStrategy = qsettings.value(kConflictStrategyKey, "").toString();
     if (conflictStrategy.isEmpty()) {
@@ -121,6 +142,21 @@ int SyncSettings::normalizeMirrorDutyCyclePercent(int value) {
     }
 
     return value;
+}
+
+bool SyncSettings::allowsRemoteMutation(RemoteMutationType mutation) const {
+    switch (syncModeValue()) {
+        case SyncMode::KeepNewest:
+            return true;
+
+        case SyncMode::RemoteReadOnly:
+            return false;
+
+        case SyncMode::RemoteNoDelete:
+            return mutation != RemoteMutationType::Delete && mutation != RemoteMutationType::Trash;
+    }
+
+    return true;
 }
 
 QStringList SyncSettings::defaultIgnorePatterns() {

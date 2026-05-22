@@ -22,6 +22,7 @@ class QAction;
 
 class GoogleAuthManager;
 class GoogleDriveClient;
+class FuseDriver;
 class MirrorSyncRuntime;
 class NotificationManager;
 class SettingsWindow;
@@ -44,11 +45,12 @@ class MainWindow : public QMainWindow {
      * @param authManager Pointer to the authentication manager
      * @param driveClient Pointer to the Google Drive API client
      * @param mirrorSyncRuntime Pointer to the mirror runtime facade
+     * @param fuseDriver Pointer to the FUSE runtime facade
      * @param notificationManager Pointer to the notification manager
      * @param parent Parent widget
      */
     explicit MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
-                        MirrorSyncRuntime* mirrorSyncRuntime,
+                        MirrorSyncRuntime* mirrorSyncRuntime, FuseDriver* fuseDriver,
                         RuntimePauseController* pauseController,
                         UiStatusCoordinator* statusCoordinator,
                         NotificationManager* notificationManager, bool canPauseSync = true,
@@ -151,6 +153,7 @@ class MainWindow : public QMainWindow {
     GoogleAuthManager* m_authManager;
     GoogleDriveClient* m_driveClient;
     MirrorSyncRuntime* m_mirrorSyncRuntime;
+    FuseDriver* m_fuseDriver;
     RuntimePauseController* m_pauseController;
     UiStatusCoordinator* m_statusCoordinator;
     NotificationManager* m_notificationManager;

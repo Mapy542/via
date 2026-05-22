@@ -100,13 +100,13 @@ On Linux, QtKeychain typically uses libsecret or KWallet. If no supported keyrin
 | `SyncActionThread.h/.cpp`    | Worker thread that executes sync actions                                                                                                                                                      |
 | `FullSync.h/.cpp`            | Full reconciliation pass (initial sync)                                                                                                                                                       |
 | `FileFilter.h/.cpp`          | File/folder ignore rules                                                                                                                                                                      |
-| `SyncSettings.h/.cpp`        | Shared mirror-sync configuration including sync mode, conflict policy, duplicate naming, native-doc mode, and mirror duty-cycle controls                                                                 |
+| `SyncSettings.h/.cpp`        | Shared runtime sync policy for mirror and FUSE, including sync mode, conflict policy, duplicate naming, native-doc mode, and mirror duty-cycle controls                                                   |
 
 ### `src/fuse/` — Virtual Filesystem
 
 | File                           | Purpose                                                                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `FuseDriver.h/.cpp`            | FUSE3 callback implementation — `getattr`, `readdir`, `open`, `read`, `write`, `release`, etc. |
+| `FuseDriver.h/.cpp`            | FUSE3 callback implementation — `getattr`, `readdir`, `open`, `read`, `write`, `release`, etc., plus direct sync-mode enforcement for remote mutations |
 | `FileCache.h/.cpp`             | LRU disk cache for downloaded files; `getExportedPath()` for native doc exports                |
 | `MetadataCache.h/.cpp`         | In-memory + DB-backed metadata cache with `QReadWriteLock` and atomic hit/miss counters        |
 | `NativeDocPolicy.h`            | Header-only policy: maps (MIME type, NativeDocMode) → visibility, extension, export MIME type  |
@@ -117,7 +117,7 @@ On Linux, QtKeychain typically uses libsecret or KWallet. If no supported keyrin
 
 | File                       | Purpose                           |
 | -------------------------- | --------------------------------- |
-| `MainWindow.h/.cpp`        | Main application window           |
+| `MainWindow.h/.cpp`        | Main application window and settings-reload wiring into active runtimes |
 | `SettingsWindow.h/.cpp`    | Settings dialog with Login, Mirror, Common, Fuse, and Misc tabs |
 | `SystemTrayManager.h/.cpp` | System tray icon and context menu |
 | `ConflictDialog.h/.cpp`    | Conflict resolution UI            |

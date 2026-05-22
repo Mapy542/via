@@ -12,6 +12,7 @@
 #include <QFileInfo>
 #include <QMutexLocker>
 #include <QTimer>
+#include <optional>
 
 #include "ChangeQueue.h"
 #include "SyncActionQueue.h"
@@ -62,6 +63,23 @@ NativeDocChangeContext resolveNativeDocChangeContext(const SyncDatabase* databas
         context.state.remoteMimeType, context.state.nativeDocModeOverride,
         nativeDocModeFromString(settings.nativeDocMode));
     return context;
+}
+
+std::optional<RemoteMutationType> remoteMutationTypeForAction(SyncActionType actionType) {
+    switch (actionType) {
+        case SyncActionType::Upload:
+            return RemoteMutationType::Upload;
+        case SyncActionType::MoveRemote:
+            return RemoteMutationType::Move;
+        case SyncActionType::RenameRemote:
+            return RemoteMutationType::Rename;
+        case SyncActionType::DeleteRemote:
+            return RemoteMutationType::Delete;
+        case SyncActionType::TrashRemote:
+            return RemoteMutationType::Trash;
+        default:
+            return std::nullopt;
+    }
 }
 
 }  // namespace
@@ -1024,8 +1042,6 @@ void ChangeProcessor::resolveConflictInternal(const ConflictInfo& conflict,
 }
 
 void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
-    const bool remoteReadOnly = m_cachedSettings.isRemoteReadOnly();
-    const bool remoteNoDelete = m_cachedSettings.isRemoteNoDelete();
     const NativeDocChangeContext nativeDocContext = resolveNativeDocChangeContext(
         m_database, m_cachedSettings, change.localPath, change.fileId);
 
@@ -1090,19 +1106,12 @@ void ChangeProcessor::determineAndQueueActions(const ChangeQueueItem& change) {
         return;
     }
 
-    // Enforce sync mode on actions only (do not affect detection)
-    if (remoteReadOnly && (action.actionType == SyncActionType::Upload ||
-                           action.actionType == SyncActionType::MoveRemote ||
-                           action.actionType == SyncActionType::RenameRemote ||
-                           action.actionType == SyncActionType::DeleteRemote ||
-                           action.actionType == SyncActionType::TrashRemote)) {
-        qInfo() << "Skipping remote action due to read-only sync mode:" << action.localPath;
-        return;
-    }
-
-    if (remoteNoDelete && (action.actionType == SyncActionType::DeleteRemote ||
-                           action.actionType == SyncActionType::TrashRemote)) {
-        qInfo() << "Skipping remote delete/trash due to sync mode:" << action.localPath;
+    // Enforce sync mode on remote mutations only (do not affect detection).
+    if (const auto remoteMutation = remoteMutationTypeForAction(action.actionType);
+        remoteMutation && !m_cachedSettings.allowsRemoteMutation(*remoteMutation)) {
+        qInfo() << "Skipping remote action due to sync mode:" << action.localPath
+                << "actionType=" << static_cast<int>(action.actionType)
+                << "syncMode=" << m_cachedSettings.syncMode;
         return;
     }
 

@@ -101,8 +101,8 @@ OAuth credentials and tokens are stored in the system keyring when one is availa
 Access settings through the main window or system tray menu:
 
 - **Login**: Supply client credentials, sign in or out, and view storage usage.
-- **Mirror**: Configure the sync folder, sync mode, conflict resolution, and mirror performance.
-- **Common**: Configure duplicate-name handling and shared native-document representation for mirror sync and FUSE.
+- **Mirror**: Configure the sync folder, conflict resolution, and mirror performance.
+- **Common**: Configure the shared sync mode, duplicate-name handling, and native-document representation for mirror sync and FUSE.
 - **Fuse**: Enable FUSE sync, set the mount point, and manage cache behavior.
 - **Misc**: Configure startup, appearance, notifications, runtime pause behavior, and debug logging.
 

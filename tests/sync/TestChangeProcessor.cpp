@@ -105,6 +105,10 @@ class TestChangeProcessor : public QObject {
     void testDetermineAndQueueActions_LocalRenameMissingFileIdSkipped();
     void testDetermineAndQueueActions_DuplicateSuppressed();
     void testDetermineAndQueueActions_RemoteModifySameHashSkipped();
+    void testDetermineAndQueueActions_RemoteReadOnlySkipsUpload();
+    void testDetermineAndQueueActions_RemoteReadOnlySkipsMoveAndRename();
+    void testDetermineAndQueueActions_RemoteNoDeleteSkipsTrash();
+    void testDetermineAndQueueActions_RemoteNoDeleteStillAllowsUpload();
 
    private:
     QTemporaryDir* m_tempDir = nullptr;
@@ -1297,6 +1301,75 @@ void TestChangeProcessor::testDetermineAndQueueActions_RemoteModifySameHashSkipp
     m_processor->determineAndQueueActions(change);
 
     QCOMPARE(m_actionQueue->count(), 0);
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_RemoteReadOnlySkipsUpload() {
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-read-only");
+    settings.sync();
+    m_processor->reloadSettings();
+
+    m_actionQueue->clear();
+
+    ChangeQueueItem change =
+        makeChange(ChangeType::Modify, ChangeOrigin::Local, "read-only-upload.txt", "file-ro");
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 0);
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_RemoteReadOnlySkipsMoveAndRename() {
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-read-only");
+    settings.sync();
+    m_processor->reloadSettings();
+
+    m_actionQueue->clear();
+
+    ChangeQueueItem moveChange =
+        makeChange(ChangeType::Move, ChangeOrigin::Local, "read-only-move.txt", "file-ro-move");
+    moveChange.moveDestination = "archive/read-only-move.txt";
+    m_processor->determineAndQueueActions(moveChange);
+    QCOMPARE(m_actionQueue->count(), 0);
+
+    ChangeQueueItem renameChange = makeChange(ChangeType::Rename, ChangeOrigin::Local,
+                                              "read-only-rename.txt", "file-ro-rename");
+    renameChange.renameTo = "renamed.txt";
+    m_processor->determineAndQueueActions(renameChange);
+    QCOMPARE(m_actionQueue->count(), 0);
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_RemoteNoDeleteSkipsTrash() {
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-no-delete");
+    settings.sync();
+    m_processor->reloadSettings();
+
+    m_actionQueue->clear();
+
+    ChangeQueueItem change =
+        makeChange(ChangeType::Delete, ChangeOrigin::Local, "no-delete.txt", "file-nd");
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 0);
+}
+
+void TestChangeProcessor::testDetermineAndQueueActions_RemoteNoDeleteStillAllowsUpload() {
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-no-delete");
+    settings.sync();
+    m_processor->reloadSettings();
+
+    m_actionQueue->clear();
+
+    ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Local,
+                                        "no-delete-upload.txt", "file-nd-upload");
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    const SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::Upload);
+    QCOMPARE(action.localPath, QString("no-delete-upload.txt"));
 }
 
 // ===========================================================================

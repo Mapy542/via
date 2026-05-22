@@ -92,15 +92,28 @@ Mirror sync maintains a local working folder that Via keeps aligned with Google 
 1. Go to **Settings > Mirror**
 2. Check **"Enable mirror sync"**
 3. Set the **Sync Folder**
-4. Choose a **Sync Mode**
-5. Choose a **Conflict Resolution** strategy
-6. Optionally adjust **Performance** settings for dormant time and duty cycle
+4. Choose a **Conflict Resolution** strategy
+5. Optionally adjust **Performance** settings for dormant time and duty cycle
+
+### Shared Sync Mode
+
+Sync mode is a shared policy for both mirror sync and FUSE.
+
+1. Go to **Settings > Common**
+2. Open the **Sync Mode** group
+3. Choose a mode:
 
 | Sync Mode              | Description                                                        |
 | ---------------------- | ------------------------------------------------------------------ |
 | **Keep Newest**        | Bidirectional sync using modification times to decide the winner   |
-| **Remote Read-Only**   | Download changes from Drive, but never upload local changes        |
-| **Remote No Delete**   | Bidirectional sync without propagating local deletions to Drive    |
+| **Remote Read-Only**   | Download changes from Drive, but block uploads and other remote mutations from mirror sync and FUSE |
+| **Remote No Delete**   | Allow uploads, creates, moves, and renames, but block deletions and trash operations from mirror sync and FUSE |
+
+**Important notes:**
+
+- This setting applies immediately and does not require a restart
+- In **Remote Read-Only**, FUSE keeps dirty local edits pending instead of discarding them; they upload after you switch back to a writable mode
+- In **Remote No Delete**, local deletes stay local only; Via will not remove the Drive copy
 
 ### Virtual File System (FUSE)
 
@@ -120,7 +133,7 @@ Navigate to the mount point in your file manager. You'll see all your Google Dri
 
 - **Files appear instantly** but aren't downloaded yet
 - **Opening a file** downloads it on-demand
-- **Editing files** uploads changes automatically
+- **Editing files** uploads changes automatically when the shared sync mode allows remote writes
 - **Cached files** load faster on repeat access
 
 #### Google-Native Documents
@@ -193,12 +206,12 @@ To disable notifications:
 ### Mirror Tab
 
 - **Sync Folder** - Where Google Drive files are stored locally
-- **Sync Mode** - Choose between Keep Newest, Remote Read-Only, and Remote No Delete
 - **Conflict Resolution** - Choose how Via resolves simultaneous local and remote edits
 - **Performance** - Tune mirror dormant time and duty cycle
 
 ### Common Tab
 
+- **Sync Mode** - Shared remote-mutation policy for mirror sync and FUSE
 - **Duplicate File Endings** - Choose how Via renames duplicate Drive files locally
 - **Native Documents** - Choose how Google-native documents are materialized for mirror sync and FUSE
 

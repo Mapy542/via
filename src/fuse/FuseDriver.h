@@ -38,6 +38,7 @@
 #include <QThread>
 #include <optional>
 
+#include "sync/SyncSettings.h"
 #include "utils/NativeDocSupport.h"
 
 #define FUSE_USE_VERSION 35
@@ -386,6 +387,11 @@ class FuseDriver : public QObject {
      * MetadataRefreshWorker when changes are detected.
      */
     void refreshMetadata();
+
+    /**
+     * @brief Reload shared sync settings for live policy changes
+     */
+    void reloadSyncSettings();
 
     /**
      * @brief Pause FUSE background Drive activity while keeping the mount active
@@ -953,7 +959,13 @@ class FuseDriver : public QObject {
     void startBackgroundWorkers();
 
     int pausedMutationErrorCode() const;
-    void emitDriveOperationBlocked(const QString& action, const QString& path);
+    int enforceSyncModeForRemoteMutation(RemoteMutationType mutation, const QString& action,
+                                         const QString& path);
+    SyncSettings currentSyncSettings() const;
+    static int syncModeBlockedErrorCode(SyncMode syncMode);
+    static QString syncModeBlockedMessage(SyncMode syncMode, const QString& action);
+    void emitDriveOperationBlocked(const QString& action, const QString& path,
+                                   const QString& message = QString());
 
     /**
      * @brief Stop background worker threads
@@ -1047,6 +1059,8 @@ class FuseDriver : public QObject {
     MetadataRefreshWorker* m_metadataRefreshWorker;  ///< Metadata refresh worker
     RuntimePauseController* m_pauseController;       ///< Shared runtime pause policy
     bool m_backgroundSyncPaused;                     ///< Whether background Drive work is paused
+    mutable QMutex m_syncSettingsMutex;              ///< Guards shared sync settings reloads
+    SyncSettings m_syncSettings;                     ///< Shared sync policy cached for FUSE checks
 
     // Open file handles
     QMap<uint64_t, FuseOpenFile> m_openFiles;  ///< Map of open file handles

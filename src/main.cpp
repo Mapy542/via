@@ -651,7 +651,7 @@ int main(int argc, char* argv[]) {
     // Initialize main window
     // When mirror sync is disabled, pass nullptr for sync components so UI disables sync actions
     MainWindow mainWindow(&authManager, &driveClient, mirrorEnabled ? &mirrorSyncRuntime : nullptr,
-                          &pauseController, &statusCoordinator, &notificationManager,
+                          &fuseDriver, &pauseController, &statusCoordinator, &notificationManager,
                           syncControlsEnabled, mirrorEnabled);
 
     if (mirrorEnabled) {

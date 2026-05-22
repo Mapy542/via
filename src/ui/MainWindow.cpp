@@ -22,13 +22,14 @@
 #include "UiStatusCoordinator.h"
 #include "api/GoogleDriveClient.h"
 #include "auth/GoogleAuthManager.h"
+#include "fuse/FuseDriver.h"
 #include "sync/MirrorSyncRuntime.h"
 #include "sync/RuntimePauseController.h"
 #include "utils/NotificationManager.h"
 #include "utils/ThemeHelper.h"
 
 MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveClient,
-                       MirrorSyncRuntime* mirrorSyncRuntime,
+                       MirrorSyncRuntime* mirrorSyncRuntime, FuseDriver* fuseDriver,
                        RuntimePauseController* pauseController,
                        UiStatusCoordinator* statusCoordinator,
                        NotificationManager* notificationManager, bool canPauseSync,
@@ -37,6 +38,7 @@ MainWindow::MainWindow(GoogleAuthManager* authManager, GoogleDriveClient* driveC
       m_authManager(authManager),
       m_driveClient(driveClient),
       m_mirrorSyncRuntime(mirrorSyncRuntime),
+      m_fuseDriver(fuseDriver),
       m_pauseController(pauseController),
       m_statusCoordinator(statusCoordinator),
       m_notificationManager(notificationManager),
@@ -487,6 +489,10 @@ void MainWindow::onSettingsClicked() {
         if (m_mirrorSyncRuntime) {
             connect(m_settingsWindow, &SettingsWindow::settingsChanged, m_mirrorSyncRuntime,
                     &MirrorSyncRuntime::reloadSyncSettings);
+        }
+        if (m_fuseDriver) {
+            connect(m_settingsWindow, &SettingsWindow::settingsChanged, m_fuseDriver,
+                    &FuseDriver::reloadSyncSettings);
         }
     }
     m_settingsWindow->show();

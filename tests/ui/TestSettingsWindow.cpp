@@ -137,6 +137,7 @@ class TestSettingsWindow : public QObject {
     void testMirrorEnabledKeepsNativeDocModeEditableWhenFuseDisabled();
     void testBothSyncSystemsCanBeDisabled();
     void testCommonTabOwnsSharedSettingsAndKeepsThemEditable();
+    void testSyncModeChangesPersistWithoutRestartPrompt();
     void testFuseTabSplitsSettingsIntoMountAndCacheGroups();
     void testMirrorPerformanceControlsPersistWithoutRestartPrompt();
     void testNativeDocModeRestartPromptMentionsMirrorRebuild();
@@ -386,24 +387,35 @@ void TestSettingsWindow::testCommonTabOwnsSharedSettingsAndKeepsThemEditable() {
     auto* tabWidget = window.findChild<QTabWidget*>();
     auto* mirrorEnabledCheck = window.findChild<QCheckBox*>("settingsMirrorEnabledCheck");
     auto* fuseEnabledCheck = window.findChild<QCheckBox*>("settingsFuseEnabledCheck");
+    auto* syncModeCombo = window.findChild<QComboBox*>("settingsSyncModeCombo");
+    auto* syncModeInfoLabel = window.findChild<QLabel*>("settingsSyncModeInfoLabel");
     auto* duplicateNameCombo = window.findChild<QComboBox*>("settingsDuplicateNameCombo");
     auto* nativeDocCombo = window.findChild<QComboBox*>("settingsNativeDocModeCombo");
 
     QVERIFY(tabWidget != nullptr);
     QVERIFY(mirrorEnabledCheck != nullptr);
     QVERIFY(fuseEnabledCheck != nullptr);
+    QVERIFY(syncModeCombo != nullptr);
+    QVERIFY(syncModeInfoLabel != nullptr);
     QVERIFY(duplicateNameCombo != nullptr);
     QVERIFY(nativeDocCombo != nullptr);
 
     QVERIFY(findTabPage(tabWidget, QStringLiteral("Common")) != nullptr);
+    QCOMPARE(owningTabText(tabWidget, syncModeCombo), QStringLiteral("Common"));
     QCOMPARE(owningTabText(tabWidget, duplicateNameCombo), QStringLiteral("Common"));
     QCOMPARE(owningTabText(tabWidget, nativeDocCombo), QStringLiteral("Common"));
 
     mirrorEnabledCheck->setChecked(false);
     fuseEnabledCheck->setChecked(false);
 
+    QVERIFY(syncModeCombo->isEnabled());
+    QVERIFY(syncModeInfoLabel->text().contains(QStringLiteral("mirror sync and FUSE")));
     QVERIFY(duplicateNameCombo->isEnabled());
     QVERIFY(nativeDocCombo->isEnabled());
+
+    const int remoteNoDeleteIndex = syncModeCombo->findData(QStringLiteral("remote-no-delete"));
+    QVERIFY(remoteNoDeleteIndex >= 0);
+    syncModeCombo->setCurrentIndex(remoteNoDeleteIndex);
 
     const int numericSuffixIndex = duplicateNameCombo->findData(QStringLiteral("numeric-suffix"));
     QVERIFY(numericSuffixIndex >= 0);
@@ -417,6 +429,7 @@ void TestSettingsWindow::testCommonTabOwnsSharedSettingsAndKeepsThemEditable() {
 
     {
         QSettings settings;
+        QCOMPARE(settings.value("sync/syncMode").toString(), QStringLiteral("remote-no-delete"));
         QCOMPARE(settings.value("sync/duplicateNameStrategy").toString(),
                  QStringLiteral("numeric-suffix"));
         QCOMPARE(settings.value("advanced/nativeDocMode").toString(),
@@ -424,17 +437,57 @@ void TestSettingsWindow::testCommonTabOwnsSharedSettingsAndKeepsThemEditable() {
     }
 
     SettingsWindow reopenedWindow(nullptr, nullptr);
+    auto* reopenedSyncModeCombo = reopenedWindow.findChild<QComboBox*>("settingsSyncModeCombo");
     auto* reopenedDuplicateNameCombo =
         reopenedWindow.findChild<QComboBox*>("settingsDuplicateNameCombo");
     auto* reopenedNativeDocCombo =
         reopenedWindow.findChild<QComboBox*>("settingsNativeDocModeCombo");
 
+    QVERIFY(reopenedSyncModeCombo != nullptr);
     QVERIFY(reopenedDuplicateNameCombo != nullptr);
     QVERIFY(reopenedNativeDocCombo != nullptr);
+    QCOMPARE(reopenedSyncModeCombo->currentData().toString(), QStringLiteral("remote-no-delete"));
     QCOMPARE(reopenedDuplicateNameCombo->currentData().toString(),
              QStringLiteral("numeric-suffix"));
-    QCOMPARE(reopenedNativeDocCombo->currentData().toString(),
-             QStringLiteral("open-document"));
+    QCOMPARE(reopenedNativeDocCombo->currentData().toString(), QStringLiteral("open-document"));
+}
+
+void TestSettingsWindow::testSyncModeChangesPersistWithoutRestartPrompt() {
+    SettingsWindow window(nullptr, nullptr);
+    auto* syncModeCombo = window.findChild<QComboBox*>("settingsSyncModeCombo");
+    auto* applyButton = window.findChild<QPushButton*>("settingsApplyButton");
+
+    QVERIFY(syncModeCombo != nullptr);
+    QVERIFY(applyButton != nullptr);
+
+    window.show();
+    QTRY_VERIFY(window.isVisible());
+
+    const int remoteReadOnlyIndex = syncModeCombo->findData(QStringLiteral("remote-read-only"));
+    QVERIFY(remoteReadOnlyIndex >= 0);
+    syncModeCombo->setCurrentIndex(remoteReadOnlyIndex);
+
+    bool promptSeen = false;
+    QTimer::singleShot(0, [&promptSeen]() {
+        if (auto* messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            promptSeen = true;
+            messageBox->reject();
+        }
+    });
+
+    applyButton->click();
+
+    QVERIFY(!promptSeen);
+
+    {
+        QSettings settings;
+        QCOMPARE(settings.value("sync/syncMode").toString(), QStringLiteral("remote-read-only"));
+    }
+
+    SettingsWindow reopenedWindow(nullptr, nullptr);
+    auto* reopenedSyncModeCombo = reopenedWindow.findChild<QComboBox*>("settingsSyncModeCombo");
+    QVERIFY(reopenedSyncModeCombo != nullptr);
+    QCOMPARE(reopenedSyncModeCombo->currentData().toString(), QStringLiteral("remote-read-only"));
 }
 
 void TestSettingsWindow::testFuseTabSplitsSettingsIntoMountAndCacheGroups() {
@@ -588,8 +641,8 @@ void TestSettingsWindow::testNativeDocModeRestartPromptDefersWhenSyncSystemsAreD
 
     QVERIFY(promptSeen);
     QVERIFY(promptText.contains(QStringLiteral("restart to take effect"), Qt::CaseInsensitive));
-    QVERIFY(promptInfo.contains(
-        QStringLiteral("next time mirror or FUSE sync is enabled"), Qt::CaseInsensitive));
+    QVERIFY(promptInfo.contains(QStringLiteral("next time mirror or FUSE sync is enabled"),
+                                Qt::CaseInsensitive));
 }
 
 QTEST_MAIN(TestSettingsWindow)

@@ -292,6 +292,9 @@ void TestSyncDatabase::testInitialize_RejectsNewerVersion() {
     QString dbPath = dataPath + "/via_sync.db";
 
     {
+        QFile::remove(dbPath);
+        QFile::remove(dbPath + "-wal");
+        QFile::remove(dbPath + "-shm");
         QSqlDatabase::removeDatabase("migration_setup");
         QSqlDatabase setupDb = QSqlDatabase::addDatabase("QSQLITE", "migration_setup");
         setupDb.setDatabaseName(dbPath);

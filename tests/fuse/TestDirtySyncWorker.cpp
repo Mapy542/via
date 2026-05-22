@@ -170,6 +170,7 @@ class TestDirtySyncWorker : public QObject {
     void testSyncNow_DefersFileWithWritableHandle();
     void testSyncNow_UploadUsesImmutableSnapshot();
     void testSyncNow_SkipsTrashRelativeDirtyPath();
+    void testReloadSettings_RemoteReadOnlyDefersDirtyUploads();
 
    private:
     void createCacheFile(const QString& fileId);
@@ -747,6 +748,31 @@ void TestDirtySyncWorker::testSyncNow_SkipsTrashRelativeDirtyPath() {
 
     QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 0);
     QVERIFY(m_fileCache->isCached(fid));
+
+    m_worker->stop();
+}
+
+void TestDirtySyncWorker::testReloadSettings_RemoteReadOnlyDefersDirtyUploads() {
+    const QString fid = QStringLiteral("sync-mode-read-only");
+    createDirtyPendingFile(fid, QByteArray("pending upload bytes"));
+
+    QSettings settings;
+    settings.setValue("sync/syncMode", "remote-read-only");
+    settings.sync();
+    m_worker->reloadSettings();
+
+    QSignalSpy cycleSpy(m_worker, &DirtySyncWorker::syncCycleCompleted);
+    QSignalSpy completedSpy(m_worker, &DirtySyncWorker::uploadCompleted);
+    QSignalSpy failedSpy(m_worker, &DirtySyncWorker::uploadFailed);
+
+    m_worker->start();
+
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 1, 5000);
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 0);
+    QCOMPARE(completedSpy.size(), 0);
+    QCOMPARE(failedSpy.size(), 0);
+    QVERIFY(m_fileCache->isDirty(fid));
 
     m_worker->stop();
 }
