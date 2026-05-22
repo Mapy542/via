@@ -412,6 +412,11 @@ bool SyncDatabase::setStoredSchemaEpoch(int epoch) {
 }
 
 int SyncDatabase::getStoredVersion() const {
+    // TODO: PERFORMANCE / OPTIMIZATION
+    // Preparing queries dynamically on every call incurs parsing and compilation overhead inside
+    // SQLite. For high-frequency query patterns in other thread loops, caching prepared QSqlQuery
+    // objects per thread-connection or utilizing a statically cached prepared statement map would
+    // yield faster execution cycles and reduced CPU overhead.
     QSqlQuery query(m_db);
     query.prepare("SELECT value FROM settings WHERE key = 'version'");
     if (query.exec() && query.next()) {

@@ -1106,6 +1106,17 @@ void MetadataCache::onApiChildrenReceived(const QString& parentId,
 // ========================================
 
 void MetadataCache::loadFromDatabase() {
+    // TODO: PERFORMANCE / OPTIMIZATION
+    // Eagerly loading the entire database metadata into in-memory QHash structures models path
+    // tables 1:1 in RAM. For large remote drives (e.g. 10s of thousands of files), this results in
+    // substantial idle memory footprint, which is the primary driver of the ~50MB+ idle memory
+    // overhead. Recommendation:
+    // 1. Pivot to a lazy directory-by-directory loading and population model of m_pathToMetadata on
+    // demand (readdir/getattr miss).
+    // 2. Introduce a bounded caching model (e.g., LRU cache for metadata entries with a target
+    // maximum size).
+    // 3. Keep directory structures (m_parentToChildren) cleared/evicted when not accessed for a
+    // longer duration.
     if (!m_database) {
         qWarning() << "MetadataCache: No database available, starting with empty cache";
         return;

@@ -61,7 +61,8 @@ void TestUiStatusIntegration::init() {
     m_pauseController = new RuntimePauseController();
     m_coordinator = new UiStatusCoordinator(nullptr, true, m_pauseController);
     m_tray = new SystemTrayManager(nullptr, m_pauseController, m_coordinator);
-    m_window = new MainWindow(nullptr, nullptr, nullptr, m_pauseController, m_coordinator, nullptr);
+    m_window = new MainWindow(nullptr, nullptr, nullptr, nullptr, m_pauseController, m_coordinator,
+                              nullptr);
 }
 
 void TestUiStatusIntegration::cleanup() {
@@ -188,7 +189,7 @@ void TestUiStatusIntegration::testMirrorDisabledOfflineRecoveryReturnsToFuseStat
     RuntimePauseController pauseController;
     UiStatusCoordinator coordinator(nullptr, false, &pauseController);
     SystemTrayManager tray(nullptr, &pauseController, &coordinator);
-    MainWindow window(nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr);
+    MainWindow window(nullptr, nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr);
 
     coordinator.updateAuthState(true);
     coordinator.updateFuseStatus(QStringLiteral("Mounted"));
@@ -218,7 +219,7 @@ void TestUiStatusIntegration::testMetadataRefreshLifecyclePropagatesWhenMirrorDi
     RuntimePauseController pauseController;
     UiStatusCoordinator coordinator(nullptr, false, &pauseController);
     SystemTrayManager tray(nullptr, &pauseController, &coordinator);
-    MainWindow window(nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr);
+    MainWindow window(nullptr, nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr);
 
     coordinator.onMetadataRefreshStarted();
 
@@ -282,8 +283,8 @@ void TestUiStatusIntegration::testBothSyncSystemsDisabledUsesPausedStatusAndDisa
     UiStatusCoordinator coordinator(nullptr, false, &pauseController);
     coordinator.setFuseEnabled(false);
     SystemTrayManager tray(nullptr, &pauseController, &coordinator, false, false);
-    MainWindow window(nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr, false,
-                      false);
+    MainWindow window(nullptr, nullptr, nullptr, nullptr, &pauseController, &coordinator, nullptr,
+                      false, false);
 
     coordinator.updateAuthState(true);
     tray.updateAuthState(true);

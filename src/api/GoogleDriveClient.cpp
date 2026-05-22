@@ -106,6 +106,15 @@ GoogleDriveClient::GoogleDriveClient(GoogleAuthManager* authManager,
 GoogleDriveClient::~GoogleDriveClient() = default;
 
 QNetworkRequest GoogleDriveClient::createRequest(const QUrl& url) {
+    // TODO: SECURITY / COMPLIANCE
+    // Ensure that the request URL scheme is strictly "https" before adding the OAuth bearer token.
+    // Transmitting the raw Authorization header over unencrypted HTTP (http://) would expose
+    // sensitive OAuth credentials to MITM interception. Recommended practice: if
+    // (url.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) != 0) {
+    //     qWarning() << "GoogleDriveClient: Refusing to attach authorization header to non-HTTPS
+    //     URL:" << url; return QNetworkRequest(url);
+    // }
+
     QNetworkRequest request(url);
 
     if (m_authManager) {
