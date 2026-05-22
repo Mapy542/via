@@ -14,7 +14,11 @@
 #include <QUrlQuery>
 #include <QtTest/QtTest>
 
+#define private public
 #include "api/GoogleDriveClient.h"
+#undef private
+
+#include "auth/GoogleAuthManager.h"
 
 namespace {
 class QueuedNetworkReply final : public QNetworkReply {
@@ -131,16 +135,50 @@ class FakeNetworkAccessManager final : public QNetworkAccessManager {
     QQueue<PlannedResponse> m_responses;
     QList<QNetworkRequest> m_requests;
 };
+
+class FakeAuthenticatedAuthManager final : public GoogleAuthManager {
+   public:
+    explicit FakeAuthenticatedAuthManager(QObject* parent = nullptr)
+        : GoogleAuthManager(nullptr, parent) {}
+
+    bool isAuthenticated() const override { return true; }
+    QString accessToken() const override { return QStringLiteral("test-token"); }
+
+    bool ensureValidToken(int timeoutMs = 15000) override {
+        Q_UNUSED(timeoutMs);
+        ++ensureValidTokenCalls;
+        return true;
+    }
+
+    int ensureValidTokenCalls = 0;
+};
 }  // namespace
 
 class TestGoogleDriveClient : public QObject {
     Q_OBJECT
 
    private slots:
+    void testCreateRequest_AttachesAuthorizationHeaderOnlyForHttps();
     void testGetFolderIdByPath_ReleasesBlockingGuardAndEscapesPathSegment();
     void testListFiles_EscapesFolderIdInQuery();
     void testListFilesBlocking_EscapesFolderIdInQuery();
 };
+
+void TestGoogleDriveClient::testCreateRequest_AttachesAuthorizationHeaderOnlyForHttps() {
+    FakeAuthenticatedAuthManager authManager;
+    auto* networkManager = new FakeNetworkAccessManager();
+    GoogleDriveClient client(&authManager, networkManager);
+
+    const QNetworkRequest httpsRequest =
+        client.createRequest(QUrl(QStringLiteral("https://example.com/resource")));
+    QCOMPARE(httpsRequest.rawHeader("Authorization"), QByteArray("Bearer test-token"));
+    QCOMPARE(authManager.ensureValidTokenCalls, 1);
+
+    const QNetworkRequest httpRequest =
+        client.createRequest(QUrl(QStringLiteral("http://example.com/resource")));
+    QVERIFY(!httpRequest.hasRawHeader("Authorization"));
+    QCOMPARE(authManager.ensureValidTokenCalls, 1);
+}
 
 void TestGoogleDriveClient::testGetFolderIdByPath_ReleasesBlockingGuardAndEscapesPathSegment() {
     auto* networkManager = new FakeNetworkAccessManager();
