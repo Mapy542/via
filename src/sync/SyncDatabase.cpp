@@ -869,6 +869,100 @@ void SyncDatabase::setLocalPath(const QString& fileId, const QString& localPath)
     }
 }
 
+bool SyncDatabase::updateLocalPathTree(const QString& fileId, const QString& oldLocalPath,
+                                       const QString& newLocalPath) {
+    QMutexLocker locker(&m_mutex);
+    requireRelativePath(oldLocalPath, "updateLocalPathTree");
+    requireRelativePath(newLocalPath, "updateLocalPathTree");
+    requireFileId(fileId, "updateLocalPathTree");
+    QSqlDatabase db = m_db;
+
+    auto updatePathForFile = [this](const QString& currentFileId, const QString& targetPath,
+                                    const char* operation) -> bool {
+        QSqlQuery conflictQuery(m_db);
+        conflictQuery.prepare("SELECT file_id FROM files WHERE local_path = ?");
+        conflictQuery.addBindValue(targetPath);
+        if (conflictQuery.exec() && conflictQuery.next()) {
+            const QString conflictId = conflictQuery.value(0).toString();
+            if (!conflictId.isEmpty() && conflictId != currentFileId) {
+                QSqlQuery removeQuery(m_db);
+                removeQuery.prepare("DELETE FROM files WHERE file_id = ?");
+                removeQuery.addBindValue(conflictId);
+                if (!removeQuery.exec()) {
+                    logError(QString::fromLatin1(operation) + QStringLiteral(" (remove conflict)"),
+                             removeQuery.lastError().text());
+                    return false;
+                }
+            }
+        }
+
+        QSqlQuery existingQuery(m_db);
+        existingQuery.prepare("SELECT 1 FROM files WHERE file_id = ?");
+        existingQuery.addBindValue(currentFileId);
+        const bool hasExistingRow = existingQuery.exec() && existingQuery.next();
+
+        QSqlQuery writeQuery(m_db);
+        if (hasExistingRow) {
+            writeQuery.prepare("UPDATE files SET local_path = ? WHERE file_id = ?");
+            writeQuery.addBindValue(targetPath);
+            writeQuery.addBindValue(currentFileId);
+        } else {
+            writeQuery.prepare("INSERT INTO files (file_id, local_path) VALUES (?, ?)");
+            writeQuery.addBindValue(currentFileId);
+            writeQuery.addBindValue(targetPath);
+        }
+
+        if (!writeQuery.exec()) {
+            logError(operation, writeQuery.lastError().text());
+            return false;
+        }
+
+        return true;
+    };
+
+    QList<QPair<QString, QString>> descendantUpdates;
+    QSqlQuery descendantQuery(m_db);
+    if (!descendantQuery.exec("SELECT file_id, local_path FROM files")) {
+        logError("updateLocalPathTree (select descendants)", descendantQuery.lastError().text());
+        return false;
+    }
+
+    while (descendantQuery.next()) {
+        const QString descendantFileId = descendantQuery.value("file_id").toString();
+        const QString descendantOldPath = descendantQuery.value("local_path").toString();
+        if (!descendantOldPath.startsWith(oldLocalPath + "/")) {
+            continue;
+        }
+        const QString suffix = descendantOldPath.mid(oldLocalPath.size());
+        descendantUpdates.append(qMakePair(descendantFileId, newLocalPath + suffix));
+    }
+
+    if (!db.transaction()) {
+        logError("updateLocalPathTree (begin)", db.lastError().text());
+        return false;
+    }
+
+    if (!updatePathForFile(fileId, newLocalPath, "updateLocalPathTree (root)")) {
+        db.rollback();
+        return false;
+    }
+
+    for (const auto& update : descendantUpdates) {
+        if (!updatePathForFile(update.first, update.second, "updateLocalPathTree (descendant)")) {
+            db.rollback();
+            return false;
+        }
+    }
+
+    if (!db.commit()) {
+        logError("updateLocalPathTree (commit)", db.lastError().text());
+        db.rollback();
+        return false;
+    }
+
+    return true;
+}
+
 bool SyncDatabase::deleteFileStateById(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
     if (fileId.isEmpty()) {

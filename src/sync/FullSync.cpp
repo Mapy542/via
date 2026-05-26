@@ -106,6 +106,11 @@ int FullSync::localFileCount() const {
     return m_localFileCount;
 }
 
+QHash<QString, QString> FullSync::remoteFolderIdToPath() const {
+    QMutexLocker locker(&m_mutex);
+    return m_remoteFolderIdToPath;
+}
+
 bool FullSync::isRunning() const {
     State s = m_state.load();
     return s == State::ScanningLocal || s == State::FetchingRemote;
@@ -154,6 +159,7 @@ void FullSync::startInternal(Mode mode) {
         m_allRemoteItems.clear();
         m_discoveredLocalPaths.clear();
         m_discoveredLocalPaths.clear();
+        m_remoteFolderIdToPath.clear();
         m_currentPageToken.clear();
         m_localScanIterator.reset();
 
@@ -198,6 +204,7 @@ void FullSync::clearPendingState() {
     QMutexLocker locker(&m_mutex);
     m_allRemoteItems.clear();
     m_discoveredLocalPaths.clear();
+    m_remoteFolderIdToPath.clear();
     m_currentPageToken.clear();
     m_localScanIterator.reset();
     m_localScanThrottle.reset();
@@ -438,6 +445,11 @@ void FullSync::queueRemoteFile(const DriveFile& file, const QString& localPath) 
     item.detectedTime = QDateTime::currentDateTime();
     item.modifiedTime = file.modifiedTime;
     item.isDirectory = file.isFolder;
+    item.remoteParentId = file.parentId();
+    const QString nativeDocModeOverride = nativeDocModeOverrideForFile(m_database, file.id);
+    item.remoteResolvedName = PathUtils::sanitizeRemoteFileName(
+        nativeDocVisibleName(file.name, file.mimeType, nativeDocModeOverride,
+                             nativeDocModeFromString(m_settings.nativeDocMode)));
 
     m_changeQueue->enqueue(item);
 }
@@ -451,6 +463,9 @@ void FullSync::buildRemoteFolderStructure() {
     m_remoteTree->relativePath = "";
     m_remoteTree->isFolder = true;
     m_remoteTree->fileId = ROOT_FOLDER_ID;
+    if (!ROOT_FOLDER_ID.isEmpty()) {
+        m_remoteFolderIdToPath.insert(ROOT_FOLDER_ID, QString());
+    }
 
     unsigned long iterations = 0;
     std::vector<FileTreeNode*> currentBranchDepthParents;
@@ -473,11 +488,20 @@ void FullSync::buildRemoteFolderStructure() {
                     FileTreeNode* newNode = new FileTreeNode();
                     const QString nativeDocModeOverride =
                         nativeDocModeOverrideForFile(m_database, file.id);
+                    const QString desiredLocalPath =
+                        parentNode->relativePath.isEmpty()
+                            ? PathUtils::sanitizeRemoteFileName(file.name)
+                            : QDir(parentNode->relativePath)
+                                  .filePath(PathUtils::sanitizeRemoteFileName(file.name));
                     newNode->name = file.name;
                     newNode->isFolder = file.isFolder;
-                    newNode->relativePath = MirrorPathResolver::resolveRemoteLocalPath(
-                        parentNode->relativePath, file.name, file.mimeType, nativeDocModeOverride,
-                        file.id, m_database, m_settings, m_syncFolder, &claimedPaths);
+                    newNode->relativePath = preferredExistingFolderPath(file, desiredLocalPath);
+                    if (newNode->relativePath.isEmpty()) {
+                        newNode->relativePath = MirrorPathResolver::resolveRemoteLocalPath(
+                            parentNode->relativePath, file.name, file.mimeType,
+                            nativeDocModeOverride, file.id, m_database, m_settings, m_syncFolder,
+                            &claimedPaths);
+                    }
                     if (TrashPolicy::isTrashRelativePath(newNode->relativePath)) {
                         delete newNode;
                         itemsToRemove.append(i);
@@ -486,6 +510,9 @@ void FullSync::buildRemoteFolderStructure() {
                     newNode->modifiedTime = file.modifiedTime;
                     newNode->fileId = file.id;
                     parentNode->children.insert(file.id, newNode);
+                    if (newNode->isFolder) {
+                        m_remoteFolderIdToPath.insert(newNode->fileId, newNode->relativePath);
+                    }
                     claimedPaths.insert(newNode->relativePath);
 
                     // Queue this remote file for processing
@@ -528,6 +555,69 @@ void FullSync::buildRemoteFolderStructure() {
     m_remoteTree = nullptr;
 }
 
+QString FullSync::preferredExistingFolderPath(const DriveFile& folder,
+                                              const QString& desiredLocalPath) const {
+    if (!folder.isFolder || !m_database || desiredLocalPath.isEmpty() || folder.id.isEmpty()) {
+        return QString();
+    }
+
+    if (!m_database->getLocalPath(folder.id).isEmpty()) {
+        return QString();
+    }
+
+    const QString mappedFolderId = m_database->getFileId(desiredLocalPath);
+    if (!mappedFolderId.isEmpty() && mappedFolderId != folder.id) {
+        return QString();
+    }
+
+    const QString absoluteDesiredPath = QDir(m_syncFolder).filePath(desiredLocalPath);
+    QFileInfo desiredInfo(absoluteDesiredPath);
+    if (!desiredInfo.exists() || !desiredInfo.isDir()) {
+        return QString();
+    }
+
+    const QList<FileSyncState> existingDescendants =
+        m_database->getFileStatesByPrefix(desiredLocalPath);
+    if (existingDescendants.isEmpty()) {
+        return QString();
+    }
+
+    QSet<QString> descendantIds;
+    for (const FileSyncState& state : existingDescendants) {
+        if (!state.fileId.isEmpty()) {
+            descendantIds.insert(state.fileId);
+        }
+    }
+    if (descendantIds.isEmpty()) {
+        return QString();
+    }
+
+    QSet<QString> visitedFolderIds;
+    QList<QString> pendingFolderIds;
+    pendingFolderIds.append(folder.id);
+    visitedFolderIds.insert(folder.id);
+
+    while (!pendingFolderIds.isEmpty()) {
+        const QString parentId = pendingFolderIds.takeFirst();
+        for (const DriveFile& candidate : m_allRemoteItems) {
+            if (!candidate.parents.contains(parentId) || candidate.id.isEmpty()) {
+                continue;
+            }
+
+            if (descendantIds.contains(candidate.id)) {
+                return desiredLocalPath;
+            }
+
+            if (candidate.isFolder && !visitedFolderIds.contains(candidate.id)) {
+                visitedFolderIds.insert(candidate.id);
+                pendingFolderIds.append(candidate.id);
+            }
+        }
+    }
+
+    return QString();
+}
+
 QString FullSync::getRelativePath(const QString& absolutePath) const {
     QString relativePath;
     if (PathUtils::tryGetRelativePathWithinRoot(absolutePath, m_syncFolder, &relativePath)) {
@@ -541,6 +631,8 @@ QString FullSync::getRelativePath(const QString& absolutePath) const {
 
 void FullSync::finishSync() {
     int localCount, remoteCount;
+    QHash<QString, QString> remoteFolderMap;
+    bool emitRemoteFolderMap = false;
     {
         QMutexLocker locker(&m_mutex);
         if (m_cancelled) {
@@ -549,6 +641,10 @@ void FullSync::finishSync() {
         m_state.store(State::Complete);
         localCount = m_localFileCount;
         remoteCount = m_remoteFileCount;
+        emitRemoteFolderMap = (m_mode == Mode::Full);
+        if (emitRemoteFolderMap) {
+            remoteFolderMap = m_remoteFolderIdToPath;
+        }
 
         // now clean up potentially long lists, we are done with it.
         m_allRemoteItems.clear();
@@ -562,6 +658,9 @@ void FullSync::finishSync() {
         qInfo() << "FullSync ignored orphaned remote items:" << m_orphanCount;
     }
 
+    if (emitRemoteFolderMap) {
+        emit remoteFolderMapReady(remoteFolderMap);
+    }
     emit stateChanged(State::Complete);
     emit progressUpdated("Full sync complete", localCount + effectiveRemoteCount,
                          localCount + effectiveRemoteCount);

@@ -82,6 +82,9 @@ class TestFullSyncRuntime : public FullSync {
     void emitProgressUpdatedSignal(const QString& phase, int current, int total) {
         emit progressUpdated(phase, current, total);
     }
+    void emitRemoteFolderMapReadySignal(const QHash<QString, QString>& mapping) {
+        emit remoteFolderMapReady(mapping);
+    }
     void emitCompletedSignal(int localCount, int remoteCount) {
         emit completed(localCount, remoteCount);
     }
@@ -98,6 +101,8 @@ class TestMirrorSyncRuntime : public QObject {
     void testMovesMirrorGraphToDedicatedWorkerThread();
     void testForwardsPendingCountsAndConflictResolution();
     void testForwardsProcessorSyncActionAndFullSyncSignals();
+    void testInitialSyncDefersRemoteWatcherUntilFolderAuthorityReady();
+    void testRestartAfterWakeDefersRemoteWatcherUntilFolderAuthorityReady();
     void testClearSessionStateResetsRuntimeCaches();
 
    private:
@@ -128,6 +133,7 @@ void TestMirrorSyncRuntime::init() {
     qRegisterMetaType<ConflictInfo>("ConflictInfo");
     qRegisterMetaType<ConflictResolutionStrategy>("ConflictResolutionStrategy");
     qRegisterMetaType<FullSync::State>("FullSync::State");
+    qRegisterMetaType<QHash<QString, QString>>("QHash<QString,QString>");
     qRegisterMetaType<SyncActionItem>("SyncActionItem");
 
     m_changeQueue = new ChangeQueue();
@@ -337,6 +343,74 @@ void TestMirrorSyncRuntime::testForwardsProcessorSyncActionAndFullSyncSignals() 
     QCOMPARE(m_runtime->lastFullSyncLocalCount(), 4);
     QCOMPARE(m_runtime->lastFullSyncRemoteCount(), 7);
     QCOMPARE(m_runtime->lastFullSyncError(), QStringLiteral("full sync error"));
+}
+
+void TestMirrorSyncRuntime::testInitialSyncDefersRemoteWatcherUntilFolderAuthorityReady() {
+    m_runtime->setChangeToken(QStringLiteral("token-initial"));
+
+    m_runtime->startAndScheduleInitialSync(0);
+
+    QTRY_COMPARE(m_changeProcessor->state(), ChangeProcessor::State::Running);
+    QTRY_COMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Stopped);
+
+    QMetaObject::invokeMethod(
+        m_fullSync,
+        [this]() {
+            QHash<QString, QString> folderMap;
+            folderMap.insert(QStringLiteral("folder-1"), QStringLiteral("docs"));
+            m_fullSync->emitRemoteFolderMapReadySignal(folderMap);
+        },
+        Qt::BlockingQueuedConnection);
+
+    QTRY_COMPARE(m_remoteWatcher->folderIdToPath().value(QStringLiteral("folder-1")),
+                 QStringLiteral("docs"));
+    QCOMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Stopped);
+
+    QMetaObject::invokeMethod(
+        m_fullSync, [this]() { m_fullSync->emitCompletedSignal(1, 1); },
+        Qt::BlockingQueuedConnection);
+
+    QTRY_COMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Running);
+}
+
+void TestMirrorSyncRuntime::testRestartAfterWakeDefersRemoteWatcherUntilFolderAuthorityReady() {
+    m_runtime->setChangeToken(QStringLiteral("token-restart"));
+    m_runtime->start();
+
+    QTRY_COMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Running);
+
+    QMetaObject::invokeMethod(
+        m_remoteWatcher,
+        [this]() {
+            QHash<QString, QString> staleMap;
+            staleMap.insert(QStringLiteral("stale-folder"), QStringLiteral("stale/path"));
+            m_remoteWatcher->setFolderIdToPath(staleMap);
+        },
+        Qt::BlockingQueuedConnection);
+
+    m_runtime->restartAfterWake(0);
+
+    QTRY_COMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Stopped);
+
+    QMetaObject::invokeMethod(
+        m_fullSync,
+        [this]() {
+            QHash<QString, QString> folderMap;
+            folderMap.insert(QStringLiteral("fresh-folder"), QStringLiteral("fresh/path"));
+            m_fullSync->emitRemoteFolderMapReadySignal(folderMap);
+        },
+        Qt::BlockingQueuedConnection);
+
+    QTRY_COMPARE(m_remoteWatcher->folderIdToPath().value(QStringLiteral("fresh-folder")),
+                 QStringLiteral("fresh/path"));
+    QVERIFY(!m_remoteWatcher->folderIdToPath().contains(QStringLiteral("stale-folder")));
+    QCOMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Stopped);
+
+    QMetaObject::invokeMethod(
+        m_fullSync, [this]() { m_fullSync->emitCompletedSignal(2, 3); },
+        Qt::BlockingQueuedConnection);
+
+    QTRY_COMPARE(m_remoteWatcher->state(), RemoteChangeWatcher::State::Running);
 }
 
 void TestMirrorSyncRuntime::testClearSessionStateResetsRuntimeCaches() {

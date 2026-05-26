@@ -45,15 +45,17 @@ enum class ChangeOrigin {
  * whether it originated locally or remotely.
  */
 struct ChangeQueueItem {
-    ChangeType changeType;     ///< Type of change (create, modify, delete, move, rename)
-    ChangeOrigin origin;       ///< Source of change (local or remote)
-    QString localPath;         ///< Path relative to sync root
-    QString fileId;            ///< Google Drive file ID (may be empty for new local files)
-    QDateTime detectedTime;    ///< When the change was detected
-    QDateTime modifiedTime;    ///< File modification time
-    bool isDirectory = false;  ///< Whether this is a directory
-    QString localContentHash;  ///< Local file content hash (MD5 hex) when available
-    QString remoteMd5;         ///< Remote Drive md5Checksum when available
+    ChangeType changeType;       ///< Type of change (create, modify, delete, move, rename)
+    ChangeOrigin origin;         ///< Source of change (local or remote)
+    QString localPath;           ///< Path relative to sync root
+    QString fileId;              ///< Google Drive file ID (may be empty for new local files)
+    QDateTime detectedTime;      ///< When the change was detected
+    QDateTime modifiedTime;      ///< File modification time
+    bool isDirectory = false;    ///< Whether this is a directory
+    QString localContentHash;    ///< Local file content hash (MD5 hex) when available
+    QString remoteMd5;           ///< Remote Drive md5Checksum when available
+    QString remoteParentId;      ///< Remote parent folder ID when known for remote-origin changes
+    QString remoteResolvedName;  ///< Remote visible local name before duplicate aliasing
 
     // Change-specific information (populate only as relevant)
     QString moveDestination;  ///< For moves: destination path relative to sync root

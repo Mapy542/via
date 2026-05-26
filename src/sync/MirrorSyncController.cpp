@@ -62,10 +62,44 @@ MirrorSyncController::MirrorSyncController(LocalChangeWatcher* localWatcher,
 
     if (m_fullSync) {
         connect(m_fullSyncLocalTimer, &QTimer::timeout, m_fullSync, &FullSync::fullSyncLocal);
+        qRegisterMetaType<QHash<QString, QString>>("QHash<QString,QString>");
+        connect(m_fullSync, &FullSync::remoteFolderMapReady, this,
+                [this](const QHash<QString, QString>& mapping) {
+                    seedRemoteWatcherPathAuthority(mapping);
+                    m_remoteWatcherAuthorityReady = true;
+                });
+        connect(m_fullSync, &FullSync::completed, this, [this](int, int) {
+            if (!m_remoteWatcherStartPending || !m_remoteWatcher ||
+                !m_remoteWatcherAuthorityReady) {
+                return;
+            }
+
+            m_remoteWatcherStartPending = false;
+            invokeAsync(m_remoteWatcher, [this]() { m_remoteWatcher->start(); });
+        });
     }
 }
 
 MirrorSyncController::~MirrorSyncController() = default;
+
+void MirrorSyncController::startCoreComponents(bool startRemoteWatcher) {
+    qInfo() << "Starting sync components...";
+    invokeAsync(m_localWatcher, [this]() { m_localWatcher->start(); });
+    if (startRemoteWatcher) {
+        invokeAsync(m_remoteWatcher, [this]() { m_remoteWatcher->start(); });
+    }
+    invokeAsync(m_changeProcessor, [this]() { m_changeProcessor->start(); });
+    invokeAsync(m_syncActionThread, [this]() { m_syncActionThread->start(); });
+}
+
+void MirrorSyncController::seedRemoteWatcherPathAuthority(const QHash<QString, QString>& mapping) {
+    if (!m_remoteWatcher) {
+        return;
+    }
+
+    invokeBlocking(m_remoteWatcher,
+                   [this, mapping]() { m_remoteWatcher->setFolderIdToPath(mapping); });
+}
 
 void MirrorSyncController::setPeriodicLocalFullSyncInterval(int intervalMs) {
     if (m_fullSyncLocalTimer) {
@@ -74,15 +108,15 @@ void MirrorSyncController::setPeriodicLocalFullSyncInterval(int intervalMs) {
 }
 
 void MirrorSyncController::start() {
-    qInfo() << "Starting sync components...";
-    invokeAsync(m_localWatcher, [this]() { m_localWatcher->start(); });
-    invokeAsync(m_remoteWatcher, [this]() { m_remoteWatcher->start(); });
-    invokeAsync(m_changeProcessor, [this]() { m_changeProcessor->start(); });
-    invokeAsync(m_syncActionThread, [this]() { m_syncActionThread->start(); });
+    m_remoteWatcherStartPending = false;
+    m_remoteWatcherAuthorityReady = false;
+    startCoreComponents(true);
 }
 
 void MirrorSyncController::stop() {
     qInfo() << "Stopping sync components...";
+    m_remoteWatcherStartPending = false;
+    m_remoteWatcherAuthorityReady = false;
     invokeBlocking(m_syncActionThread, [this]() { m_syncActionThread->stop(); });
     invokeBlocking(m_changeProcessor, [this]() { m_changeProcessor->stop(); });
     invokeBlocking(m_remoteWatcher, [this]() { m_remoteWatcher->stop(); });
@@ -102,7 +136,9 @@ void MirrorSyncController::pause() {
 
 void MirrorSyncController::resume() {
     invokeAsync(m_localWatcher, [this]() { m_localWatcher->resume(); });
-    invokeAsync(m_remoteWatcher, [this]() { m_remoteWatcher->resume(); });
+    if (!m_remoteWatcherStartPending) {
+        invokeAsync(m_remoteWatcher, [this]() { m_remoteWatcher->resume(); });
+    }
     invokeAsync(m_changeProcessor, [this]() { m_changeProcessor->resume(); });
     invokeAsync(m_syncActionThread, [this]() { m_syncActionThread->resume(); });
     if (m_fullSyncLocalTimer) {
@@ -119,7 +155,9 @@ void MirrorSyncController::cancelAndStop() {
 }
 
 void MirrorSyncController::startAndScheduleInitialSync(int delayMs) {
-    start();
+    m_remoteWatcherStartPending = true;
+    m_remoteWatcherAuthorityReady = false;
+    startCoreComponents(false);
     if (m_fullSyncLocalTimer) {
         m_fullSyncLocalTimer->start();
     }
@@ -127,10 +165,9 @@ void MirrorSyncController::startAndScheduleInitialSync(int delayMs) {
 }
 
 void MirrorSyncController::restartAfterWake(int fullSyncDelayMs) {
-    invokeAsync(m_remoteWatcher, [this]() {
-        m_remoteWatcher->stop();
-        m_remoteWatcher->start();
-    });
+    m_remoteWatcherStartPending = true;
+    m_remoteWatcherAuthorityReady = false;
+    invokeAsync(m_remoteWatcher, [this]() { m_remoteWatcher->stop(); });
     if (m_fullSyncLocalTimer) {
         m_fullSyncLocalTimer->start();
     }
@@ -152,6 +189,8 @@ void MirrorSyncController::requestFullSync(int delayMs) {
 }
 
 void MirrorSyncController::clearSessionState() {
+    m_remoteWatcherStartPending = false;
+    m_remoteWatcherAuthorityReady = false;
     invokeBlocking(m_changeProcessor, [this]() { m_changeProcessor->clearState(); });
     invokeBlocking(m_syncActionThread, [this]() { m_syncActionThread->clearInProgressActions(); });
     invokeBlocking(m_remoteWatcher, [this]() { m_remoteWatcher->clearChangeToken(); });

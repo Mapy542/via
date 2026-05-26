@@ -258,6 +258,16 @@ class SyncDatabase : public QObject {
     void setLocalPath(const QString& fileId, const QString& localPath);
 
     /**
+     * @brief Rewrite a folder mapping and all descendant paths as one tree update
+     * @param fileId Google Drive file ID for the moved or renamed folder
+     * @param oldLocalPath Previous folder path (relative)
+     * @param newLocalPath New folder path (relative)
+     * @return true when the folder row and descendant rows were updated successfully
+     */
+    bool updateLocalPathTree(const QString& fileId, const QString& oldLocalPath,
+                             const QString& newLocalPath);
+
+    /**
      * @brief Delete a file state by Drive file ID
      * @param fileId Google Drive file ID
      * @return true if deletion successful

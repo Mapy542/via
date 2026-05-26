@@ -122,6 +122,12 @@ class FullSync : public QObject {
     int localFileCount() const;
 
     /**
+     * @brief Get the most recently built remote folder ID to path mapping
+     * @return Folder IDs resolved during the last full remote discovery pass
+     */
+    QHash<QString, QString> remoteFolderIdToPath() const;
+
+    /**
      * @brief Check if full sync is currently running
      * @return true if scanning or fetching
      */
@@ -171,6 +177,12 @@ class FullSync : public QObject {
      * @param total Total items (0 if unknown)
      */
     void progressUpdated(const QString& phase, int current, int total);
+
+    /**
+     * @brief Emitted when a full remote folder map is ready for incremental change resolution
+     * @param mapping Folder ID to relative path mapping from the latest full sync
+     */
+    void remoteFolderMapReady(const QHash<QString, QString>& mapping);
 
     /**
      * @brief Emitted when full sync completes successfully
@@ -231,6 +243,15 @@ class FullSync : public QObject {
     void buildRemoteFolderStructure();
 
     /**
+     * @brief Reuse an existing local folder path when descendant IDs prove it is the same subtree
+     * @param folder Remote folder metadata
+     * @param desiredLocalPath Unsuffixed local path derived from the remote name
+     * @return Preferred local path or empty if the folder should still be disambiguated
+     */
+    QString preferredExistingFolderPath(const DriveFile& folder,
+                                        const QString& desiredLocalPath) const;
+
+    /**
      * @brief Get relative path from absolute path
      * @param absolutePath Absolute path
      * @return Path relative to sync folder
@@ -270,6 +291,7 @@ class FullSync : public QObject {
     // Remote file discovery state
     QList<DriveFile> m_allRemoteItems;  ///< All remote files discovered
     QString m_currentPageToken;         ///< Current page token for remote file listing
+    QHash<QString, QString> m_remoteFolderIdToPath;
 
     // Root of remote file tree
     FileTreeNode* m_remoteTree;

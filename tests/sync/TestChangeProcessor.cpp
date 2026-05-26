@@ -43,7 +43,9 @@ class TestChangeProcessor : public QObject {
     void testClassifyRemoteModify();
     void testClassifyRemoteDelete();
     void testClassifyRemoteMove();
+    void testRemoteModifyPathChangeWithSameRemoteParentStaysModify();
     void testRemoteModifyPathChangeReclassifiesMove();
+    void testRemoteModifyPathChangeWithSameParentReclassifiesRename();
 
     // Conflict detection (relates to issue in ChangeProcessor.cpp:393)
     void testConflictDetection_LocalAndRemoteModify();
@@ -339,13 +341,43 @@ void TestChangeProcessor::testClassifyRemoteMove() {
     QCOMPARE(action.moveDestination, QString("folder/h.txt"));
 }
 
+void TestChangeProcessor::testRemoteModifyPathChangeWithSameRemoteParentStaysModify() {
+    m_actionQueue->clear();
+    const QDateTime dbSyncTime = QDateTime::currentDateTime().addSecs(-120);
+    saveState("docs", "folder-docs", dbSyncTime, true);
+    saveState("docs/note.txt", "file-note", dbSyncTime);
+
+    ChangeQueueItem change =
+        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "docs_folder-2/note.txt", "file-note");
+    change.modifiedTime = dbSyncTime.addSecs(ChangeProcessor::MIN_CHANGE_DIFF_SECS + 1);
+    change.remoteParentId = "folder-docs";
+    change.remoteResolvedName = "note.txt";
+
+    QVERIFY(m_processor->validateChange(change));
+    QCOMPARE(change.changeType, ChangeType::Modify);
+    QCOMPARE(change.localPath, QString("docs/note.txt"));
+    QVERIFY(change.moveDestination.isEmpty());
+    QVERIFY(change.renameTo.isEmpty());
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::Download);
+    QCOMPARE(action.localPath, QString("docs/note.txt"));
+    QCOMPARE(action.fileId, QString("file-note"));
+}
+
 void TestChangeProcessor::testRemoteModifyPathChangeReclassifiesMove() {
     m_actionQueue->clear();
     QDateTime dbSyncTime = QDateTime::currentDateTime().addSecs(-120);
     saveState("ILOVEYOUSENDNUDES.pwmx", "file-1", dbSyncTime);
+    saveState("mario", "folder-mario", dbSyncTime, true);
 
     ChangeQueueItem change = makeChange(ChangeType::Modify, ChangeOrigin::Remote,
                                         "mario/ILOVEYOUSENDNUDES.pwmx", "file-1");
+    change.remoteParentId = "folder-mario";
+    change.remoteResolvedName = "ILOVEYOUSENDNUDES.pwmx";
 
     QVERIFY(m_processor->validateChange(change));
     QCOMPARE(change.changeType, ChangeType::Move);
@@ -360,6 +392,33 @@ void TestChangeProcessor::testRemoteModifyPathChangeReclassifiesMove() {
     QCOMPARE(action.actionType, SyncActionType::MoveLocal);
     QCOMPARE(action.localPath, QString("ILOVEYOUSENDNUDES.pwmx"));
     QCOMPARE(action.moveDestination, QString("mario/ILOVEYOUSENDNUDES.pwmx"));
+}
+
+void TestChangeProcessor::testRemoteModifyPathChangeWithSameParentReclassifiesRename() {
+    m_actionQueue->clear();
+    const QDateTime dbSyncTime = QDateTime::currentDateTime().addSecs(-120);
+    saveState("docs", "folder-docs", dbSyncTime, true);
+    saveState("docs/old.txt", "file-old", dbSyncTime);
+
+    ChangeQueueItem change =
+        makeChange(ChangeType::Modify, ChangeOrigin::Remote, "docs/new.txt", "file-old");
+    change.modifiedTime = dbSyncTime;
+    change.remoteParentId = "folder-docs";
+    change.remoteResolvedName = "new.txt";
+
+    QVERIFY(m_processor->validateChange(change));
+    QCOMPARE(change.changeType, ChangeType::Rename);
+    QCOMPARE(change.localPath, QString("docs/old.txt"));
+    QCOMPARE(change.renameTo, QString("new.txt"));
+    QVERIFY(change.moveDestination.isEmpty());
+
+    m_processor->determineAndQueueActions(change);
+
+    QCOMPARE(m_actionQueue->count(), 1);
+    SyncActionItem action = m_actionQueue->dequeue();
+    QCOMPARE(action.actionType, SyncActionType::RenameLocal);
+    QCOMPARE(action.localPath, QString("docs/old.txt"));
+    QCOMPARE(action.renameTo, QString("new.txt"));
 }
 
 void TestChangeProcessor::testValidateChange_TrashPathRejected() {
@@ -666,6 +725,8 @@ void TestChangeProcessor::testRemoteFolderPathChange_NoConflict_MoveActionQueued
         makeChange(ChangeType::Modify, ChangeOrigin::Remote, newPath, "folder-id-remote-move");
     change.isDirectory = true;
     change.modifiedTime = QDateTime::currentDateTime().addDays(-6);
+    change.remoteParentId = "folder-id-screenshots";
+    change.remoteResolvedName = "Windows";
 
     QVERIFY(m_processor->validateChange(change));
     QCOMPARE(change.changeType, ChangeType::Move);
@@ -1072,12 +1133,18 @@ void TestChangeProcessor::testValidateChange_AllTypesRemote() {
 void TestChangeProcessor::testValidateChange_RemotePathChangeAllowsStaleMtime() {
     const QDateTime baseTime = QDateTime::currentDateTime().addSecs(-10);
     saveState("old/path.txt", "remote-id-2", baseTime);
+    saveState("new", "folder-id-new", baseTime, true);
 
     ChangeQueueItem change =
         makeChange(ChangeType::Modify, ChangeOrigin::Remote, "new/path.txt", "remote-id-2");
     change.modifiedTime = baseTime;
+    change.remoteParentId = "folder-id-new";
+    change.remoteResolvedName = "path.txt";
 
     QVERIFY(m_processor->validateChange(change));
+    QCOMPARE(change.changeType, ChangeType::Move);
+    QCOMPARE(change.localPath, QString("old/path.txt"));
+    QCOMPARE(change.moveDestination, QString("new/path.txt"));
 }
 
 void TestChangeProcessor::testValidateChange_LocalMoveMissingFileIdRejected() {

@@ -342,9 +342,11 @@ class TestSyncActionThread : public QObject {
     void testMoveLocal();
     void testMoveLocal_DisambiguatesWhenDestinationExists();
     void testMoveLocal_UpdatesMetadataOnDestination();
+    void testMoveLocal_UpdatesDescendantPaths();
     void testMoveLocal_UsesActionFileIdWhenSourceMappingMissing();
     void testRenameLocal();
     void testRenameLocal_DisambiguatesWhenDestinationExists();
+    void testRenameLocal_UpdatesDescendantPaths();
     void testRenameLocal_UsesActionFileIdWhenSourceMappingMissing();
     void testDeleteRemoteById();
     void testDeleteRemoteFromDb();
@@ -1226,6 +1228,34 @@ void TestSyncActionThread::testMoveLocal_UpdatesMetadataOnDestination() {
     QVERIFY(qAbs(actual - expected) <= 2);
 }
 
+void TestSyncActionThread::testMoveLocal_UpdatesDescendantPaths() {
+    createFile("project/src/main.cpp", "main");
+    createFile("project/src/utils/helper.cpp", "helper");
+    createFile("project/README.md", "readme");
+
+    m_db->setFileId("project", "id-project");
+    m_db->setFileId("project/src", "id-src");
+    m_db->setFileId("project/src/main.cpp", "id-main");
+    m_db->setFileId("project/src/utils", "id-utils");
+    m_db->setFileId("project/src/utils/helper.cpp", "id-helper");
+    m_db->setFileId("project/README.md", "id-readme");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::MoveLocal;
+    action.localPath = "project";
+    action.moveDestination = "archive/project";
+
+    enqueueAndWait(action);
+
+    QVERIFY(QFile::exists(m_tempDir->filePath("archive/project/src/main.cpp")));
+    QCOMPARE(m_db->getLocalPath("id-project"), QString("archive/project"));
+    QCOMPARE(m_db->getLocalPath("id-src"), QString("archive/project/src"));
+    QCOMPARE(m_db->getLocalPath("id-main"), QString("archive/project/src/main.cpp"));
+    QCOMPARE(m_db->getLocalPath("id-utils"), QString("archive/project/src/utils"));
+    QCOMPARE(m_db->getLocalPath("id-helper"), QString("archive/project/src/utils/helper.cpp"));
+    QCOMPARE(m_db->getLocalPath("id-readme"), QString("archive/project/README.md"));
+}
+
 void TestSyncActionThread::testMoveLocal_UsesActionFileIdWhenSourceMappingMissing() {
     QString relPath = "move/stale-source.txt";
     createFile(relPath, "move");
@@ -1273,6 +1303,29 @@ void TestSyncActionThread::testRenameLocal_DisambiguatesWhenDestinationExists() 
     QVERIFY(QFile::exists(m_tempDir->filePath("rename/target_local-id-rename-conflict.txt")));
     QCOMPARE(m_db->getLocalPath("local-id-rename-conflict"),
              QString("rename/target_local-id-rename-conflict.txt"));
+}
+
+void TestSyncActionThread::testRenameLocal_UpdatesDescendantPaths() {
+    createFile("rename/old_name/file1.txt", "1");
+    createFile("rename/old_name/subdir/file2.txt", "2");
+
+    m_db->setFileId("rename/old_name", "folder-id");
+    m_db->setFileId("rename/old_name/file1.txt", "file1-id");
+    m_db->setFileId("rename/old_name/subdir", "subdir-id");
+    m_db->setFileId("rename/old_name/subdir/file2.txt", "file2-id");
+
+    SyncActionItem action;
+    action.actionType = SyncActionType::RenameLocal;
+    action.localPath = "rename/old_name";
+    action.renameTo = "new_name";
+
+    enqueueAndWait(action);
+
+    QVERIFY(QFile::exists(m_tempDir->filePath("rename/new_name/subdir/file2.txt")));
+    QCOMPARE(m_db->getLocalPath("folder-id"), QString("rename/new_name"));
+    QCOMPARE(m_db->getLocalPath("file1-id"), QString("rename/new_name/file1.txt"));
+    QCOMPARE(m_db->getLocalPath("subdir-id"), QString("rename/new_name/subdir"));
+    QCOMPARE(m_db->getLocalPath("file2-id"), QString("rename/new_name/subdir/file2.txt"));
 }
 
 void TestSyncActionThread::testRenameLocal_UsesActionFileIdWhenSourceMappingMissing() {

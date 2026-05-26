@@ -141,6 +141,7 @@ class TestFullSync : public QObject {
     void testRemoteTreeSkipsTrashArtifacts();
     void testRemoteDuplicateFilesUseFileIdSuffix();
     void testRemoteDuplicateFoldersKeepDistinctDescendants();
+    void testRemoteFolderReusesExistingLocalSubtreeWhenFolderMappingMissing();
     void testRemoteTreeNativeDocRepresentationModes_data();
     void testRemoteTreeNativeDocRepresentationModes();
     void testRemoteDuplicateNativeDocsUseVisibleSuffix();
@@ -548,6 +549,48 @@ void TestFullSync::testRemoteDuplicateFoldersKeepDistinctDescendants() {
     QCOMPARE(resolvedPaths.value("folder-2"), QString("docs_folder-2"));
     QCOMPARE(resolvedPaths.value("file-1"), QString("docs/readme.md"));
     QCOMPARE(resolvedPaths.value("file-2"), QString("docs_folder-2/readme.md"));
+}
+
+void TestFullSync::testRemoteFolderReusesExistingLocalSubtreeWhenFolderMappingMissing() {
+    QString syncDir = m_tempDir->filePath("sync");
+    QDir().mkpath(syncDir);
+    m_fullSync->setSyncFolder(syncDir);
+
+    const QString localFolder = QDir(syncDir).filePath("project");
+    QVERIFY(QDir().mkpath(localFolder));
+
+    QFile localFile(QDir(localFolder).filePath("readme.md"));
+    QVERIFY(localFile.open(QIODevice::WriteOnly));
+    QVERIFY(localFile.write("local data") > 0);
+    localFile.close();
+
+    FileSyncState childState;
+    childState.localPath = "project/readme.md";
+    childState.fileId = "file-1";
+    childState.modifiedTimeAtSync = QDateTime::currentDateTimeUtc().addDays(-10);
+    childState.isFolder = false;
+    m_syncDatabase->saveFileState(childState);
+
+    FakeDriveClientForFS::FilePage page;
+    page.files.append(makeFile("folder-1", "project", "root-id-123", /*isFolder=*/true));
+    page.files.append(makeFile("file-1", "readme.md", "folder-1"));
+    m_driveClient->filePages.append(page);
+
+    QSignalSpy completedSpy(m_fullSync, &FullSync::completed);
+    m_fullSync->fullSync();
+
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.count() >= 1, 2000);
+
+    QHash<QString, QString> resolvedPaths;
+    while (!m_changeQueue->isEmpty()) {
+        ChangeQueueItem item = m_changeQueue->dequeue();
+        if (item.origin == ChangeOrigin::Remote) {
+            resolvedPaths.insert(item.fileId, item.localPath);
+        }
+    }
+
+    QCOMPARE(resolvedPaths.value("folder-1"), QString("project"));
+    QCOMPARE(resolvedPaths.value("file-1"), QString("project/readme.md"));
 }
 
 void TestFullSync::testRemoteTreeNativeDocRepresentationModes_data() {
