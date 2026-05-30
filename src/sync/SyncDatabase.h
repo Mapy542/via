@@ -14,7 +14,9 @@
 #include <QObject>
 #include <QSqlDatabase>
 #include <QSqlError>
+#include <QSqlQuery>
 #include <QString>
+#include <memory>
 
 #include "utils/NativeDocSupport.h"
 
@@ -629,10 +631,19 @@ class SyncDatabase : public QObject {
    private:
     friend class SyncDatabaseConnectionHandle;
 
+    struct PreparedStatementCache {
+        QString connectionName;
+        QHash<QString, std::shared_ptr<QSqlQuery>> queries;
+    };
+
     QSqlDatabase databaseForCurrentThread() const;
     QSqlDatabase databaseForCurrentThreadUnlocked() const;
+    QSqlQuery* preparedQueryForCurrentThreadUnlocked(const QString& cacheKey, const QString& sql,
+                                                     const char* operation) const;
     bool openConnectionUnlocked();
     void closeUnlocked();
+    void clearPreparedStatementsForThreadUnlocked(quintptr threadKey);
+    void clearAllPreparedStatementsUnlocked();
     void closeConnectionByNameUnlocked(const QString& connectionName);
     void closeAllConnectionsUnlocked();
     QString connectionNameForThreadUnlocked(quintptr threadKey) const;
@@ -656,6 +667,7 @@ class SyncDatabase : public QObject {
     mutable SyncDatabaseConnectionHandle m_db;
     QString m_dbPath;
     mutable QHash<quintptr, QString> m_connectionNamesByThread;
+    mutable QHash<quintptr, PreparedStatementCache> m_preparedStatementsByThread;
     QString m_primaryConnectionName;
     bool m_connectionsReady = false;
     mutable QRecursiveMutex m_mutex;                      ///< Thread-safe access to database

@@ -1779,10 +1779,9 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         return 0;
     }
 
-    // ── Cache-first path (LOG-01 fix) ──
-    // If MetadataCache has fresh children for this directory, serve them
-    // directly without hitting the API.  The MetadataRefreshWorker keeps
-    // the cache warm in the background, so this is safe.
+    // ── Cache / SQLite path ──
+    // Serve warm directory listings from memory when available. On a cold cache after startup,
+    // hydrate the listing from SQLite before falling back to the Drive API.
     QString cacheLookupPath;
     if (qpath.isEmpty() || qpath == "/") {
         cacheLookupPath = QStringLiteral("/");
@@ -1790,8 +1789,12 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         cacheLookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
     }
 
+    QList<FuseFileMetadata> cached;
+    if (drv->m_metadataCache) {
+        cached = drv->m_metadataCache->getOrFetchChildren(cacheLookupPath);
+    }
+
     if (drv->m_metadataCache && drv->m_metadataCache->hasChildrenCached(cacheLookupPath)) {
-        QList<FuseFileMetadata> cached = drv->m_metadataCache->getChildren(cacheLookupPath);
         qDebug() << "FuseDriver::readdir: Serving" << cached.size() << "entries from cache for"
                  << qpath;
         QSet<QString> emittedNames;

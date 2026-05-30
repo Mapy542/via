@@ -267,7 +267,9 @@ void TestMetadataCache::testPersistence_SurvivesReinit() {
     m_cache = new MetadataCache(m_db, m_driveClient, this);
     QVERIFY(m_cache->initialize());
 
-    auto got = m_cache->getMetadataByPath("saved.txt");
+    QVERIFY(!m_cache->getMetadataByPath("saved.txt").isValid());
+
+    auto got = m_cache->getOrFetchMetadataByPath("saved.txt");
     QVERIFY(got.isValid());
     QCOMPARE(got.fileId, QString("persist1"));
 }
@@ -421,7 +423,9 @@ void TestMetadataCache::testDuplicateAliasesPersistAcrossReinit() {
 
     QCOMPARE(m_cache->getPathByFileId("idB"), QString("report_idB.txt"));
 
-    const QList<FuseFileMetadata> children = m_cache->getChildren("/");
+    QVERIFY(m_cache->getChildren("/").isEmpty());
+
+    const QList<FuseFileMetadata> children = m_cache->getOrFetchChildren("/");
     QCOMPARE(children.size(), 1);
     QCOMPARE(children.first().path, QString("report_idB.txt"));
 }

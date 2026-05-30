@@ -163,7 +163,9 @@ class TestSyncDatabase : public QObject {
     void testMultipleRapidWrites();
     void testConcurrentReadWrite_NoCorruption();
     void testConcurrentReadWrite_UsesThreadScopedConnections();
+    void testCloseCurrentThreadConnection_AfterPreparedQueryReuse();
     void testConcurrentFuseMetadata_NoCorruption();
+    void testRecreateCurrentSchema_AfterPreparedQueryReuse();
     void testDatabaseNotOpen_OperationsGraceful();
 
    private:
@@ -1653,6 +1655,73 @@ void TestSyncDatabase::testConcurrentReadWrite_UsesThreadScopedConnections() {
     QVERIFY(syncConnectionCount() >= baselineConnectionCount + 1);
 }
 
+void TestSyncDatabase::testCloseCurrentThreadConnection_AfterPreparedQueryReuse() {
+    const auto syncConnectionCount = []() {
+        int count = 0;
+        for (const QString& connectionName : QSqlDatabase::connectionNames()) {
+            if (connectionName.startsWith(QStringLiteral("sync_connection_"))) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    const int baselineConnectionCount = syncConnectionCount();
+    QAtomicInt workerResult(0);
+
+    QThread workerThread;
+    QObject workerContext;
+    workerContext.moveToThread(&workerThread);
+
+    connect(&workerThread, &QThread::started, &workerContext, [this, &workerResult]() {
+        FileSyncState state;
+        state.localPath = "thread-close/file.txt";
+        state.fileId = "THREAD_CLOSE_FILE";
+        state.remoteMd5AtSync = "remote-md5";
+        state.localHashAtSync = "local-hash";
+        m_db->saveFileState(state);
+
+        FuseMetadata meta;
+        meta.fileId = "THREAD_CLOSE_FUSE";
+        meta.path = "/thread-close/file.txt";
+        meta.name = "file.txt";
+        meta.parentId = "root";
+        meta.isFolder = false;
+        meta.size = 128;
+        meta.mimeType = "text/plain";
+        meta.createdTime = QDateTime::currentDateTimeUtc();
+        meta.modifiedTime = meta.createdTime;
+        meta.cachedAt = meta.createdTime;
+        meta.lastAccessed = meta.createdTime;
+        QVERIFY(m_db->saveFuseMetadata(meta));
+
+        bool ok = true;
+        for (int i = 0; i < 25; ++i) {
+            ok = ok && m_db->getFileState(state.localPath).fileId == state.fileId;
+            ok = ok && m_db->getFileId(state.localPath) == state.fileId;
+
+            const QString token = QString("thread-token-%1").arg(i);
+            m_db->setChangeToken(token);
+            ok = ok && m_db->getChangeToken() == token;
+            ok = ok && m_db->fileCount() >= 1;
+            ok = ok && m_db->getFuseMetadata(meta.fileId).path == meta.path;
+            ok = ok && m_db->getFuseMetadataByPath(meta.path).fileId == meta.fileId;
+        }
+
+        m_db->closeCurrentThreadConnection();
+        workerResult.storeRelaxed(ok ? 1 : -1);
+        QThread::currentThread()->quit();
+    });
+
+    workerThread.start();
+    QVERIFY(workerThread.wait(5000));
+
+    QCOMPARE(workerResult.loadRelaxed(), 1);
+    QCOMPARE(syncConnectionCount(), baselineConnectionCount);
+    QCOMPARE(m_db->getFileState(QStringLiteral("thread-close/file.txt")).fileId,
+             QString("THREAD_CLOSE_FILE"));
+}
+
 void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
     // Stress test FUSE metadata operations concurrently
     const int numThreads = 4;
@@ -1732,6 +1801,59 @@ void TestSyncDatabase::testConcurrentFuseMetadata_NoCorruption() {
         FuseMetadata meta = m_db->getFuseMetadata(QString("FUSE_ID_%1").arg(i));
         QCOMPARE(meta.path, QString("/fuse/file%1.txt").arg(i));
     }
+}
+
+void TestSyncDatabase::testRecreateCurrentSchema_AfterPreparedQueryReuse() {
+    FileSyncState state;
+    state.localPath = "recreate/cache-file.txt";
+    state.fileId = "RECREATE_FILE";
+    state.remoteMd5AtSync = "remote-before";
+    state.localHashAtSync = "local-before";
+    m_db->saveFileState(state);
+
+    FuseMetadata meta;
+    meta.fileId = "RECREATE_FUSE";
+    meta.path = "/recreate/cache-file.txt";
+    meta.name = "cache-file.txt";
+    meta.parentId = "root";
+    meta.isFolder = false;
+    meta.size = 42;
+    meta.mimeType = "text/plain";
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = meta.createdTime;
+    meta.cachedAt = meta.createdTime;
+    meta.lastAccessed = meta.createdTime;
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    for (int i = 0; i < 20; ++i) {
+        QCOMPARE(m_db->getFileState(state.localPath).fileId, QString("RECREATE_FILE"));
+        QCOMPARE(m_db->getRemoteMd5AtSync(state.localPath), QString("remote-before"));
+        QCOMPARE(m_db->getLocalHashAtSync(state.localPath), QString("local-before"));
+        QCOMPARE(m_db->getFuseMetadata(meta.fileId).path, QString("/recreate/cache-file.txt"));
+        QCOMPARE(m_db->getFuseMetadataByPath(meta.path).fileId, QString("RECREATE_FUSE"));
+        QCOMPARE(m_db->fileCount(), 1);
+    }
+
+    m_db->setChangeToken("recreate-token");
+    QCOMPARE(m_db->getChangeToken(), QString("recreate-token"));
+
+    QVERIFY(m_db->recreateCurrentSchema());
+
+    QCOMPARE(m_db->fileCount(), 0);
+    QVERIFY(m_db->getFileState(state.localPath).fileId.isEmpty());
+    QVERIFY(m_db->getFuseMetadata(meta.fileId).fileId.isEmpty());
+    QVERIFY(m_db->getChangeToken().isEmpty());
+
+    FileSyncState rebuiltState;
+    rebuiltState.localPath = "recreate/after-reset.txt";
+    rebuiltState.fileId = "REBUILT_FILE";
+    rebuiltState.remoteMd5AtSync = "remote-after";
+    rebuiltState.localHashAtSync = "local-after";
+    m_db->saveFileState(rebuiltState);
+
+    QCOMPARE(m_db->getFileState(rebuiltState.localPath).fileId, QString("REBUILT_FILE"));
+    QCOMPARE(m_db->getRemoteMd5AtSync(rebuiltState.localPath), QString("remote-after"));
+    QCOMPARE(m_db->getLocalHashAtSync(rebuiltState.localPath), QString("local-after"));
 }
 
 // =============================================================================

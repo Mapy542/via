@@ -379,7 +379,7 @@ bool MetadataCache::initialize() {
     // L2 fix: Table creation is handled by SyncDatabase::createFuseTables().
     // We no longer duplicate the DDL here.
 
-    // Load existing metadata from database
+    // Perform lightweight startup maintenance without mirroring the full metadata table in RAM.
     loadFromDatabase();
 
     qInfo() << "MetadataCache initialized with" << m_pathToMetadata.size() << "entries";
@@ -431,6 +431,10 @@ FuseFileMetadata MetadataCache::getOrFetchMetadataByPath(const QString& path, bo
                 m_fileIdToPath[metadata.fileId] = metadata.path;
             }
 
+            if (fetched) {
+                *fetched = true;
+            }
+
             m_cacheHits++;
             return metadata;
         }
@@ -452,14 +456,24 @@ bool MetadataCache::hasPath(const QString& path) const {
 // ========================================
 
 FuseFileMetadata MetadataCache::getMetadataByFileId(const QString& fileId) const {
-    QReadLocker locker(&m_lock);
+    {
+        QReadLocker locker(&m_lock);
 
-    auto pathIt = m_fileIdToPath.constFind(fileId);
-    if (pathIt != m_fileIdToPath.constEnd()) {
-        auto metaIt = m_pathToMetadata.constFind(pathIt.value());
-        if (metaIt != m_pathToMetadata.constEnd()) {
+        auto pathIt = m_fileIdToPath.constFind(fileId);
+        if (pathIt != m_fileIdToPath.constEnd()) {
+            auto metaIt = m_pathToMetadata.constFind(pathIt.value());
+            if (metaIt != m_pathToMetadata.constEnd()) {
+                m_cacheHits++;
+                return metaIt.value();
+            }
+        }
+    }
+
+    if (m_database) {
+        const FuseMetadata dbMeta = m_database->getFuseMetadata(fileId);
+        if (!dbMeta.fileId.isEmpty()) {
             m_cacheHits++;
-            return metaIt.value();
+            return fromDbMetadata(dbMeta);
         }
     }
 
@@ -479,11 +493,20 @@ QString MetadataCache::getFileIdByPath(const QString& path) const {
 }
 
 QString MetadataCache::getPathByFileId(const QString& fileId) const {
-    QReadLocker locker(&m_lock);
+    {
+        QReadLocker locker(&m_lock);
 
-    auto it = m_fileIdToPath.constFind(fileId);
-    if (it != m_fileIdToPath.constEnd()) {
-        return it.value();
+        auto it = m_fileIdToPath.constFind(fileId);
+        if (it != m_fileIdToPath.constEnd()) {
+            return it.value();
+        }
+    }
+
+    if (m_database) {
+        const FuseMetadata dbMeta = m_database->getFuseMetadata(fileId);
+        if (!dbMeta.fileId.isEmpty()) {
+            return dbMeta.path;
+        }
     }
 
     return QString();
@@ -516,35 +539,59 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
         *fetched = false;
     }
 
-    // Check if children are cached and fresh
+    // Fresh warm listings can be served directly. If we already know a directory listing is stale,
+    // let the caller decide whether it wants to refresh from the API instead of re-serving SQLite.
+    bool hadDirectoryState = false;
     {
         QReadLocker locker(&m_lock);
         auto timeIt = m_childrenCacheTime.constFind(parentPath);
         if (timeIt != m_childrenCacheTime.constEnd()) {
+            hadDirectoryState = true;
             if (timeIt->secsTo(QDateTime::currentDateTime()) < m_maxCacheAgeSeconds) {
                 return getChildren(parentPath);
             }
         }
     }
 
-    // Try database via SyncDatabase (thread-safe)
-    // Get parent file ID first
+    if (hadDirectoryState) {
+        return QList<FuseFileMetadata>();
+    }
+
+    // Cold directory lookup: try SQLite before asking Drive for a fresh listing.
     QString parentId;
+    bool parentKnown = false;
     if (parentPath.isEmpty() || parentPath == "/") {
         parentId = m_rootFolderId;
     } else {
-        QReadLocker locker(&m_lock);
-        auto it = m_pathToMetadata.constFind(parentPath);
-        if (it != m_pathToMetadata.constEnd()) {
-            parentId = it->fileId;
+        {
+            QReadLocker locker(&m_lock);
+            auto it = m_pathToMetadata.constFind(parentPath);
+            if (it != m_pathToMetadata.constEnd()) {
+                parentId = it->fileId;
+                parentKnown = true;
+            }
+        }
+
+        if (!parentKnown && m_database) {
+            const FuseMetadata dbParentMeta = m_database->getFuseMetadataByPath(parentPath);
+            if (!dbParentMeta.fileId.isEmpty()) {
+                const FuseFileMetadata parentMetadata = fromDbMetadata(dbParentMeta);
+                parentId = parentMetadata.fileId;
+                parentKnown = true;
+
+                QWriteLocker locker(&m_lock);
+                m_pathToMetadata[parentMetadata.path] = parentMetadata;
+                m_fileIdToPath[parentMetadata.fileId] = parentMetadata.path;
+            }
         }
     }
 
     if (!parentId.isEmpty() && m_database) {
-        QList<FuseMetadata> dbChildren = m_database->getFuseChildren(parentId);
+        const QList<FuseMetadata> dbChildren = m_database->getFuseChildren(parentId);
 
-        if (!dbChildren.isEmpty()) {
+        if (!dbChildren.isEmpty() || (parentKnown && parentPath != "/")) {
             QList<FuseFileMetadata> children;
+            children.reserve(dbChildren.size());
             for (const FuseMetadata& dbMeta : dbChildren) {
                 children.append(fromDbMetadata(dbMeta));
             }
@@ -552,6 +599,7 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
             // Update in-memory cache
             QWriteLocker locker(&m_lock);
             QList<QString> childPaths;
+            childPaths.reserve(children.size());
             for (const FuseFileMetadata& child : children) {
                 m_pathToMetadata[child.path] = child;
                 m_fileIdToPath[child.fileId] = child.path;
@@ -559,6 +607,10 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
             }
             m_parentToChildren[parentPath] = childPaths;
             m_childrenCacheTime[parentPath] = QDateTime::currentDateTime();
+
+            if (fetched) {
+                *fetched = true;
+            }
 
             return children;
         }
@@ -1106,53 +1158,38 @@ void MetadataCache::onApiChildrenReceived(const QString& parentId,
 // ========================================
 
 void MetadataCache::loadFromDatabase() {
-    // TODO: PERFORMANCE / OPTIMIZATION
-    // Eagerly loading the entire database metadata into in-memory QHash structures models path
-    // tables 1:1 in RAM. For large remote drives (e.g. 10s of thousands of files), this results in
-    // substantial idle memory footprint, which is the primary driver of the ~50MB+ idle memory
-    // overhead. Recommendation:
-    // 1. Pivot to a lazy directory-by-directory loading and population model of m_pathToMetadata on
-    // demand (readdir/getattr miss).
-    // 2. Introduce a bounded caching model (e.g., LRU cache for metadata entries with a target
-    // maximum size).
-    // 3. Keep directory structures (m_parentToChildren) cleared/evicted when not accessed for a
-    // longer duration.
+    // Avoid eagerly mirroring fuse_metadata into RAM. Cold paths are hydrated from SQLite on demand
+    // by getOrFetchMetadataByPath() / getOrFetchChildren().
+    {
+        QWriteLocker locker(&m_lock);
+        m_pathToMetadata.clear();
+        m_fileIdToPath.clear();
+        m_parentToChildren.clear();
+        m_childrenCacheTime.clear();
+    }
+
     if (!m_database) {
         qWarning() << "MetadataCache: No database available, starting with empty cache";
         return;
     }
 
-    QList<FuseMetadata> dbEntries = m_database->getAllFuseMetadata();
+    const QList<FuseMetadata> dbEntries = m_database->getAllFuseMetadata();
     QList<FuseMetadata> staleTrashEntries;
-
-    QWriteLocker locker(&m_lock);
+    staleTrashEntries.reserve(dbEntries.size());
 
     for (const FuseMetadata& dbMeta : dbEntries) {
-        const FuseFileMetadata metadata = fromDbMetadata(dbMeta);
-
-        if (TrashPolicy::isTrashRelativePath(metadata.path)) {
+        if (TrashPolicy::isTrashRelativePath(dbMeta.path)) {
             staleTrashEntries.append(dbMeta);
-            continue;
-        }
-
-        m_pathToMetadata[metadata.path] = metadata;
-        m_fileIdToPath[metadata.fileId] = metadata.path;
-
-        // Build parent-to-children mapping (deduplicate)
-        QString parentPath = getParentPath(metadata.path);
-        if (!m_parentToChildren[parentPath].contains(metadata.path)) {
-            m_parentToChildren[parentPath].append(metadata.path);
         }
     }
-
-    locker.unlock();
 
     for (const FuseMetadata& staleEntry : staleTrashEntries) {
         m_database->deleteNativeDocState(staleEntry.fileId);
         m_database->deleteFuseMetadata(staleEntry.fileId);
     }
 
-    qDebug() << "MetadataCache: Loaded" << m_pathToMetadata.size() << "entries from database";
+    qDebug() << "MetadataCache: Deferred startup preload; pruned"
+             << staleTrashEntries.size() << "stale trash entries";
 }
 
 void MetadataCache::saveToDatabase(const FuseFileMetadata& metadata) {

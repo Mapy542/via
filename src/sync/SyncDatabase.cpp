@@ -25,6 +25,20 @@ namespace {
 
 static std::atomic<int> s_connectionCounter{0};
 
+class PreparedQueryResetGuard {
+   public:
+    explicit PreparedQueryResetGuard(QSqlQuery* query) : m_query(query) {}
+
+    ~PreparedQueryResetGuard() {
+        if (m_query) {
+            m_query->finish();
+        }
+    }
+
+   private:
+    QSqlQuery* m_query;
+};
+
 bool tableExists(const QSqlDatabase& db, const QString& tableName) {
     return db.tables().contains(tableName, Qt::CaseInsensitive);
 }
@@ -152,6 +166,7 @@ SyncDatabase::~SyncDatabase() {
 bool SyncDatabase::openConnectionUnlocked() {
     const quintptr threadKey = currentThreadKey();
     const QString connectionName = ensureConnectionNameForThreadUnlocked(threadKey);
+    constexpr int kBusyTimeoutMs = 5000;
 
     QSqlDatabase db;
     if (QSqlDatabase::contains(connectionName)) {
@@ -168,6 +183,7 @@ bool SyncDatabase::openConnectionUnlocked() {
     }
 
     db.setDatabaseName(m_dbPath);
+    db.setConnectOptions(QStringLiteral("QSQLITE_BUSY_TIMEOUT=%1").arg(kBusyTimeoutMs));
 
     if (!db.open()) {
         logError("initialize", db.lastError().text());
@@ -275,6 +291,7 @@ void SyncDatabase::closeCurrentThreadConnection() {
         return;
     }
 
+    clearPreparedStatementsForThreadUnlocked(threadKey);
     m_connectionNamesByThread.remove(threadKey);
     if (m_primaryConnectionName == connectionName) {
         m_primaryConnectionName.clear();
@@ -314,6 +331,56 @@ QSqlDatabase SyncDatabase::databaseForCurrentThreadUnlocked() const {
     return QSqlDatabase::database(connectionName, false);
 }
 
+QSqlQuery* SyncDatabase::preparedQueryForCurrentThreadUnlocked(const QString& cacheKey,
+                                                               const QString& sql,
+                                                               const char* operation) const {
+    QSqlDatabase db = databaseForCurrentThreadUnlocked();
+    if ((!db.isValid() || !db.isOpen()) && m_connectionsReady) {
+        if (const_cast<SyncDatabase*>(this)->openConnectionUnlocked()) {
+            db = databaseForCurrentThreadUnlocked();
+        }
+    }
+
+    if (!db.isValid() || !db.isOpen()) {
+        return nullptr;
+    }
+
+    const quintptr threadKey = currentThreadKey();
+    PreparedStatementCache& cache = m_preparedStatementsByThread[threadKey];
+    const QString connectionName = db.connectionName();
+    if (cache.connectionName != connectionName) {
+        cache.queries.clear();
+        cache.connectionName = connectionName;
+    }
+
+    auto cachedQuery = cache.queries.find(cacheKey);
+    if (cachedQuery == cache.queries.end()) {
+        auto query = std::make_shared<QSqlQuery>(db);
+        if (!query->prepare(sql)) {
+            logError(QString::fromLatin1(operation), query->lastError().text());
+            return nullptr;
+        }
+        cachedQuery = cache.queries.insert(cacheKey, query);
+    }
+
+    cachedQuery.value()->finish();
+    return cachedQuery.value().get();
+}
+
+void SyncDatabase::clearPreparedStatementsForThreadUnlocked(quintptr threadKey) {
+    auto cacheIt = m_preparedStatementsByThread.find(threadKey);
+    if (cacheIt == m_preparedStatementsByThread.end()) {
+        return;
+    }
+
+    cacheIt->queries.clear();
+    m_preparedStatementsByThread.erase(cacheIt);
+}
+
+void SyncDatabase::clearAllPreparedStatementsUnlocked() {
+    m_preparedStatementsByThread.clear();
+}
+
 void SyncDatabase::closeConnectionByNameUnlocked(const QString& connectionName) {
     if (connectionName.isEmpty() || !QSqlDatabase::contains(connectionName)) {
         return;
@@ -332,6 +399,7 @@ void SyncDatabase::closeConnectionByNameUnlocked(const QString& connectionName) 
 void SyncDatabase::closeAllConnectionsUnlocked() {
     const QString currentThreadConnectionName = connectionNameForThreadUnlocked(currentThreadKey());
     const QList<QString> connectionNames = m_connectionNamesByThread.values();
+    clearAllPreparedStatementsUnlocked();
     m_connectionNamesByThread.clear();
     m_primaryConnectionName.clear();
 
@@ -386,12 +454,19 @@ bool SyncDatabase::ensureSettingsTable() {
 }
 
 int SyncDatabase::getStoredSchemaEpoch() const {
-    QSqlQuery query(m_db);
-    query.prepare(QStringLiteral("SELECT value FROM settings WHERE key = ?"));
-    query.addBindValue(SCHEMA_EPOCH_KEY);
-    if (query.exec() && query.next()) {
+    QMutexLocker locker(&m_mutex);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("settings.getStoredSchemaEpoch"),
+        QStringLiteral("SELECT value FROM settings WHERE key = ?"), "getStoredSchemaEpoch");
+    if (!query) {
+        return 0;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, SCHEMA_EPOCH_KEY);
+    if (query->exec() && query->next()) {
         bool ok = false;
-        const int epoch = query.value(0).toInt(&ok);
+        const int epoch = query->value(0).toInt(&ok);
         return ok ? epoch : 0;
     }
 
@@ -399,12 +474,19 @@ int SyncDatabase::getStoredSchemaEpoch() const {
 }
 
 bool SyncDatabase::setStoredSchemaEpoch(int epoch) {
-    QSqlQuery query(m_db);
-    query.prepare(QStringLiteral("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)"));
-    query.addBindValue(SCHEMA_EPOCH_KEY);
-    query.addBindValue(epoch);
-    if (!query.exec()) {
-        logError("setStoredSchemaEpoch", query.lastError().text());
+    QMutexLocker locker(&m_mutex);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("settings.setStoredSchemaEpoch"),
+        QStringLiteral("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)"),
+        "setStoredSchemaEpoch");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, SCHEMA_EPOCH_KEY);
+    query->bindValue(1, epoch);
+    if (!query->exec()) {
+        logError("setStoredSchemaEpoch", query->lastError().text());
         return false;
     }
 
@@ -412,16 +494,18 @@ bool SyncDatabase::setStoredSchemaEpoch(int epoch) {
 }
 
 int SyncDatabase::getStoredVersion() const {
-    // TODO: PERFORMANCE / OPTIMIZATION
-    // Preparing queries dynamically on every call incurs parsing and compilation overhead inside
-    // SQLite. For high-frequency query patterns in other thread loops, caching prepared QSqlQuery
-    // objects per thread-connection or utilizing a statically cached prepared statement map would
-    // yield faster execution cycles and reduced CPU overhead.
-    QSqlQuery query(m_db);
-    query.prepare("SELECT value FROM settings WHERE key = 'version'");
-    if (query.exec() && query.next()) {
+    QMutexLocker locker(&m_mutex);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("settings.getStoredVersion"),
+        QStringLiteral("SELECT value FROM settings WHERE key = 'version'"), "getStoredVersion");
+    if (!query) {
+        return 0;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    if (query->exec() && query->next()) {
         bool ok = false;
-        int version = query.value(0).toInt(&ok);
+        int version = query->value(0).toInt(&ok);
         return ok ? version : 0;
     }
 
@@ -429,11 +513,18 @@ int SyncDatabase::getStoredVersion() const {
 }
 
 bool SyncDatabase::setStoredVersion(int version) {
-    QSqlQuery query(m_db);
-    query.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', ?)");
-    query.addBindValue(version);
-    if (!query.exec()) {
-        logError("setStoredVersion", query.lastError().text());
+    QMutexLocker locker(&m_mutex);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("settings.setStoredVersion"),
+        QStringLiteral("INSERT OR REPLACE INTO settings (key, value) VALUES ('version', ?)"),
+        "setStoredVersion");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, version);
+    if (!query->exec()) {
+        logError("setStoredVersion", query->lastError().text());
         return false;
     }
 
@@ -656,9 +747,8 @@ void SyncDatabase::saveFileState(const FileSyncState& state) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(state.localPath, "saveFileState");
     requireFileId(state.fileId, "saveFileState");
-    QSqlQuery query(m_db);
-
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(QStringLiteral("files.saveFileState"),
+                                                             QStringLiteral(R"(
         INSERT INTO files (
             file_id, local_path, modified_time_at_sync, is_folder, remote_md5_at_sync,
             local_hash_at_sync
@@ -670,17 +760,21 @@ void SyncDatabase::saveFileState(const FileSyncState& state) {
             is_folder = excluded.is_folder,
             remote_md5_at_sync = excluded.remote_md5_at_sync,
             local_hash_at_sync = excluded.local_hash_at_sync
-    )");
+    )"),
+                                                             "saveFileState");
+    if (!query) {
+        return;
+    }
 
-    query.addBindValue(state.fileId);
-    query.addBindValue(state.localPath);
-    query.addBindValue(state.modifiedTimeAtSync.toString(Qt::ISODate));
-    query.addBindValue(state.isFolder ? 1 : 0);
-    query.addBindValue(state.remoteMd5AtSync);
-    query.addBindValue(state.localHashAtSync);
+    query->bindValue(0, state.fileId);
+    query->bindValue(1, state.localPath);
+    query->bindValue(2, state.modifiedTimeAtSync.toString(Qt::ISODate));
+    query->bindValue(3, state.isFolder ? 1 : 0);
+    query->bindValue(4, state.remoteMd5AtSync);
+    query->bindValue(5, state.localHashAtSync);
 
-    if (!query.exec()) {
-        logError("saveFileState", query.lastError().text());
+    if (!query->exec()) {
+        logError("saveFileState", query->lastError().text());
     }
 }
 
@@ -689,19 +783,25 @@ FileSyncState SyncDatabase::getFileState(const QString& localPath) const {
     requireRelativePath(localPath, "getFileState");
     FileSyncState state{};
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getFileStateByLocalPath"),
+        QStringLiteral("SELECT * FROM files WHERE local_path = ?"), "getFileState");
+    if (!query) {
+        return state;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        state.localPath = query.value("local_path").toString();
-        state.fileId = query.value("file_id").toString();
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
+        state.localPath = query->value("local_path").toString();
+        state.fileId = query->value("file_id").toString();
 
         state.modifiedTimeAtSync =
-            QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
-        state.isFolder = query.value("is_folder").toInt() == 1;
-        state.remoteMd5AtSync = query.value("remote_md5_at_sync").toString();
-        state.localHashAtSync = query.value("local_hash_at_sync").toString();
+            QDateTime::fromString(query->value("modified_time_at_sync").toString(), Qt::ISODate);
+        state.isFolder = query->value("is_folder").toInt() == 1;
+        state.remoteMd5AtSync = query->value("remote_md5_at_sync").toString();
+        state.localHashAtSync = query->value("local_hash_at_sync").toString();
     }
 
     return state;
@@ -714,18 +814,24 @@ FileSyncState SyncDatabase::getFileStateById(const QString& fileId) const {
         return state;
     }
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM files WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getFileStateById"),
+        QStringLiteral("SELECT * FROM files WHERE file_id = ?"), "getFileStateById");
+    if (!query) {
+        return state;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        state.localPath = query.value("local_path").toString();
-        state.fileId = query.value("file_id").toString();
+    query->bindValue(0, fileId);
+
+    if (query->exec() && query->next()) {
+        state.localPath = query->value("local_path").toString();
+        state.fileId = query->value("file_id").toString();
         state.modifiedTimeAtSync =
-            QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
-        state.isFolder = query.value("is_folder").toInt() == 1;
-        state.remoteMd5AtSync = query.value("remote_md5_at_sync").toString();
-        state.localHashAtSync = query.value("local_hash_at_sync").toString();
+            QDateTime::fromString(query->value("modified_time_at_sync").toString(), Qt::ISODate);
+        state.isFolder = query->value("is_folder").toInt() == 1;
+        state.remoteMd5AtSync = query->value("remote_md5_at_sync").toString();
+        state.localHashAtSync = query->value("local_hash_at_sync").toString();
     }
 
     return state;
@@ -734,12 +840,18 @@ FileSyncState SyncDatabase::getFileStateById(const QString& fileId) const {
 QString SyncDatabase::getFileId(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getFileId");
-    QSqlQuery query(m_db);
-    query.prepare("SELECT file_id FROM files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getFileIdByLocalPath"),
+        QStringLiteral("SELECT file_id FROM files WHERE local_path = ?"), "getFileId");
+    if (!query) {
+        return QString();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return query.value(0).toString();
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
+        return query->value(0).toString();
     }
 
     return QString();
@@ -750,12 +862,18 @@ QString SyncDatabase::getLocalPath(const QString& fileId) const {
     if (fileId.isEmpty()) {
         return QString();
     }
-    QSqlQuery query(m_db);
-    query.prepare("SELECT local_path FROM files WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getLocalPathByFileId"),
+        QStringLiteral("SELECT local_path FROM files WHERE file_id = ?"), "getLocalPath");
+    if (!query) {
+        return QString();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return query.value(0).toString();
+    query->bindValue(0, fileId);
+
+    if (query->exec() && query->next()) {
+        return query->value(0).toString();
     }
 
     return QString();
@@ -765,62 +883,107 @@ void SyncDatabase::setFileId(const QString& localPath, const QString& fileId) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setFileId");
     requireFileId(fileId, "setFileId");
-    QSqlQuery query(m_db);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setFileId.selectPathById"),
+        QStringLiteral("SELECT local_path FROM files WHERE file_id = ?"), "setFileId");
+    if (!query) {
+        return;
+    }
 
-    query.prepare("SELECT local_path FROM files WHERE file_id = ?");
-    query.addBindValue(fileId);
+    query->bindValue(0, fileId);
 
-    if (query.exec() && query.next()) {
-        QString existingPath = query.value(0).toString();
+    if (query->exec() && query->next()) {
+        const QString existingPath = query->value(0).toString();
+        query->finish();
         if (existingPath != localPath) {
-            QSqlQuery conflictQuery(m_db);
-            conflictQuery.prepare("SELECT file_id FROM files WHERE local_path = ?");
-            conflictQuery.addBindValue(localPath);
-            if (conflictQuery.exec() && conflictQuery.next()) {
-                QString conflictId = conflictQuery.value(0).toString();
+            QSqlQuery* conflictQuery = preparedQueryForCurrentThreadUnlocked(
+                QStringLiteral("files.setFileId.selectIdByPathConflict"),
+                QStringLiteral("SELECT file_id FROM files WHERE local_path = ?"),
+                "setFileId (check conflict)");
+            if (!conflictQuery) {
+                return;
+            }
+
+            conflictQuery->bindValue(0, localPath);
+            if (conflictQuery->exec() && conflictQuery->next()) {
+                const QString conflictId = conflictQuery->value(0).toString();
+                conflictQuery->finish();
                 if (!conflictId.isEmpty() && conflictId != fileId) {
-                    QSqlQuery removeQuery(m_db);
-                    removeQuery.prepare("DELETE FROM files WHERE file_id = ?");
-                    removeQuery.addBindValue(conflictId);
-                    if (!removeQuery.exec()) {
-                        logError("setFileId (remove conflict)", removeQuery.lastError().text());
+                    QSqlQuery* removeQuery = preparedQueryForCurrentThreadUnlocked(
+                        QStringLiteral("files.setFileId.deleteConflictId"),
+                        QStringLiteral("DELETE FROM files WHERE file_id = ?"),
+                        "setFileId (remove conflict)");
+                    if (removeQuery) {
+                        removeQuery->bindValue(0, conflictId);
+                        if (!removeQuery->exec()) {
+                            logError("setFileId (remove conflict)",
+                                     removeQuery->lastError().text());
+                        }
                     }
                 }
+            } else {
+                conflictQuery->finish();
             }
 
-            QSqlQuery updateQuery(m_db);
-            updateQuery.prepare("UPDATE files SET local_path = ? WHERE file_id = ?");
-            updateQuery.addBindValue(localPath);
-            updateQuery.addBindValue(fileId);
-            if (!updateQuery.exec()) {
-                logError("setFileId (update path)", updateQuery.lastError().text());
+            QSqlQuery* updateQuery = preparedQueryForCurrentThreadUnlocked(
+                QStringLiteral("files.setFileId.updatePathById"),
+                QStringLiteral("UPDATE files SET local_path = ? WHERE file_id = ?"),
+                "setFileId (update path)");
+            if (!updateQuery) {
+                return;
+            }
+
+            updateQuery->bindValue(0, localPath);
+            updateQuery->bindValue(1, fileId);
+            if (!updateQuery->exec()) {
+                logError("setFileId (update path)", updateQuery->lastError().text());
             }
         }
         return;
     }
+    query->finish();
 
-    QSqlQuery pathQuery(m_db);
-    pathQuery.prepare("SELECT file_id FROM files WHERE local_path = ?");
-    pathQuery.addBindValue(localPath);
-
-    if (pathQuery.exec() && pathQuery.next()) {
-        QSqlQuery updateQuery(m_db);
-        updateQuery.prepare("UPDATE files SET file_id = ? WHERE local_path = ?");
-        updateQuery.addBindValue(fileId);
-        updateQuery.addBindValue(localPath);
-        if (!updateQuery.exec()) {
-            logError("setFileId (update id)", updateQuery.lastError().text());
-        }
+    QSqlQuery* pathQuery = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setFileId.selectIdByPath"),
+        QStringLiteral("SELECT file_id FROM files WHERE local_path = ?"), "setFileId (find path)");
+    if (!pathQuery) {
         return;
     }
 
-    QSqlQuery insertQuery(m_db);
-    insertQuery.prepare("INSERT INTO files (file_id, local_path) VALUES (?, ?)");
-    insertQuery.addBindValue(fileId);
-    insertQuery.addBindValue(localPath);
+    pathQuery->bindValue(0, localPath);
 
-    if (!insertQuery.exec()) {
-        logError("setFileId (insert)", insertQuery.lastError().text());
+    if (pathQuery->exec() && pathQuery->next()) {
+        pathQuery->finish();
+        QSqlQuery* updateQuery = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("files.setFileId.updateIdByPath"),
+            QStringLiteral("UPDATE files SET file_id = ? WHERE local_path = ?"),
+            "setFileId (update id)");
+        if (!updateQuery) {
+            return;
+        }
+
+        updateQuery->bindValue(0, fileId);
+        updateQuery->bindValue(1, localPath);
+        if (!updateQuery->exec()) {
+            logError("setFileId (update id)", updateQuery->lastError().text());
+        }
+        return;
+    }
+    pathQuery->finish();
+
+    QSqlQuery* insertQuery = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setFileId.insert"),
+        QStringLiteral("INSERT INTO files (file_id, local_path) VALUES (?, ?)"),
+        "setFileId (insert)");
+    if (!insertQuery) {
+        return;
+    }
+
+    insertQuery->bindValue(0, fileId);
+    insertQuery->bindValue(1, localPath);
+
+    if (!insertQuery->exec()) {
+        logError("setFileId (insert)", insertQuery->lastError().text());
     }
 }
 
@@ -828,44 +991,75 @@ void SyncDatabase::setLocalPath(const QString& fileId, const QString& localPath)
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setLocalPath");
     requireFileId(fileId, "setLocalPath");
-    QSqlQuery query(m_db);
-
-    query.prepare("SELECT local_path FROM files WHERE file_id = ?");
-    query.addBindValue(fileId);
-
-    if (query.exec() && query.next()) {
-        QSqlQuery conflictQuery(m_db);
-        conflictQuery.prepare("SELECT file_id FROM files WHERE local_path = ?");
-        conflictQuery.addBindValue(localPath);
-        if (conflictQuery.exec() && conflictQuery.next()) {
-            QString conflictId = conflictQuery.value(0).toString();
-            if (!conflictId.isEmpty() && conflictId != fileId) {
-                QSqlQuery removeQuery(m_db);
-                removeQuery.prepare("DELETE FROM files WHERE file_id = ?");
-                removeQuery.addBindValue(conflictId);
-                if (!removeQuery.exec()) {
-                    logError("setLocalPath (remove conflict)", removeQuery.lastError().text());
-                }
-            }
-        }
-
-        QSqlQuery updateQuery(m_db);
-        updateQuery.prepare("UPDATE files SET local_path = ? WHERE file_id = ?");
-        updateQuery.addBindValue(localPath);
-        updateQuery.addBindValue(fileId);
-        if (!updateQuery.exec()) {
-            logError("setLocalPath (update path)", updateQuery.lastError().text());
-        }
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setLocalPath.selectPathById"),
+        QStringLiteral("SELECT local_path FROM files WHERE file_id = ?"), "setLocalPath");
+    if (!query) {
         return;
     }
 
-    QSqlQuery insertQuery(m_db);
-    insertQuery.prepare("INSERT INTO files (file_id, local_path) VALUES (?, ?)");
-    insertQuery.addBindValue(fileId);
-    insertQuery.addBindValue(localPath);
+    query->bindValue(0, fileId);
 
-    if (!insertQuery.exec()) {
-        logError("setLocalPath (insert)", insertQuery.lastError().text());
+    if (query->exec() && query->next()) {
+        query->finish();
+        QSqlQuery* conflictQuery = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("files.setLocalPath.selectIdByPathConflict"),
+            QStringLiteral("SELECT file_id FROM files WHERE local_path = ?"),
+            "setLocalPath (check conflict)");
+        if (!conflictQuery) {
+            return;
+        }
+
+        conflictQuery->bindValue(0, localPath);
+        if (conflictQuery->exec() && conflictQuery->next()) {
+            const QString conflictId = conflictQuery->value(0).toString();
+            conflictQuery->finish();
+            if (!conflictId.isEmpty() && conflictId != fileId) {
+                QSqlQuery* removeQuery = preparedQueryForCurrentThreadUnlocked(
+                    QStringLiteral("files.setLocalPath.deleteConflictId"),
+                    QStringLiteral("DELETE FROM files WHERE file_id = ?"),
+                    "setLocalPath (remove conflict)");
+                if (removeQuery) {
+                    removeQuery->bindValue(0, conflictId);
+                    if (!removeQuery->exec()) {
+                        logError("setLocalPath (remove conflict)", removeQuery->lastError().text());
+                    }
+                }
+            }
+        } else {
+            conflictQuery->finish();
+        }
+
+        QSqlQuery* updateQuery = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("files.setLocalPath.updatePathById"),
+            QStringLiteral("UPDATE files SET local_path = ? WHERE file_id = ?"),
+            "setLocalPath (update path)");
+        if (!updateQuery) {
+            return;
+        }
+
+        updateQuery->bindValue(0, localPath);
+        updateQuery->bindValue(1, fileId);
+        if (!updateQuery->exec()) {
+            logError("setLocalPath (update path)", updateQuery->lastError().text());
+        }
+        return;
+    }
+    query->finish();
+
+    QSqlQuery* insertQuery = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setLocalPath.insert"),
+        QStringLiteral("INSERT INTO files (file_id, local_path) VALUES (?, ?)"),
+        "setLocalPath (insert)");
+    if (!insertQuery) {
+        return;
+    }
+
+    insertQuery->bindValue(0, fileId);
+    insertQuery->bindValue(1, localPath);
+
+    if (!insertQuery->exec()) {
+        logError("setLocalPath (insert)", insertQuery->lastError().text());
     }
 }
 
@@ -875,12 +1069,17 @@ bool SyncDatabase::deleteFileStateById(const QString& fileId) {
         return true;
     }
 
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM files WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.deleteById"), QStringLiteral("DELETE FROM files WHERE file_id = ?"),
+        "deleteFileStateById");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("deleteFileStateById", query.lastError().text());
+    query->bindValue(0, fileId);
+
+    if (!query->exec()) {
+        logError("deleteFileStateById", query->lastError().text());
         return false;
     }
 
@@ -890,12 +1089,19 @@ bool SyncDatabase::deleteFileStateById(const QString& fileId) {
 QDateTime SyncDatabase::getModifiedTimeAtSync(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getModifiedTimeAtSync");
-    QSqlQuery query(m_db);
-    query.prepare("SELECT modified_time_at_sync FROM files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getModifiedTimeAtSync"),
+        QStringLiteral("SELECT modified_time_at_sync FROM files WHERE local_path = ?"),
+        "getModifiedTimeAtSync");
+    if (!query) {
+        return QDateTime();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return QDateTime::fromString(query.value(0).toString(), Qt::ISODate);
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
+        return QDateTime::fromString(query->value(0).toString(), Qt::ISODate);
     }
 
     return QDateTime();
@@ -904,25 +1110,38 @@ QDateTime SyncDatabase::getModifiedTimeAtSync(const QString& localPath) const {
 void SyncDatabase::setModifiedTimeAtSync(const QString& localPath, const QDateTime& time) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setModifiedTimeAtSync");
-    QSqlQuery query(m_db);
-    query.prepare("UPDATE files SET modified_time_at_sync = ? WHERE local_path = ?");
-    query.addBindValue(time.toString(Qt::ISODate));
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setModifiedTimeAtSync"),
+        QStringLiteral("UPDATE files SET modified_time_at_sync = ? WHERE local_path = ?"),
+        "setModifiedTimeAtSync");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("setModifiedTimeAtSyncError", query.lastError().text());
+    query->bindValue(0, time.toString(Qt::ISODate));
+    query->bindValue(1, localPath);
+
+    if (!query->exec()) {
+        logError("setModifiedTimeAtSyncError", query->lastError().text());
     }
 }
 
 QString SyncDatabase::getRemoteMd5AtSync(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getRemoteMd5AtSync");
-    QSqlQuery query(m_db);
-    query.prepare("SELECT remote_md5_at_sync FROM files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getRemoteMd5AtSync"),
+        QStringLiteral("SELECT remote_md5_at_sync FROM files WHERE local_path = ?"),
+        "getRemoteMd5AtSync");
+    if (!query) {
+        return QString();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return query.value(0).toString();
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
+        return query->value(0).toString();
     }
 
     return QString();
@@ -931,25 +1150,38 @@ QString SyncDatabase::getRemoteMd5AtSync(const QString& localPath) const {
 void SyncDatabase::setRemoteMd5AtSync(const QString& localPath, const QString& remoteMd5) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setRemoteMd5AtSync");
-    QSqlQuery query(m_db);
-    query.prepare("UPDATE files SET remote_md5_at_sync = ? WHERE local_path = ?");
-    query.addBindValue(remoteMd5);
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setRemoteMd5AtSync"),
+        QStringLiteral("UPDATE files SET remote_md5_at_sync = ? WHERE local_path = ?"),
+        "setRemoteMd5AtSync");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("setRemoteMd5AtSync", query.lastError().text());
+    query->bindValue(0, remoteMd5);
+    query->bindValue(1, localPath);
+
+    if (!query->exec()) {
+        logError("setRemoteMd5AtSync", query->lastError().text());
     }
 }
 
 QString SyncDatabase::getLocalHashAtSync(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "getLocalHashAtSync");
-    QSqlQuery query(m_db);
-    query.prepare("SELECT local_hash_at_sync FROM files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getLocalHashAtSync"),
+        QStringLiteral("SELECT local_hash_at_sync FROM files WHERE local_path = ?"),
+        "getLocalHashAtSync");
+    if (!query) {
+        return QString();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return query.value(0).toString();
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
+        return query->value(0).toString();
     }
 
     return QString();
@@ -958,13 +1190,19 @@ QString SyncDatabase::getLocalHashAtSync(const QString& localPath) const {
 void SyncDatabase::setLocalHashAtSync(const QString& localPath, const QString& localHash) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setLocalHashAtSync");
-    QSqlQuery query(m_db);
-    query.prepare("UPDATE files SET local_hash_at_sync = ? WHERE local_path = ?");
-    query.addBindValue(localHash);
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setLocalHashAtSync"),
+        QStringLiteral("UPDATE files SET local_hash_at_sync = ? WHERE local_path = ?"),
+        "setLocalHashAtSync");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("setLocalHashAtSync", query.lastError().text());
+    query->bindValue(0, localHash);
+    query->bindValue(1, localPath);
+
+    if (!query->exec()) {
+        logError("setLocalHashAtSync", query->lastError().text());
     }
 }
 
@@ -972,15 +1210,21 @@ void SyncDatabase::setContentHashesAtSync(const QString& localPath, const QStrin
                                           const QString& localHash) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "setContentHashesAtSync");
-    QSqlQuery query(m_db);
-    query.prepare(
-        "UPDATE files SET remote_md5_at_sync = ?, local_hash_at_sync = ? WHERE local_path = ?");
-    query.addBindValue(remoteMd5);
-    query.addBindValue(localHash);
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.setContentHashesAtSync"),
+        QStringLiteral(
+            "UPDATE files SET remote_md5_at_sync = ?, local_hash_at_sync = ? WHERE local_path = ?"),
+        "setContentHashesAtSync");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("setContentHashesAtSync", query.lastError().text());
+    query->bindValue(0, remoteMd5);
+    query->bindValue(1, localHash);
+    query->bindValue(2, localPath);
+
+    if (!query->exec()) {
+        logError("setContentHashesAtSync", query->lastError().text());
     }
 }
 
@@ -988,19 +1232,23 @@ QList<FileSyncState> SyncDatabase::getAllFiles() const {
     QMutexLocker locker(&m_mutex);
     QList<FileSyncState> files;
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM files");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getAll"), QStringLiteral("SELECT * FROM files"), "getAllFiles");
+    if (!query) {
+        return files;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec()) {
-        while (query.next()) {
+    if (query->exec()) {
+        while (query->next()) {
             FileSyncState state;
-            state.localPath = query.value("local_path").toString();
-            state.fileId = query.value("file_id").toString();
-            state.modifiedTimeAtSync =
-                QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
-            state.isFolder = query.value("is_folder").toInt() == 1;
-            state.remoteMd5AtSync = query.value("remote_md5_at_sync").toString();
-            state.localHashAtSync = query.value("local_hash_at_sync").toString();
+            state.localPath = query->value("local_path").toString();
+            state.fileId = query->value("file_id").toString();
+            state.modifiedTimeAtSync = QDateTime::fromString(
+                query->value("modified_time_at_sync").toString(), Qt::ISODate);
+            state.isFolder = query->value("is_folder").toInt() == 1;
+            state.remoteMd5AtSync = query->value("remote_md5_at_sync").toString();
+            state.localHashAtSync = query->value("local_hash_at_sync").toString();
             files.append(state);
         }
     }
@@ -1022,27 +1270,33 @@ QList<FileSyncState> SyncDatabase::getFileStatesByPrefix(const QString& pathPref
     escapedPrefix.replace("%", "\\%");
     escapedPrefix.replace("_", "\\_");
 
-    QSqlQuery query(m_db);
-    query.prepare(
-        "SELECT local_path, file_id, modified_time_at_sync, is_folder, remote_md5_at_sync, "
-        "local_hash_at_sync "
-        "FROM files WHERE local_path LIKE ? ESCAPE '\\'");
-    query.addBindValue(escapedPrefix + "/%");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.getByPrefix"),
+        QStringLiteral(
+            "SELECT local_path, file_id, modified_time_at_sync, is_folder, remote_md5_at_sync, "
+            "local_hash_at_sync FROM files WHERE local_path LIKE ? ESCAPE '\\'"),
+        "getFileStatesByPrefix");
+    if (!query) {
+        return files;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec()) {
-        while (query.next()) {
+    query->bindValue(0, escapedPrefix + "/%");
+
+    if (query->exec()) {
+        while (query->next()) {
             FileSyncState state;
-            state.localPath = query.value("local_path").toString();
-            state.fileId = query.value("file_id").toString();
-            state.modifiedTimeAtSync =
-                QDateTime::fromString(query.value("modified_time_at_sync").toString(), Qt::ISODate);
-            state.isFolder = query.value("is_folder").toInt() == 1;
-            state.remoteMd5AtSync = query.value("remote_md5_at_sync").toString();
-            state.localHashAtSync = query.value("local_hash_at_sync").toString();
+            state.localPath = query->value("local_path").toString();
+            state.fileId = query->value("file_id").toString();
+            state.modifiedTimeAtSync = QDateTime::fromString(
+                query->value("modified_time_at_sync").toString(), Qt::ISODate);
+            state.isFolder = query->value("is_folder").toInt() == 1;
+            state.remoteMd5AtSync = query->value("remote_md5_at_sync").toString();
+            state.localHashAtSync = query->value("local_hash_at_sync").toString();
             files.append(state);
         }
     } else {
-        logError("getFileStatesByPrefix", query.lastError().text());
+        logError("getFileStatesByPrefix", query->lastError().text());
     }
 
     return files;
@@ -1055,12 +1309,18 @@ NativeDocState SyncDatabase::getNativeDocState(const QString& fileId) const {
         return state;
     }
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM native_doc_state WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("nativeDoc.getByFileId"),
+        QStringLiteral("SELECT * FROM native_doc_state WHERE file_id = ?"), "getNativeDocState");
+    if (!query) {
+        return state;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        state = readNativeDocStateRow(query);
+    query->bindValue(0, fileId);
+
+    if (query->exec() && query->next()) {
+        state = readNativeDocStateRow(*query);
     }
 
     return state;
@@ -1070,21 +1330,25 @@ bool SyncDatabase::saveNativeDocState(const NativeDocState& state) {
     QMutexLocker locker(&m_mutex);
     requireFileId(state.fileId, "saveNativeDocState");
 
-    QSqlQuery query(m_db);
-    query.prepare(R"(
+    QSqlQuery* query =
+        preparedQueryForCurrentThreadUnlocked(QStringLiteral("nativeDoc.save"), QStringLiteral(R"(
         INSERT OR REPLACE INTO native_doc_state
         (file_id, remote_name, remote_mime_type, web_view_link, native_doc_mode_override)
         VALUES (?, ?, ?, ?, ?)
-    )");
+    )"),
+                                              "saveNativeDocState");
+    if (!query) {
+        return false;
+    }
 
-    query.addBindValue(state.fileId);
-    query.addBindValue(state.remoteName);
-    query.addBindValue(state.remoteMimeType);
-    query.addBindValue(state.webViewLink);
-    query.addBindValue(state.nativeDocModeOverride);
+    query->bindValue(0, state.fileId);
+    query->bindValue(1, state.remoteName);
+    query->bindValue(2, state.remoteMimeType);
+    query->bindValue(3, state.webViewLink);
+    query->bindValue(4, state.nativeDocModeOverride);
 
-    if (!query.exec()) {
-        logError("saveNativeDocState", query.lastError().text());
+    if (!query->exec()) {
+        logError("saveNativeDocState", query->lastError().text());
         return false;
     }
 
@@ -1097,12 +1361,17 @@ bool SyncDatabase::deleteNativeDocState(const QString& fileId) {
         return true;
     }
 
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM native_doc_state WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("nativeDoc.deleteByFileId"),
+        QStringLiteral("DELETE FROM native_doc_state WHERE file_id = ?"), "deleteNativeDocState");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("deleteNativeDocState", query.lastError().text());
+    query->bindValue(0, fileId);
+
+    if (!query->exec()) {
+        logError("deleteNativeDocState", query->lastError().text());
         return false;
     }
 
@@ -1111,12 +1380,17 @@ bool SyncDatabase::deleteNativeDocState(const QString& fileId) {
 
 QString SyncDatabase::getChangeToken() const {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("SELECT value FROM settings WHERE key = 'change_token'");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("settings.getChangeToken"),
+        QStringLiteral("SELECT value FROM settings WHERE key = 'change_token'"), "getChangeToken");
+    if (!query) {
+        return QString();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
     // Returns empty QString when key doesn't exist (query.next() returns false)
-    if (query.exec() && query.next()) {
-        return query.value(0).toString();
+    if (query->exec() && query->next()) {
+        return query->value(0).toString();
     }
 
     return QString();
@@ -1124,22 +1398,32 @@ QString SyncDatabase::getChangeToken() const {
 
 void SyncDatabase::setChangeToken(const QString& token) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('change_token', ?)");
-    query.addBindValue(token);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("settings.setChangeToken"),
+        QStringLiteral("INSERT OR REPLACE INTO settings (key, value) VALUES ('change_token', ?)"),
+        "setChangeToken");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("setChangeToken", query.lastError().text());
+    query->bindValue(0, token);
+
+    if (!query->exec()) {
+        logError("setChangeToken", query->lastError().text());
     }
 }
 
 int SyncDatabase::fileCount() const {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("SELECT COUNT(*) FROM files");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("files.count"), QStringLiteral("SELECT COUNT(*) FROM files"), "fileCount");
+    if (!query) {
+        return 0;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return query.value(0).toInt();
+    if (query->exec() && query->next()) {
+        return query->value(0).toInt();
     }
 
     return 0;
@@ -1188,28 +1472,39 @@ void SyncDatabase::requireFileId(const QString& fileId, const char* operation) c
 void SyncDatabase::markFileDeleted(const QString& localPath, const QString& fileId) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "markFileDeleted");
-    QSqlQuery query(m_db);
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(QStringLiteral("deletedFiles.mark"),
+                                                             QStringLiteral(R"(
         INSERT OR REPLACE INTO deleted_files (local_path, file_id, deleted_at)
         VALUES (?, ?, ?)
-    )");
-    query.addBindValue(localPath);
-    query.addBindValue(fileId);
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    )"),
+                                                             "markFileDeleted");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("markFileDeleted", query.lastError().text());
+    query->bindValue(0, localPath);
+    query->bindValue(1, fileId);
+    query->bindValue(2, QDateTime::currentDateTime().toString(Qt::ISODate));
+
+    if (!query->exec()) {
+        logError("markFileDeleted", query->lastError().text());
     }
 }
 
 bool SyncDatabase::wasFileDeleted(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "wasFileDeleted");
-    QSqlQuery query(m_db);
-    query.prepare("SELECT id FROM deleted_files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("deletedFiles.existsByLocalPath"),
+        QStringLiteral("SELECT id FROM deleted_files WHERE local_path = ?"), "wasFileDeleted");
+    if (!query) {
+        return false;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
         return true;
     }
     return false;
@@ -1218,49 +1513,77 @@ bool SyncDatabase::wasFileDeleted(const QString& localPath) const {
 void SyncDatabase::clearDeletedFile(const QString& localPath) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "clearDeletedFile");
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM deleted_files WHERE local_path = ?");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("deletedFiles.clearByLocalPath"),
+        QStringLiteral("DELETE FROM deleted_files WHERE local_path = ?"), "clearDeletedFile");
+    if (!query) {
+        return;
+    }
 
-    if (!query.exec()) {
-        logError("clearDeletedFile", query.lastError().text());
+    query->bindValue(0, localPath);
+
+    if (!query->exec()) {
+        logError("clearDeletedFile", query->lastError().text());
     }
 }
 
 int SyncDatabase::purgeOldDeletedRecords(int maxAgeDays) {
     QMutexLocker locker(&m_mutex);
     QDateTime cutoffDate = QDateTime::currentDateTime().addDays(-maxAgeDays);
+    const QString cutoffIso = cutoffDate.toString(Qt::ISODate);
+    QStringList expiredFileIds;
 
     // Query file records to clean. To be removed from files table as well
-    QSqlQuery filesQuery(m_db);
-    filesQuery.prepare("SELECT file_id FROM deleted_files WHERE deleted_at < ?");
-    filesQuery.addBindValue(cutoffDate.toString(Qt::ISODate));
-    if (filesQuery.exec()) {
-        while (filesQuery.next()) {
-            QString fileId = filesQuery.value(0).toString();
-            // Remove from files table
-            QSqlQuery removeFileQuery(m_db);
-            removeFileQuery.prepare("DELETE FROM files WHERE file_id = ?");
-            removeFileQuery.addBindValue(fileId);
-            if (!removeFileQuery.exec()) {
-                logError("purgeOldDeletedRecords (remove from files)",
-                         removeFileQuery.lastError().text());
-            }
+    QSqlQuery* filesQuery = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("deletedFiles.purge.selectExpiredFileIds"),
+        QStringLiteral("SELECT file_id FROM deleted_files WHERE deleted_at < ?"),
+        "purgeOldDeletedRecords (select file_ids)");
+    if (!filesQuery) {
+        return 0;
+    }
+    PreparedQueryResetGuard resetFilesQuery(filesQuery);
+
+    filesQuery->bindValue(0, cutoffIso);
+    if (filesQuery->exec()) {
+        while (filesQuery->next()) {
+            expiredFileIds.append(filesQuery->value(0).toString());
         }
     } else {
-        logError("purgeOldDeletedRecords (select file_ids)", filesQuery.lastError().text());
+        logError("purgeOldDeletedRecords (select file_ids)", filesQuery->lastError().text());
     }
 
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM deleted_files WHERE deleted_at < ?");
-    query.addBindValue(cutoffDate.toString(Qt::ISODate));
+    filesQuery->finish();
 
-    if (!query.exec()) {
-        logError("purgeOldDeletedRecords", query.lastError().text());
+    for (const QString& fileId : expiredFileIds) {
+        // Remove from files table
+        QSqlQuery* removeFileQuery = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("deletedFiles.purge.deleteFileRecord"),
+            QStringLiteral("DELETE FROM files WHERE file_id = ?"),
+            "purgeOldDeletedRecords (remove from files)");
+        if (removeFileQuery) {
+            removeFileQuery->bindValue(0, fileId);
+            if (!removeFileQuery->exec()) {
+                logError("purgeOldDeletedRecords (remove from files)",
+                         removeFileQuery->lastError().text());
+            }
+        }
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("deletedFiles.purge.deleteExpired"),
+        QStringLiteral("DELETE FROM deleted_files WHERE deleted_at < ?"), "purgeOldDeletedRecords");
+    if (!query) {
         return 0;
     }
 
-    int rowsAffected = query.numRowsAffected();
+    query->bindValue(0, cutoffIso);
+
+    if (!query->exec()) {
+        logError("purgeOldDeletedRecords", query->lastError().text());
+        return 0;
+    }
+
+    int rowsAffected = query->numRowsAffected();
     if (rowsAffected > 0) {
         qInfo() << "Purged" << rowsAffected << "deleted file records older than" << maxAgeDays
                 << "days";
@@ -1273,43 +1596,61 @@ int SyncDatabase::upsertConflictRecord(const QString& localPath, const QString& 
                                        const QString& conflictPath) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "upsertConflictRecord");
-    QSqlQuery query(m_db);
-    query.prepare(
-        "SELECT id FROM conflicts WHERE local_path = ? AND resolved = 0 "
-        "ORDER BY detected_at DESC LIMIT 1");
-    query.addBindValue(localPath);
-
-    if (query.exec() && query.next()) {
-        int conflictId = query.value(0).toInt();
-        QSqlQuery updateQuery(m_db);
-        updateQuery.prepare(
-            "UPDATE conflicts SET file_id = ?, conflict_path = ?, detected_at = ? WHERE id = ?");
-        updateQuery.addBindValue(fileId);
-        updateQuery.addBindValue(conflictPath);
-        updateQuery.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-        updateQuery.addBindValue(conflictId);
-        if (!updateQuery.exec()) {
-            logError("upsertConflictRecord (update)", updateQuery.lastError().text());
-        }
-        return conflictId;
-    }
-
-    QSqlQuery insertQuery(m_db);
-    insertQuery.prepare(R"(
-        INSERT INTO conflicts (local_path, file_id, conflict_path, detected_at, resolved)
-        VALUES (?, ?, ?, ?, 0)
-    )");
-    insertQuery.addBindValue(localPath);
-    insertQuery.addBindValue(fileId);
-    insertQuery.addBindValue(conflictPath);
-    insertQuery.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-
-    if (!insertQuery.exec()) {
-        logError("upsertConflictRecord (insert)", insertQuery.lastError().text());
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("conflicts.upsert.selectOpenByLocalPath"),
+        QStringLiteral("SELECT id FROM conflicts WHERE local_path = ? AND resolved = 0 ORDER BY "
+                       "detected_at DESC LIMIT 1"),
+        "upsertConflictRecord");
+    if (!query) {
         return -1;
     }
 
-    return insertQuery.lastInsertId().toInt();
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
+        const int conflictId = query->value(0).toInt();
+        query->finish();
+        QSqlQuery* updateQuery = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("conflicts.upsert.updateOpenById"),
+            QStringLiteral("UPDATE conflicts SET file_id = ?, conflict_path = ?, detected_at = ? "
+                           "WHERE id = ?"),
+            "upsertConflictRecord (update)");
+        if (!updateQuery) {
+            return conflictId;
+        }
+
+        updateQuery->bindValue(0, fileId);
+        updateQuery->bindValue(1, conflictPath);
+        updateQuery->bindValue(2, QDateTime::currentDateTime().toString(Qt::ISODate));
+        updateQuery->bindValue(3, conflictId);
+        if (!updateQuery->exec()) {
+            logError("upsertConflictRecord (update)", updateQuery->lastError().text());
+        }
+        return conflictId;
+    }
+    query->finish();
+
+    QSqlQuery* insertQuery = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("conflicts.upsert.insert"), QStringLiteral(R"(
+        INSERT INTO conflicts (local_path, file_id, conflict_path, detected_at, resolved)
+        VALUES (?, ?, ?, ?, 0)
+    )"),
+        "upsertConflictRecord (insert)");
+    if (!insertQuery) {
+        return -1;
+    }
+
+    insertQuery->bindValue(0, localPath);
+    insertQuery->bindValue(1, fileId);
+    insertQuery->bindValue(2, conflictPath);
+    insertQuery->bindValue(3, QDateTime::currentDateTime().toString(Qt::ISODate));
+
+    if (!insertQuery->exec()) {
+        logError("upsertConflictRecord (insert)", insertQuery->lastError().text());
+        return -1;
+    }
+
+    return insertQuery->lastInsertId().toInt();
 }
 
 void SyncDatabase::addConflictVersion(int conflictId, const ConflictVersion& version) {
@@ -1317,33 +1658,45 @@ void SyncDatabase::addConflictVersion(int conflictId, const ConflictVersion& ver
     if (conflictId <= 0) {
         return;
     }
-    QSqlQuery query(m_db);
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(QStringLiteral("conflicts.addVersion"),
+                                                             QStringLiteral(R"(
         INSERT INTO conflict_versions
             (conflict_id, local_modified_time, remote_modified_time, db_sync_time, detected_at)
         VALUES (?, ?, ?, ?, ?)
-    )");
-    query.addBindValue(conflictId);
-    query.addBindValue(version.localModifiedTime.toString(Qt::ISODate));
-    query.addBindValue(version.remoteModifiedTime.toString(Qt::ISODate));
-    query.addBindValue(version.dbSyncTime.toString(Qt::ISODate));
+    )"),
+                                                             "addConflictVersion");
+    if (!query) {
+        return;
+    }
+
+    query->bindValue(0, conflictId);
+    query->bindValue(1, version.localModifiedTime.toString(Qt::ISODate));
+    query->bindValue(2, version.remoteModifiedTime.toString(Qt::ISODate));
+    query->bindValue(3, version.dbSyncTime.toString(Qt::ISODate));
     QDateTime detectedAt =
         version.detectedAt.isValid() ? version.detectedAt : QDateTime::currentDateTime();
-    query.addBindValue(detectedAt.toString(Qt::ISODate));
+    query->bindValue(4, detectedAt.toString(Qt::ISODate));
 
-    if (!query.exec()) {
-        logError("addConflictVersion", query.lastError().text());
+    if (!query->exec()) {
+        logError("addConflictVersion", query->lastError().text());
     }
 }
 
 bool SyncDatabase::hasUnresolvedConflict(const QString& localPath) const {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "hasUnresolvedConflict");
-    QSqlQuery query(m_db);
-    query.prepare("SELECT id FROM conflicts WHERE local_path = ? AND resolved = 0 LIMIT 1");
-    query.addBindValue(localPath);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("conflicts.hasUnresolvedByLocalPath"),
+        QStringLiteral("SELECT id FROM conflicts WHERE local_path = ? AND resolved = 0 LIMIT 1"),
+        "hasUnresolvedConflict");
+    if (!query) {
+        return false;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
+    query->bindValue(0, localPath);
+
+    if (query->exec() && query->next()) {
         return true;
     }
     return false;
@@ -1352,46 +1705,58 @@ bool SyncDatabase::hasUnresolvedConflict(const QString& localPath) const {
 QList<ConflictRecord> SyncDatabase::getUnresolvedConflicts() {
     QMutexLocker locker(&m_mutex);
     QList<ConflictRecord> records;
-    QSqlQuery query(m_db);
-    query.prepare(
-        "SELECT id, local_path, file_id, conflict_path, detected_at, resolved "
-        "FROM conflicts WHERE resolved = 0 ORDER BY detected_at ASC");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("conflicts.getUnresolved"),
+        QStringLiteral("SELECT id, local_path, file_id, conflict_path, detected_at, resolved FROM "
+                       "conflicts WHERE resolved = 0 ORDER BY detected_at ASC"),
+        "getUnresolvedConflicts");
+    if (!query) {
+        return records;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (!query.exec()) {
-        logError("getUnresolvedConflicts", query.lastError().text());
+    if (!query->exec()) {
+        logError("getUnresolvedConflicts", query->lastError().text());
         return records;
     }
 
-    while (query.next()) {
+    while (query->next()) {
         ConflictRecord record;
-        record.id = query.value("id").toInt();
-        record.localPath = query.value("local_path").toString();
-        record.fileId = query.value("file_id").toString();
-        record.conflictPath = query.value("conflict_path").toString();
+        record.id = query->value("id").toInt();
+        record.localPath = query->value("local_path").toString();
+        record.fileId = query->value("file_id").toString();
+        record.conflictPath = query->value("conflict_path").toString();
         record.detectedAt =
-            QDateTime::fromString(query.value("detected_at").toString(), Qt::ISODate);
-        record.resolved = query.value("resolved").toInt() == 1;
+            QDateTime::fromString(query->value("detected_at").toString(), Qt::ISODate);
+        record.resolved = query->value("resolved").toInt() == 1;
 
-        QSqlQuery versionQuery(m_db);
-        versionQuery.prepare(
-            "SELECT id, local_modified_time, remote_modified_time, "
-            "db_sync_time, detected_at FROM conflict_versions "
-            "WHERE conflict_id = ? ORDER BY detected_at ASC");
-        versionQuery.addBindValue(record.id);
-        if (!versionQuery.exec()) {
-            logError("getUnresolvedConflicts (versions)", versionQuery.lastError().text());
+        QSqlQuery* versionQuery = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("conflicts.getVersionsByConflictId"),
+            QStringLiteral(
+                "SELECT id, local_modified_time, remote_modified_time, db_sync_time, detected_at "
+                "FROM conflict_versions WHERE conflict_id = ? ORDER BY detected_at ASC"),
+            "getUnresolvedConflicts (versions)");
+        if (!versionQuery) {
+            records.append(record);
+            continue;
+        }
+        PreparedQueryResetGuard resetVersionQuery(versionQuery);
+
+        versionQuery->bindValue(0, record.id);
+        if (!versionQuery->exec()) {
+            logError("getUnresolvedConflicts (versions)", versionQuery->lastError().text());
         } else {
-            while (versionQuery.next()) {
+            while (versionQuery->next()) {
                 ConflictVersion version;
-                version.id = versionQuery.value("id").toInt();
+                version.id = versionQuery->value("id").toInt();
                 version.localModifiedTime = QDateTime::fromString(
-                    versionQuery.value("local_modified_time").toString(), Qt::ISODate);
+                    versionQuery->value("local_modified_time").toString(), Qt::ISODate);
                 version.remoteModifiedTime = QDateTime::fromString(
-                    versionQuery.value("remote_modified_time").toString(), Qt::ISODate);
+                    versionQuery->value("remote_modified_time").toString(), Qt::ISODate);
                 version.dbSyncTime = QDateTime::fromString(
-                    versionQuery.value("db_sync_time").toString(), Qt::ISODate);
+                    versionQuery->value("db_sync_time").toString(), Qt::ISODate);
                 version.detectedAt = QDateTime::fromString(
-                    versionQuery.value("detected_at").toString(), Qt::ISODate);
+                    versionQuery->value("detected_at").toString(), Qt::ISODate);
                 record.versions.append(version);
             }
         }
@@ -1405,11 +1770,17 @@ QList<ConflictRecord> SyncDatabase::getUnresolvedConflicts() {
 void SyncDatabase::markConflictResolved(const QString& localPath) {
     QMutexLocker locker(&m_mutex);
     requireRelativePath(localPath, "markConflictResolved");
-    QSqlQuery query(m_db);
-    query.prepare("UPDATE conflicts SET resolved = 1 WHERE local_path = ? AND resolved = 0");
-    query.addBindValue(localPath);
-    if (!query.exec()) {
-        logError("markConflictResolved", query.lastError().text());
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("conflicts.markResolvedByLocalPath"),
+        QStringLiteral("UPDATE conflicts SET resolved = 1 WHERE local_path = ? AND resolved = 0"),
+        "markConflictResolved");
+    if (!query) {
+        return;
+    }
+
+    query->bindValue(0, localPath);
+    if (!query->exec()) {
+        logError("markConflictResolved", query->lastError().text());
     }
 }
 
@@ -1418,11 +1789,17 @@ void SyncDatabase::markConflictResolved(int conflictId) {
     if (conflictId <= 0) {
         return;
     }
-    QSqlQuery query(m_db);
-    query.prepare("UPDATE conflicts SET resolved = 1 WHERE id = ?");
-    query.addBindValue(conflictId);
-    if (!query.exec()) {
-        logError("markConflictResolved(id)", query.lastError().text());
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("conflicts.markResolvedById"),
+        QStringLiteral("UPDATE conflicts SET resolved = 1 WHERE id = ?"),
+        "markConflictResolved(id)");
+    if (!query) {
+        return;
+    }
+
+    query->bindValue(0, conflictId);
+    if (!query->exec()) {
+        logError("markConflictResolved(id)", query->lastError().text());
     }
 }
 
@@ -1548,12 +1925,18 @@ FuseMetadata SyncDatabase::getFuseMetadata(const QString& fileId) const {
     QMutexLocker locker(&m_mutex);
     FuseMetadata metadata{};
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM fuse_metadata WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseMetadata.getByFileId"),
+        QStringLiteral("SELECT * FROM fuse_metadata WHERE file_id = ?"), "getFuseMetadata");
+    if (!query) {
+        return metadata;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        metadata = readFuseMetadataRow(query);
+    query->bindValue(0, fileId);
+
+    if (query->exec() && query->next()) {
+        metadata = readFuseMetadataRow(*query);
     }
 
     return metadata;
@@ -1563,12 +1946,18 @@ FuseMetadata SyncDatabase::getFuseMetadataByPath(const QString& path) const {
     QMutexLocker locker(&m_mutex);
     FuseMetadata metadata{};
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM fuse_metadata WHERE path = ?");
-    query.addBindValue(path);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseMetadata.getByPath"),
+        QStringLiteral("SELECT * FROM fuse_metadata WHERE path = ?"), "getFuseMetadataByPath");
+    if (!query) {
+        return metadata;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        metadata = readFuseMetadataRow(query);
+    query->bindValue(0, path);
+
+    if (query->exec() && query->next()) {
+        metadata = readFuseMetadataRow(*query);
     }
 
     return metadata;
@@ -1576,45 +1965,54 @@ FuseMetadata SyncDatabase::getFuseMetadataByPath(const QString& path) const {
 
 bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-
-    QSqlQuery deleteConflictQuery(m_db);
-    deleteConflictQuery.prepare("DELETE FROM fuse_metadata WHERE path = ? AND file_id != ?");
-    deleteConflictQuery.addBindValue(metadata.path);
-    deleteConflictQuery.addBindValue(metadata.fileId);
-    if (!deleteConflictQuery.exec()) {
-        logError("saveFuseMetadata (delete conflicting path)",
-                 deleteConflictQuery.lastError().text());
+    QSqlQuery* deleteConflictQuery = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseMetadata.save.deleteConflictPath"),
+        QStringLiteral("DELETE FROM fuse_metadata WHERE path = ? AND file_id != ?"),
+        "saveFuseMetadata (delete conflicting path)");
+    if (!deleteConflictQuery) {
         return false;
     }
 
-    query.prepare(R"(
+    deleteConflictQuery->bindValue(0, metadata.path);
+    deleteConflictQuery->bindValue(1, metadata.fileId);
+    if (!deleteConflictQuery->exec()) {
+        logError("saveFuseMetadata (delete conflicting path)",
+                 deleteConflictQuery->lastError().text());
+        return false;
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseMetadata.save.upsert"), QStringLiteral(R"(
         INSERT OR REPLACE INTO fuse_metadata 
         (file_id, path, name, remote_name, native_doc_mode_override, parent_id,
          is_folder, size, mime_type,
          remote_mime_type, web_view_link,
          created_time, modified_time, cached_at, last_accessed)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    )");
+    )"),
+        "saveFuseMetadata");
+    if (!query) {
+        return false;
+    }
 
-    query.addBindValue(metadata.fileId);
-    query.addBindValue(metadata.path);
-    query.addBindValue(metadata.name);
-    query.addBindValue(metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName);
-    query.addBindValue(metadata.nativeDocModeOverride);
-    query.addBindValue(metadata.parentId);
-    query.addBindValue(metadata.isFolder ? 1 : 0);
-    query.addBindValue(metadata.size);
-    query.addBindValue(metadata.mimeType);
-    query.addBindValue(metadata.remoteMimeType);
-    query.addBindValue(metadata.webViewLink);
-    query.addBindValue(metadata.createdTime.toString(Qt::ISODate));
-    query.addBindValue(metadata.modifiedTime.toString(Qt::ISODate));
-    query.addBindValue(metadata.cachedAt.toString(Qt::ISODate));
-    query.addBindValue(metadata.lastAccessed.toString(Qt::ISODate));
+    query->bindValue(0, metadata.fileId);
+    query->bindValue(1, metadata.path);
+    query->bindValue(2, metadata.name);
+    query->bindValue(3, metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName);
+    query->bindValue(4, metadata.nativeDocModeOverride);
+    query->bindValue(5, metadata.parentId);
+    query->bindValue(6, metadata.isFolder ? 1 : 0);
+    query->bindValue(7, metadata.size);
+    query->bindValue(8, metadata.mimeType);
+    query->bindValue(9, metadata.remoteMimeType);
+    query->bindValue(10, metadata.webViewLink);
+    query->bindValue(11, metadata.createdTime.toString(Qt::ISODate));
+    query->bindValue(12, metadata.modifiedTime.toString(Qt::ISODate));
+    query->bindValue(13, metadata.cachedAt.toString(Qt::ISODate));
+    query->bindValue(14, metadata.lastAccessed.toString(Qt::ISODate));
 
-    if (!query.exec()) {
-        logError("saveFuseMetadata", query.lastError().text());
+    if (!query->exec()) {
+        logError("saveFuseMetadata", query->lastError().text());
         return false;
     }
 
@@ -1638,12 +2036,17 @@ bool SyncDatabase::saveFuseMetadata(const FuseMetadata& metadata) {
 
 bool SyncDatabase::deleteFuseMetadata(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM fuse_metadata WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseMetadata.deleteByFileId"),
+        QStringLiteral("DELETE FROM fuse_metadata WHERE file_id = ?"), "deleteFuseMetadata");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("deleteFuseMetadata", query.lastError().text());
+    query->bindValue(0, fileId);
+
+    if (!query->exec()) {
+        logError("deleteFuseMetadata", query->lastError().text());
         return false;
     }
 
@@ -1654,13 +2057,19 @@ QList<FuseMetadata> SyncDatabase::getFuseChildren(const QString& parentId) const
     QMutexLocker locker(&m_mutex);
     QList<FuseMetadata> children;
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM fuse_metadata WHERE parent_id = ?");
-    query.addBindValue(parentId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseMetadata.getChildrenByParentId"),
+        QStringLiteral("SELECT * FROM fuse_metadata WHERE parent_id = ?"), "getFuseChildren");
+    if (!query) {
+        return children;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec()) {
-        while (query.next()) {
-            children.append(readFuseMetadataRow(query));
+    query->bindValue(0, parentId);
+
+    if (query->exec()) {
+        while (query->next()) {
+            children.append(readFuseMetadataRow(*query));
         }
     }
 
@@ -1715,26 +2124,31 @@ QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
     QMutexLocker locker(&m_mutex);
     QList<FuseDirtyFile> dirtyFiles;
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM fuse_dirty_files");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseDirty.getAll"), QStringLiteral("SELECT * FROM fuse_dirty_files"),
+        "getFuseDirtyFiles");
+    if (!query) {
+        return dirtyFiles;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec()) {
-        while (query.next()) {
+    if (query->exec()) {
+        while (query->next()) {
             FuseDirtyFile entry;
-            entry.fileId = query.value("file_id").toString();
-            entry.path = query.value("path").toString();
+            entry.fileId = query->value("file_id").toString();
+            entry.path = query->value("path").toString();
             entry.markedDirtyAt =
-                QDateTime::fromString(query.value("marked_dirty_at").toString(), Qt::ISODate);
+                QDateTime::fromString(query->value("marked_dirty_at").toString(), Qt::ISODate);
             entry.lastUploadAttempt =
-                QDateTime::fromString(query.value("last_upload_attempt").toString(), Qt::ISODate);
-            entry.uploadFailed = query.value("upload_failed").toInt() != 0;
-            const int generationIndex = query.record().indexOf("generation");
+                QDateTime::fromString(query->value("last_upload_attempt").toString(), Qt::ISODate);
+            entry.uploadFailed = query->value("upload_failed").toInt() != 0;
+            const int generationIndex = query->record().indexOf("generation");
             if (generationIndex >= 0) {
-                entry.generation = query.value(generationIndex).toULongLong();
+                entry.generation = query->value(generationIndex).toULongLong();
             }
-            const int uploadedGenerationIndex = query.record().indexOf("uploaded_generation");
+            const int uploadedGenerationIndex = query->record().indexOf("uploaded_generation");
             if (uploadedGenerationIndex >= 0) {
-                entry.uploadedGeneration = query.value(uploadedGenerationIndex).toULongLong();
+                entry.uploadedGeneration = query->value(uploadedGenerationIndex).toULongLong();
             }
             dirtyFiles.append(entry);
         }
@@ -1760,44 +2174,52 @@ bool SyncDatabase::hasPendingDirtyUploads() const {
 bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path, quint64 generation,
                                  quint64 uploadedGeneration) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-
-    // Use INSERT OR IGNORE to avoid overwriting existing entries
-    // This preserves failure tracking information if file was already dirty
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseDirty.mark.insertOrIgnore"), QStringLiteral(R"(
         INSERT OR IGNORE INTO fuse_dirty_files 
         (file_id, path, marked_dirty_at, upload_failed, generation, uploaded_generation)
         VALUES (?, ?, ?, 0, ?, ?)
-    )");
+    )"),
+        "markFuseDirty");
+    if (!query) {
+        return false;
+    }
 
-    query.addBindValue(fileId);
-    query.addBindValue(path);
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-    query.addBindValue(static_cast<qulonglong>(generation));
-    query.addBindValue(static_cast<qulonglong>(uploadedGeneration));
+    const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    query->bindValue(0, fileId);
+    query->bindValue(1, path);
+    query->bindValue(2, now);
+    query->bindValue(3, static_cast<qulonglong>(generation));
+    query->bindValue(4, static_cast<qulonglong>(uploadedGeneration));
 
-    if (!query.exec()) {
-        logError("markFuseDirty", query.lastError().text());
+    if (!query->exec()) {
+        logError("markFuseDirty", query->lastError().text());
         return false;
     }
 
     // If insert was ignored (file already dirty), update the marked_dirty_at timestamp
     // but preserve the upload_failed and last_upload_attempt values
-    if (query.numRowsAffected() == 0) {
-        query.prepare(R"(
+    if (query->numRowsAffected() == 0) {
+        query = preparedQueryForCurrentThreadUnlocked(
+            QStringLiteral("fuseDirty.mark.updateExisting"), QStringLiteral(R"(
             UPDATE fuse_dirty_files 
             SET path = ?, marked_dirty_at = ?, generation = ?,
                 uploaded_generation = MAX(uploaded_generation, ?)
             WHERE file_id = ?
-        )");
-        query.addBindValue(path);
-        query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-        query.addBindValue(static_cast<qulonglong>(generation));
-        query.addBindValue(static_cast<qulonglong>(uploadedGeneration));
-        query.addBindValue(fileId);
+        )"),
+            "markFuseDirty (update)");
+        if (!query) {
+            return false;
+        }
 
-        if (!query.exec()) {
-            logError("markFuseDirty (update)", query.lastError().text());
+        query->bindValue(0, path);
+        query->bindValue(1, now);
+        query->bindValue(2, static_cast<qulonglong>(generation));
+        query->bindValue(3, static_cast<qulonglong>(uploadedGeneration));
+        query->bindValue(4, fileId);
+
+        if (!query->exec()) {
+            logError("markFuseDirty (update)", query->lastError().text());
             return false;
         }
     }
@@ -1807,12 +2229,17 @@ bool SyncDatabase::markFuseDirty(const QString& fileId, const QString& path, qui
 
 bool SyncDatabase::clearFuseDirty(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM fuse_dirty_files WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseDirty.deleteByFileId"),
+        QStringLiteral("DELETE FROM fuse_dirty_files WHERE file_id = ?"), "clearFuseDirty");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("clearFuseDirty", query.lastError().text());
+    query->bindValue(0, fileId);
+
+    if (!query->exec()) {
+        logError("clearFuseDirty", query->lastError().text());
         return false;
     }
 
@@ -1821,17 +2248,22 @@ bool SyncDatabase::clearFuseDirty(const QString& fileId) {
 
 bool SyncDatabase::markFuseUploadFailed(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseDirty.markUploadFailed"), QStringLiteral(R"(
         UPDATE fuse_dirty_files 
         SET upload_failed = 1, last_upload_attempt = ?
         WHERE file_id = ?
-    )");
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-    query.addBindValue(fileId);
+    )"),
+        "markFuseUploadFailed");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("markFuseUploadFailed", query.lastError().text());
+    query->bindValue(0, QDateTime::currentDateTime().toString(Qt::ISODate));
+    query->bindValue(1, fileId);
+
+    if (!query->exec()) {
+        logError("markFuseUploadFailed", query->lastError().text());
         return false;
     }
 
@@ -1840,20 +2272,25 @@ bool SyncDatabase::markFuseUploadFailed(const QString& fileId) {
 
 bool SyncDatabase::markFuseUploadedGeneration(const QString& fileId, quint64 uploadedGeneration) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseDirty.markUploadedGeneration"), QStringLiteral(R"(
         UPDATE fuse_dirty_files
         SET uploaded_generation = MAX(uploaded_generation, ?),
             upload_failed = 0,
             last_upload_attempt = ?
         WHERE file_id = ?
-    )");
-    query.addBindValue(static_cast<qulonglong>(uploadedGeneration));
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-    query.addBindValue(fileId);
+    )"),
+        "markFuseUploadedGeneration");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("markFuseUploadedGeneration", query.lastError().text());
+    query->bindValue(0, static_cast<qulonglong>(uploadedGeneration));
+    query->bindValue(1, QDateTime::currentDateTime().toString(Qt::ISODate));
+    query->bindValue(2, fileId);
+
+    if (!query->exec()) {
+        logError("markFuseUploadedGeneration", query->lastError().text());
         return false;
     }
 
@@ -1877,19 +2314,24 @@ QList<FuseCacheEntry> SyncDatabase::getFuseCacheEntries() const {
     QMutexLocker locker(&m_mutex);
     QList<FuseCacheEntry> entries;
 
-    QSqlQuery query(m_db);
-    query.prepare("SELECT * FROM fuse_cache_entries");
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseCache.getAllEntries"),
+        QStringLiteral("SELECT * FROM fuse_cache_entries"), "getFuseCacheEntries");
+    if (!query) {
+        return entries;
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec()) {
-        while (query.next()) {
+    if (query->exec()) {
+        while (query->next()) {
             FuseCacheEntry entry;
-            entry.fileId = query.value("file_id").toString();
-            entry.cachePath = query.value("cache_path").toString();
-            entry.size = query.value("size").toLongLong();
+            entry.fileId = query->value("file_id").toString();
+            entry.cachePath = query->value("cache_path").toString();
+            entry.size = query->value("size").toLongLong();
             entry.lastAccessed =
-                QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+                QDateTime::fromString(query->value("last_accessed").toString(), Qt::ISODate);
             entry.downloadCompleted =
-                QDateTime::fromString(query.value("download_completed").toString(), Qt::ISODate);
+                QDateTime::fromString(query->value("download_completed").toString(), Qt::ISODate);
             entries.append(entry);
         }
     }
@@ -1900,24 +2342,27 @@ QList<FuseCacheEntry> SyncDatabase::getFuseCacheEntries() const {
 bool SyncDatabase::recordFuseCacheEntry(const QString& fileId, const QString& cachePath,
                                         qint64 size) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-
     QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
 
-    query.prepare(R"(
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseCache.recordEntry"), QStringLiteral(R"(
         INSERT OR REPLACE INTO fuse_cache_entries 
         (file_id, cache_path, size, last_accessed, download_completed)
         VALUES (?, ?, ?, ?, ?)
-    )");
+    )"),
+        "recordFuseCacheEntry");
+    if (!query) {
+        return false;
+    }
 
-    query.addBindValue(fileId);
-    query.addBindValue(cachePath);
-    query.addBindValue(size);
-    query.addBindValue(now);
-    query.addBindValue(now);
+    query->bindValue(0, fileId);
+    query->bindValue(1, cachePath);
+    query->bindValue(2, size);
+    query->bindValue(3, now);
+    query->bindValue(4, now);
 
-    if (!query.exec()) {
-        logError("recordFuseCacheEntry", query.lastError().text());
+    if (!query->exec()) {
+        logError("recordFuseCacheEntry", query->lastError().text());
         return false;
     }
 
@@ -1926,14 +2371,19 @@ bool SyncDatabase::recordFuseCacheEntry(const QString& fileId, const QString& ca
 
 bool SyncDatabase::updateCacheAccessTime(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseCache.updateAccessTime"),
+        QStringLiteral("UPDATE fuse_cache_entries SET last_accessed = ? WHERE file_id = ?"),
+        "updateCacheAccessTime");
+    if (!query) {
+        return false;
+    }
 
-    query.prepare("UPDATE fuse_cache_entries SET last_accessed = ? WHERE file_id = ?");
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-    query.addBindValue(fileId);
+    query->bindValue(0, QDateTime::currentDateTime().toString(Qt::ISODate));
+    query->bindValue(1, fileId);
 
-    if (!query.exec()) {
-        logError("updateCacheAccessTime", query.lastError().text());
+    if (!query->exec()) {
+        logError("updateCacheAccessTime", query->lastError().text());
         return false;
     }
 
@@ -1942,12 +2392,17 @@ bool SyncDatabase::updateCacheAccessTime(const QString& fileId) {
 
 bool SyncDatabase::evictFuseCacheEntry(const QString& fileId) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("DELETE FROM fuse_cache_entries WHERE file_id = ?");
-    query.addBindValue(fileId);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseCache.evictEntry"),
+        QStringLiteral("DELETE FROM fuse_cache_entries WHERE file_id = ?"), "evictFuseCacheEntry");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("evictFuseCacheEntry", query.lastError().text());
+    query->bindValue(0, fileId);
+
+    if (!query->exec()) {
+        logError("evictFuseCacheEntry", query->lastError().text());
         return false;
     }
 
@@ -1956,12 +2411,18 @@ bool SyncDatabase::evictFuseCacheEntry(const QString& fileId) {
 
 QString SyncDatabase::getFuseSyncState(const QString& key) const {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("SELECT value FROM fuse_sync_state WHERE key = ?");
-    query.addBindValue(key);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseSyncState.getByKey"),
+        QStringLiteral("SELECT value FROM fuse_sync_state WHERE key = ?"), "getFuseSyncState");
+    if (!query) {
+        return QString();
+    }
+    PreparedQueryResetGuard resetGuard(query);
 
-    if (query.exec() && query.next()) {
-        return query.value(0).toString();
+    query->bindValue(0, key);
+
+    if (query->exec() && query->next()) {
+        return query->value(0).toString();
     }
 
     return QString();
@@ -1969,13 +2430,19 @@ QString SyncDatabase::getFuseSyncState(const QString& key) const {
 
 bool SyncDatabase::setFuseSyncState(const QString& key, const QString& value) {
     QMutexLocker locker(&m_mutex);
-    QSqlQuery query(m_db);
-    query.prepare("INSERT OR REPLACE INTO fuse_sync_state (key, value) VALUES (?, ?)");
-    query.addBindValue(key);
-    query.addBindValue(value);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseSyncState.setByKey"),
+        QStringLiteral("INSERT OR REPLACE INTO fuse_sync_state (key, value) VALUES (?, ?)"),
+        "setFuseSyncState");
+    if (!query) {
+        return false;
+    }
 
-    if (!query.exec()) {
-        logError("setFuseSyncState", query.lastError().text());
+    query->bindValue(0, key);
+    query->bindValue(1, value);
+
+    if (!query->exec()) {
+        logError("setFuseSyncState", query->lastError().text());
         return false;
     }
 
