@@ -927,7 +927,7 @@ int main(int argc, char* argv[]) {
 
     // Connect tray manager to main window
     QObject::connect(&trayManager, &SystemTrayManager::showWindowRequested, &mainWindow,
-                     &MainWindow::show);
+                     &MainWindow::showAndActivate);
     QObject::connect(&trayManager, &SystemTrayManager::quitRequested, &app, &QApplication::quit);
 
     // Handle sign-out requests from MainWindow.  Check for pending dirty

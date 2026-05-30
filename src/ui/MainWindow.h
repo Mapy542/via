@@ -96,6 +96,14 @@ class MainWindow : public QMainWindow {
      */
     void setAuthExpired(const QString& reason);
 
+    /**
+     * @brief Show the main window and request focus.
+     *
+     * Restores the window from a minimized state, brings it to the front,
+     * and asks the window manager to activate it.
+     */
+    void showAndActivate();
+
    signals:
     /**
      * @brief Emitted when the user requests sign-out

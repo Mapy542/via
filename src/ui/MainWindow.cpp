@@ -68,6 +68,16 @@ MainWindow::~MainWindow() {
     }
 }
 
+void MainWindow::showAndActivate() {
+    if (windowState() & Qt::WindowMinimized) {
+        setWindowState(windowState() & ~Qt::WindowMinimized);
+    }
+
+    show();
+    raise();
+    activateWindow();
+}
+
 void MainWindow::setupUi() {
     m_centralWidget = new QWidget(this);
     setCentralWidget(m_centralWidget);
