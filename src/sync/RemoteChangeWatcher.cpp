@@ -137,6 +137,11 @@ RemoteChangeWatcher::State RemoteChangeWatcher::state() const {
     return m_state;
 }
 
+QHash<QString, QString> RemoteChangeWatcher::folderIdToPath() const {
+    QMutexLocker locker(&m_mutex);
+    return m_folderIdToPath;
+}
+
 void RemoteChangeWatcher::setFolderIdToPath(const QHash<QString, QString>& mapping) {
     QMutexLocker locker(&m_mutex);
     m_folderIdToPath = mapping;
@@ -542,6 +547,12 @@ void RemoteChangeWatcher::processChange(const DriveChange& change) {
             change.file.modifiedTime.isValid() ? change.file.modifiedTime : change.time;
         item.isDirectory = change.file.isFolder;
         item.remoteMd5 = change.file.md5Checksum;
+        item.remoteParentId = change.file.parentId();
+        const QString nativeDocModeOverride =
+            nativeDocModeOverrideForFile(m_syncDatabase, change.fileId);
+        item.remoteResolvedName = PathUtils::sanitizeRemoteFileName(
+            nativeDocVisibleName(change.file.name, change.file.mimeType, nativeDocModeOverride,
+                                 nativeDocModeFromString(m_settings.nativeDocMode)));
 
         // Determine if this is a create or modify
         // For remote changes, we treat it as create if we don't have it locally

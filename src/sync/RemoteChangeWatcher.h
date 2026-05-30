@@ -94,6 +94,12 @@ class RemoteChangeWatcher : public QObject {
     State state() const;
 
     /**
+     * @brief Get the current folder ID to path mapping used for path resolution
+     * @return Copy of the in-memory folder map
+     */
+    QHash<QString, QString> folderIdToPath() const;
+
+    /**
      * @brief Set the folder ID to path mapping
      * @param mapping Map of folder IDs to relative paths
      *

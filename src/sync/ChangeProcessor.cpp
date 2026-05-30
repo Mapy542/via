@@ -65,6 +65,75 @@ NativeDocChangeContext resolveNativeDocChangeContext(const SyncDatabase* databas
     return context;
 }
 
+QString normalizedParentPath(const QString& path) {
+    QString parentPath = QFileInfo(path).path();
+    if (parentPath == QLatin1String(".") || parentPath == QLatin1String("/")) {
+        parentPath.clear();
+    }
+    return parentPath;
+}
+
+bool remoteParentMatchesDbPath(const QString& remoteParentId, const QString& oldPath,
+                               const QString& newPath, const SyncDatabase* database,
+                               GoogleDriveClient* driveClient) {
+    const QString oldParentPath = normalizedParentPath(oldPath);
+    if (oldParentPath.isEmpty()) {
+        if (remoteParentId.isEmpty()) {
+            return true;
+        }
+
+        const QString rootId = driveClient ? driveClient->getRootFolderId() : QString();
+        if (!rootId.isEmpty()) {
+            return remoteParentId == rootId;
+        }
+
+        return normalizedParentPath(newPath).isEmpty();
+    }
+
+    if (!database || remoteParentId.isEmpty()) {
+        return false;
+    }
+
+    const QString oldParentId = database->getFileId(oldParentPath);
+    return !oldParentId.isEmpty() && oldParentId == remoteParentId;
+}
+
+bool classifyRemotePathTransition(ChangeQueueItem& change, const FileSyncState& dbState,
+                                  const SyncDatabase* database, GoogleDriveClient* driveClient) {
+    const QString oldPath = dbState.localPath;
+    const QString newPath = change.localPath;
+    if (oldPath.isEmpty() || newPath.isEmpty() || oldPath == newPath) {
+        return false;
+    }
+
+    const QString oldFileName = QFileInfo(oldPath).fileName();
+    const bool parentMatches =
+        remoteParentMatchesDbPath(change.remoteParentId, oldPath, newPath, database, driveClient);
+    const bool parentIsAuthoritative =
+        !change.remoteParentId.isEmpty() || normalizedParentPath(oldPath).isEmpty();
+    const bool nameIsAuthoritative = !change.remoteResolvedName.isEmpty();
+    const bool nameMatches = nameIsAuthoritative && change.remoteResolvedName == oldFileName;
+
+    change.localPath = oldPath;
+    change.moveDestination.clear();
+    change.renameTo.clear();
+
+    if (parentIsAuthoritative && !parentMatches) {
+        change.changeType = ChangeType::Move;
+        change.moveDestination = newPath;
+        return true;
+    }
+
+    if (parentIsAuthoritative && parentMatches && nameIsAuthoritative && !nameMatches) {
+        change.changeType = ChangeType::Rename;
+        change.renameTo = change.remoteResolvedName;
+        return true;
+    }
+
+    change.changeType = ChangeType::Modify;
+    return false;
+}
+
 std::optional<RemoteMutationType> remoteMutationTypeForAction(SyncActionType actionType) {
     switch (actionType) {
         case SyncActionType::Upload:
@@ -524,37 +593,27 @@ bool ChangeProcessor::validateChange(ChangeQueueItem& change) {
         }
     }
 
-    // Allow remote moves/renames even when modified time doesn't change.
     if (change.origin == ChangeOrigin::Remote && hasDbState && !dbState.localPath.isEmpty() &&
         !localPath.isEmpty() && localPath != dbState.localPath) {
         const QString oldPath = dbState.localPath;
         const QString newPath = localPath;
-        QString oldDir = QFileInfo(oldPath).path();
-        QString newDir = QFileInfo(newPath).path();
-        if (oldDir == ".") {
-            oldDir.clear();
-        }
-        if (newDir == ".") {
-            newDir.clear();
+
+        if (classifyRemotePathTransition(change, dbState, m_database, m_driveClient)) {
+            qDebug() << "Validation passed - authoritative remote path change:" << changeId
+                     << "from" << oldPath << "to" << newPath;
+            if (!dedupValidate(change)) {
+                return false;
+            }
+            return true;
         }
 
-        change.localPath = oldPath;
-        if (oldDir != newDir) {
-            change.changeType = ChangeType::Move;
-            change.moveDestination = newPath;
-            change.renameTo.clear();
-        } else {
-            change.changeType = ChangeType::Rename;
-            change.renameTo = QFileInfo(newPath).fileName();
-            change.moveDestination.clear();
+        localPath = change.localPath;
+        if (change.localPath != localPath) {
+            change.localPath = localPath;
         }
-
-        qDebug() << "Validation passed - remote path changed:" << changeId << "from" << oldPath
-                 << "to" << newPath;
-        if (!dedupValidate(change)) {
-            return false;
-        }
-        return true;
+        qDebug()
+            << "Validation treating remote path mismatch as alias drift or insufficient metadata:"
+            << changeId << "from" << oldPath << "to" << newPath;
     }
 
     if (change.changeType == ChangeType::Move && !change.moveDestination.isEmpty() &&

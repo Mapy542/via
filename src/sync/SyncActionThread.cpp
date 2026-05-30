@@ -858,7 +858,15 @@ void SyncActionThread::executeMoveLocal(const SyncActionItem& item) {
                 dbFileId = m_database->getFileId(item.localPath);
             }
             if (!dbFileId.isEmpty()) {
-                m_database->setLocalPath(dbFileId, resolvedMoveDestination);
+                if (isDirectory) {
+                    if (!m_database->updateLocalPathTree(dbFileId, item.localPath,
+                                                         resolvedMoveDestination)) {
+                        failAction(item, "Failed to update move metadata for " + item.localPath);
+                        return;
+                    }
+                } else {
+                    m_database->setLocalPath(dbFileId, resolvedMoveDestination);
+                }
             }
         }
         SyncActionItem completedItem = item;
@@ -907,6 +915,7 @@ void SyncActionThread::executeRenameLocal(const SyncActionItem& item) {
     qInfo() << "Renaming local:" << item.localPath << "to" << item.renameTo;
 
     QFileInfo fileInfo(absolutePath);
+    const bool isDirectory = fileInfo.isDir();
     QString newRelPath = QFileInfo(item.localPath).dir().filePath(item.renameTo);
     QString effectiveFileId = item.fileId;
     if (effectiveFileId.isEmpty() && m_database) {
@@ -927,7 +936,15 @@ void SyncActionThread::executeRenameLocal(const SyncActionItem& item) {
                 dbFileId = m_database->getFileId(item.localPath);
             }
             if (!dbFileId.isEmpty()) {
-                m_database->setLocalPath(dbFileId, resolvedRelPath);
+                if (isDirectory) {
+                    if (!m_database->updateLocalPathTree(dbFileId, item.localPath,
+                                                         resolvedRelPath)) {
+                        failAction(item, "Failed to update rename metadata for " + item.localPath);
+                        return;
+                    }
+                } else {
+                    m_database->setLocalPath(dbFileId, resolvedRelPath);
+                }
             }
         }
         SyncActionItem completedItem = item;

@@ -6,6 +6,7 @@
 #ifndef MIRRORSYNCCONTROLLER_H
 #define MIRRORSYNCCONTROLLER_H
 
+#include <QHash>
 #include <QObject>
 
 class ChangeProcessor;
@@ -52,12 +53,17 @@ class MirrorSyncController : public QObject {
    private:
     static constexpr int DEFAULT_LOCAL_FULL_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
+    void startCoreComponents(bool startRemoteWatcher);
+    void seedRemoteWatcherPathAuthority(const QHash<QString, QString>& mapping);
+
     LocalChangeWatcher* m_localWatcher;
     RemoteChangeWatcher* m_remoteWatcher;
     ChangeProcessor* m_changeProcessor;
     SyncActionThread* m_syncActionThread;
     FullSync* m_fullSync;
     QTimer* m_fullSyncLocalTimer;
+    bool m_remoteWatcherStartPending = false;
+    bool m_remoteWatcherAuthorityReady = false;
 };
 
 #endif  // MIRRORSYNCCONTROLLER_H
