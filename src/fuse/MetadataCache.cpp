@@ -589,7 +589,7 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
     if (!parentId.isEmpty() && m_database) {
         const QList<FuseMetadata> dbChildren = m_database->getFuseChildren(parentId);
 
-        if (!dbChildren.isEmpty() || (parentKnown && parentPath != "/")) {
+        if (!dbChildren.isEmpty()) {
             QList<FuseFileMetadata> children;
             children.reserve(dbChildren.size());
             for (const FuseMetadata& dbMeta : dbChildren) {
@@ -1188,8 +1188,8 @@ void MetadataCache::loadFromDatabase() {
         m_database->deleteFuseMetadata(staleEntry.fileId);
     }
 
-    qDebug() << "MetadataCache: Deferred startup preload; pruned"
-             << staleTrashEntries.size() << "stale trash entries";
+    qDebug() << "MetadataCache: Deferred startup preload; pruned" << staleTrashEntries.size()
+             << "stale trash entries";
 }
 
 void MetadataCache::saveToDatabase(const FuseFileMetadata& metadata) {

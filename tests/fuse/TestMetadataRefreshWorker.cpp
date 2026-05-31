@@ -20,8 +20,16 @@ class FakeDriveClientMRW : public GoogleDriveClient {
    public:
     struct InjectedError {
         QString errorMsg;
+        int httpStatus = 0;
         int remaining = 1;
         int delayMs = 0;
+    };
+
+    struct QueuedChangesResponse {
+        QList<DriveChange> changes;
+        QString nextToken;
+        bool hasMorePages = false;
+        int delayMs = -1;
     };
 
     explicit FakeDriveClientMRW(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
@@ -37,8 +45,10 @@ class FakeDriveClientMRW : public GoogleDriveClient {
         if (emitInjectedError(QStringLiteral("listChanges"))) {
             return;
         }
-        QTimer::singleShot(listChangesResponseDelayMs, this, [this]() {
-            emit changesReceived(m_pendingChanges, m_nextToken, false);
+        const QueuedChangesResponse response = nextResponse();
+        const int delayMs = response.delayMs >= 0 ? response.delayMs : listChangesResponseDelayMs;
+        QTimer::singleShot(delayMs, this, [this, response]() {
+            emit changesReceived(response.changes, response.nextToken, response.hasMorePages);
         });
     }
 
@@ -63,17 +73,32 @@ class FakeDriveClientMRW : public GoogleDriveClient {
     void setStartPageToken(const QString& token) { m_startPageToken = token; }
     void setNextToken(const QString& token) { m_nextToken = token; }
     void setPendingChanges(const QList<DriveChange>& changes) { m_pendingChanges = changes; }
+    void setHasMorePages(bool hasMorePages) { m_hasMorePages = hasMorePages; }
+    void enqueueChangesResponse(const QList<DriveChange>& changes, const QString& nextToken,
+                                bool hasMorePages, int delayMs = -1) {
+        m_queuedResponses.append(QueuedChangesResponse{changes, nextToken, hasMorePages, delayMs});
+    }
     void injectOperationError(const QString& operation, const QString& errorMsg, int remaining = 1,
-                              int delayMs = 0) {
-        m_injectedErrors.insert(operation, InjectedError{errorMsg, remaining, delayMs});
+                              int delayMs = 0, int httpStatus = 0) {
+        m_injectedErrors.insert(operation, InjectedError{errorMsg, httpStatus, remaining, delayMs});
     }
 
     void emitChangesBatch(const QList<DriveChange>& changes,
-                          const QString& nextToken = QStringLiteral("next-token")) {
-        emit changesReceived(changes, nextToken, false);
+                          const QString& nextToken = QStringLiteral("next-token"),
+                          bool hasMorePages = false) {
+        emit changesReceived(changes, nextToken, hasMorePages);
     }
 
    private:
+    QueuedChangesResponse nextResponse() {
+        if (!m_queuedResponses.isEmpty()) {
+            return m_queuedResponses.takeFirst();
+        }
+
+        return QueuedChangesResponse{m_pendingChanges, m_nextToken, m_hasMorePages,
+                                     listChangesResponseDelayMs};
+    }
+
     bool emitInjectedError(const QString& operation) {
         if (!m_injectedErrors.contains(operation)) {
             return false;
@@ -82,7 +107,10 @@ class FakeDriveClientMRW : public GoogleDriveClient {
         InjectedError injected = m_injectedErrors.value(operation);
         QTimer::singleShot(
             injected.delayMs, this,
-            [this, operation, errorMsg = injected.errorMsg]() { emit error(operation, errorMsg); });
+            [this, operation, errorMsg = injected.errorMsg, httpStatus = injected.httpStatus]() {
+                emit error(operation, errorMsg);
+                emit errorDetailed(operation, errorMsg, httpStatus, QString(), QString());
+            });
 
         injected.remaining -= 1;
         if (injected.remaining <= 0) {
@@ -96,7 +124,9 @@ class FakeDriveClientMRW : public GoogleDriveClient {
 
     QString m_startPageToken = QStringLiteral("start-token");
     QString m_nextToken = QStringLiteral("next-token");
+    bool m_hasMorePages = false;
     QList<DriveChange> m_pendingChanges;
+    QList<QueuedChangesResponse> m_queuedResponses;
     QHash<QString, InjectedError> m_injectedErrors;
 };
 
@@ -114,6 +144,8 @@ class TestMetadataRefreshWorker : public QObject {
     void testTrashChange_IsIgnored();
     void testTransientApiErrorRetriesWithoutExternalError();
     void testInFlightRequestDefersExtraCheck();
+    void testPaginatedChanges_RequestNextPageImmediately();
+    void testExpiredChangeToken_RequestsNewStartPageTokenAndRecovers();
 
    private:
     static FuseFileMetadata makeFile(const QString& id, const QString& path,
@@ -352,6 +384,57 @@ void TestMetadataRefreshWorker::testInFlightRequestDefersExtraCheck() {
 
     QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 500);
     QCOMPARE(m_worker->changeToken(), QStringLiteral("token-2"));
+}
+
+void TestMetadataRefreshWorker::testPaginatedChanges_RequestNextPageImmediately() {
+    m_db->setFuseSyncState(QStringLiteral("fuse_change_token"), QStringLiteral("token-1"));
+
+    m_driveClient->enqueueChangesResponse(
+        {makeChange(QStringLiteral("change-page-1"), QStringLiteral("file-page-1"),
+                    QStringLiteral("page-1.txt"), QStringLiteral("root"))},
+        QStringLiteral("token-2"), true);
+    m_driveClient->enqueueChangesResponse(
+        {makeChange(QStringLiteral("change-page-2"), QStringLiteral("file-page-2"),
+                    QStringLiteral("page-2.txt"), QStringLiteral("root"))},
+        QStringLiteral("token-3"), false);
+
+    QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessed);
+    QSignalSpy tokenSpy(m_worker, &MetadataRefreshWorker::changeTokenUpdated);
+
+    m_worker->start();
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
+    QTRY_COMPARE_WITH_TIMEOUT(changeSpy.count(), 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 2, 1500);
+    QCOMPARE(m_driveClient->lastListChangesToken, QStringLiteral("token-2"));
+    QCOMPARE(m_worker->changeToken(), QStringLiteral("token-3"));
+    QCOMPARE(m_db->getFuseSyncState(QStringLiteral("fuse_change_token")),
+             QStringLiteral("token-3"));
+}
+
+void TestMetadataRefreshWorker::testExpiredChangeToken_RequestsNewStartPageTokenAndRecovers() {
+    m_db->setFuseSyncState(QStringLiteral("fuse_change_token"), QStringLiteral("stale-token"));
+    m_driveClient->setStartPageToken(QStringLiteral("fresh-start-token"));
+    m_driveClient->setPendingChanges({});
+    m_driveClient->setNextToken(QStringLiteral("caught-up-token"));
+    m_driveClient->injectOperationError(QStringLiteral("listChanges"),
+                                        QStringLiteral("The page token is expired."), 1, 0, 410);
+
+    QSignalSpy errorSpy(m_worker, &MetadataRefreshWorker::error);
+    QSignalSpy tokenSpy(m_worker, &MetadataRefreshWorker::changeTokenUpdated);
+
+    m_worker->start();
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->getStartPageTokenCallCount, 1, 1500);
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 2, 1500);
+    QCOMPARE(m_driveClient->lastListChangesToken, QStringLiteral("fresh-start-token"));
+    QCOMPARE(m_worker->changeToken(), QStringLiteral("caught-up-token"));
+    QCOMPARE(m_db->getFuseSyncState(QStringLiteral("fuse_change_token")),
+             QStringLiteral("caught-up-token"));
+    QVERIFY(errorSpy.count() >= 1);
+    QVERIFY(
+        errorSpy.at(0).at(0).toString().contains(QStringLiteral("expired"), Qt::CaseInsensitive));
 }
 
 QTEST_MAIN(TestMetadataRefreshWorker)

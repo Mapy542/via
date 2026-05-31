@@ -208,8 +208,10 @@ class MetadataRefreshWorker : public QObject {
      * @brief Handle changes received from Google Drive API
      * @param changes List of changes
      * @param newToken New change page token for next request
+     * @param hasMorePages True when Drive has more change pages to fetch immediately
      */
-    void onChangesReceived(const QList<DriveChange>& changes, const QString& newToken);
+    void onChangesReceived(const QList<DriveChange>& changes, const QString& newToken,
+                           bool hasMorePages);
 
     /**
      * @brief Handle start page token received from API
@@ -218,7 +220,18 @@ class MetadataRefreshWorker : public QObject {
     void onStartPageTokenReceived(const QString& token);
 
     /**
-     * @brief Handle API errors
+     * @brief Handle API errors with HTTP details
+     * @param operation Operation that failed
+     * @param errorMessage Error message
+     * @param httpStatus HTTP status code, or 0 if unavailable
+     * @param fileId File ID associated with the request, if known
+     * @param localPath Local path associated with the request, if known
+     */
+    void onApiErrorDetailed(const QString& operation, const QString& errorMessage, int httpStatus,
+                            const QString& fileId, const QString& localPath);
+
+    /**
+     * @brief Handle legacy API errors without HTTP details
      * @param operation Operation that failed
      * @param errorMessage Error message
      */
@@ -284,6 +297,12 @@ class MetadataRefreshWorker : public QObject {
      * @param token Token to persist
      */
     void saveChangeToken(const QString& token);
+
+    /**
+     * @brief Reset replay state after Drive reports that the saved change token expired
+     * @param errorMessage Error text for logging / UI surfacing
+     */
+    void recoverExpiredChangeToken(const QString& errorMessage);
 
     // Dependencies
     MetadataCache* m_metadataCache;

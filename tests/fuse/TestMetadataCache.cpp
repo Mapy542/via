@@ -64,6 +64,9 @@ class TestMetadataCache : public QObject {
     void testUpsertRemoteMetadata_NativeDocLegacyPathGetsExtension();
     void testDuplicateFolderAliasesKeepDistinctChildren();
     void testDuplicateAliasesPersistAcrossReinit();
+    void testGetOrFetchChildren_ColdEmptyFolderDoesNotMarkChildrenCached();
+    void testGetOrFetchChildren_DbChildrenHydrateAndMarkChildrenCached();
+    void testGetOrFetchChildren_NestedNativeDocTextModeUsesVisibleExtension();
 
     // Edge cases
     void testGetByPath_UnknownReturnsInvalid();
@@ -428,6 +431,64 @@ void TestMetadataCache::testDuplicateAliasesPersistAcrossReinit() {
     const QList<FuseFileMetadata> children = m_cache->getOrFetchChildren("/");
     QCOMPARE(children.size(), 1);
     QCOMPARE(children.first().path, QString("report_idB.txt"));
+}
+
+void TestMetadataCache::testGetOrFetchChildren_ColdEmptyFolderDoesNotMarkChildrenCached() {
+    m_cache->setMetadata(makeFolder("folder-empty", "Projects"));
+
+    delete m_cache;
+    m_cache = new MetadataCache(m_db, m_driveClient, this);
+    QVERIFY(m_cache->initialize());
+    m_cache->setRootFolderId("root");
+
+    QVERIFY(!m_cache->hasChildrenCached("Projects"));
+
+    const QList<FuseFileMetadata> children = m_cache->getOrFetchChildren("Projects");
+    QVERIFY(children.isEmpty());
+    QVERIFY(!m_cache->hasChildrenCached("Projects"));
+}
+
+void TestMetadataCache::testGetOrFetchChildren_DbChildrenHydrateAndMarkChildrenCached() {
+    m_cache->setMetadata(makeFolder("folder-db", "Projects"));
+    m_cache->setMetadata(makeFile("child-db", "Projects/report.txt", "folder-db"));
+
+    delete m_cache;
+    m_cache = new MetadataCache(m_db, m_driveClient, this);
+    QVERIFY(m_cache->initialize());
+    m_cache->setRootFolderId("root");
+
+    QVERIFY(!m_cache->hasChildrenCached("Projects"));
+
+    const QList<FuseFileMetadata> children = m_cache->getOrFetchChildren("Projects");
+    QCOMPARE(children.size(), 1);
+    QCOMPARE(children.first().path, QString("Projects/report.txt"));
+    QVERIFY(m_cache->hasChildrenCached("Projects"));
+}
+
+void TestMetadataCache::testGetOrFetchChildren_NestedNativeDocTextModeUsesVisibleExtension() {
+    QSettings settings;
+    settings.setValue("advanced/nativeDocMode", "text");
+
+    QList<DriveFile> rootChildren;
+    rootChildren << makeRemoteEntry("folder-docs", "Docs", "root", true);
+    m_cache->replaceRemoteChildren("root", rootChildren);
+
+    DriveFile doc = makeRemoteEntry("doc-text", "Quarterly", "folder-docs");
+    doc.mimeType = QStringLiteral("application/vnd.google-apps.document");
+    doc.webViewLink = QStringLiteral("https://docs.google.com/document/d/doc-text/edit");
+    m_cache->replaceRemoteChildren("folder-docs", {doc});
+
+    delete m_cache;
+    m_cache = new MetadataCache(m_db, m_driveClient, this);
+    QVERIFY(m_cache->initialize());
+    m_cache->setRootFolderId("root");
+
+    const QList<FuseFileMetadata> children = m_cache->getOrFetchChildren("Docs");
+    QCOMPARE(children.size(), 1);
+    QCOMPARE(children.first().name, QString("Quarterly.md"));
+    QCOMPARE(children.first().path, QString("Docs/Quarterly.md"));
+    QCOMPARE(children.first().remoteMimeType, QString("application/vnd.google-apps.document"));
+    QVERIFY(m_cache->hasChildrenCached("Docs"));
 }
 
 // ---------------------------------------------------------------------------

@@ -36,6 +36,21 @@ bool isTransientPollError(const QString& error) {
            lowered.contains(QStringLiteral("remote host closed"));
 }
 
+bool isExpiredChangeTokenError(const QString& error, int httpStatus) {
+    if (httpStatus == 410) {
+        return true;
+    }
+
+    const QString lowered = error.toLower();
+    return ((lowered.contains(QStringLiteral("page token")) ||
+             lowered.contains(QStringLiteral("start page token")) ||
+             lowered.contains(QStringLiteral("sync token"))) &&
+            (lowered.contains(QStringLiteral("expired")) ||
+             lowered.contains(QStringLiteral("invalid")) ||
+             lowered.contains(QStringLiteral("no longer valid")) ||
+             lowered.contains(QStringLiteral("gone"))));
+}
+
 int transientRetryDelayMs(int consecutiveFailures) {
     int delayMs = kTransientRetryBaseDelayMs;
     const int clampedFailures = qBound(1, consecutiveFailures, 5);
@@ -109,6 +124,8 @@ MetadataRefreshWorker::MetadataRefreshWorker(MetadataCache* metadataCache, FileC
                 &MetadataRefreshWorker::onChangesReceived);
         connect(m_driveClient, &GoogleDriveClient::startPageTokenReceived, this,
                 &MetadataRefreshWorker::onStartPageTokenReceived);
+        connect(m_driveClient, &GoogleDriveClient::errorDetailed, this,
+                &MetadataRefreshWorker::onApiErrorDetailed);
         connect(m_driveClient, &GoogleDriveClient::error, this, &MetadataRefreshWorker::onApiError);
     }
 }
@@ -283,8 +300,9 @@ void MetadataRefreshWorker::onPollingTimeout() {
 }
 
 void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
-                                              const QString& newToken) {
-    qDebug() << "MetadataRefreshWorker: Received" << changes.size() << "changes";
+                                              const QString& newToken, bool hasMorePages) {
+    qDebug() << "MetadataRefreshWorker: Received" << changes.size() << "changes"
+             << "hasMorePages:" << hasMorePages;
 
     // Process each change according to flow chart:
     // - Modified --> INVALIDATE_CACHE
@@ -298,8 +316,10 @@ void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
 
     // Update and save the change token
     bool runDeferredCheck = false;
+    bool tokenUpdated = false;
     {
         QMutexLocker locker(&m_mutex);
+        tokenUpdated = (m_changeToken != newToken);
         m_changeToken = newToken;
         m_changesRequestInFlight = false;
         runDeferredCheck = m_pendingCheckRequested;
@@ -311,7 +331,9 @@ void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
     emit changeTokenUpdated(newToken);
     emit refreshCompleted(processedCount);
 
-    if (runDeferredCheck) {
+    if (hasMorePages && tokenUpdated) {
+        QTimer::singleShot(0, this, &MetadataRefreshWorker::checkNow);
+    } else if (runDeferredCheck) {
         QTimer::singleShot(0, this, &MetadataRefreshWorker::checkNow);
     }
 }
@@ -321,6 +343,7 @@ void MetadataRefreshWorker::onStartPageTokenReceived(const QString& token) {
 
     m_changeToken = token;
     bool wasWaiting = m_waitingForToken;
+    const State stateBeforeUnlock = m_state;
     m_waitingForToken = false;
     m_changesRequestInFlight = false;
     m_pendingCheckRequested = false;
@@ -338,7 +361,27 @@ void MetadataRefreshWorker::onStartPageTokenReceived(const QString& token) {
     // Note: start() will now see m_changeToken is set and proceed directly
     // to starting the timer, avoiding any recursive token requests
     if (wasWaiting) {
-        start();
+        if (stateBeforeUnlock == State::Running) {
+            QTimer::singleShot(0, this, &MetadataRefreshWorker::checkNow);
+        } else {
+            start();
+        }
+    }
+}
+
+void MetadataRefreshWorker::onApiErrorDetailed(const QString& operation,
+                                               const QString& errorMessage, int httpStatus,
+                                               const QString& fileId, const QString& localPath) {
+    Q_UNUSED(fileId)
+    Q_UNUSED(localPath)
+
+    if (!operation.contains(QStringLiteral("changes"), Qt::CaseInsensitive) &&
+        !operation.contains(QStringLiteral("token"), Qt::CaseInsensitive)) {
+        return;
+    }
+
+    if (isExpiredChangeTokenError(errorMessage, httpStatus)) {
+        recoverExpiredChangeToken(errorMessage);
     }
 }
 
@@ -346,6 +389,10 @@ void MetadataRefreshWorker::onApiError(const QString& operation, const QString& 
     // Only handle errors related to changes API
     if (operation.contains(QStringLiteral("changes"), Qt::CaseInsensitive) ||
         operation.contains(QStringLiteral("token"), Qt::CaseInsensitive)) {
+        if (isExpiredChangeTokenError(errorMessage, 0)) {
+            return;
+        }
+
         const bool transient = isTransientPollError(errorMessage);
         bool shouldRetry = false;
         bool shouldSurface = false;
@@ -379,6 +426,31 @@ void MetadataRefreshWorker::onApiError(const QString& operation, const QString& 
 
         qWarning() << "MetadataRefreshWorker: API error in" << operation << "-" << errorMessage;
         emit error(QStringLiteral("API error: ") + errorMessage);
+    }
+}
+
+void MetadataRefreshWorker::recoverExpiredChangeToken(const QString& errorMessage) {
+    bool shouldRequestToken = false;
+    {
+        QMutexLocker locker(&m_mutex);
+        m_changeToken.clear();
+        m_waitingForToken = (m_state == State::Running || m_waitingForToken);
+        shouldRequestToken = m_waitingForToken && m_driveClient;
+        m_changesRequestInFlight = false;
+        m_pendingCheckRequested = false;
+        m_consecutiveTransientFailures = 0;
+    }
+
+    saveChangeToken(QString());
+
+    qWarning() << "MetadataRefreshWorker: Drive change token expired, requesting a new start"
+               << "page token" << errorMessage;
+    emit error(QStringLiteral(
+        "Drive change token expired; restarting remote change tracking. Cached metadata may "
+        "refresh lazily until listings are revisited."));
+
+    if (shouldRequestToken) {
+        QMetaObject::invokeMethod(m_driveClient, "getStartPageToken", Qt::QueuedConnection);
     }
 }
 
