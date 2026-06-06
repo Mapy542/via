@@ -143,6 +143,7 @@ class TestMetadataRefreshWorker : public QObject {
     void testCreatedChange_FallsBackToFileNameWhenPathUnavailable();
     void testTrashChange_IsIgnored();
     void testTransientApiErrorRetriesWithoutExternalError();
+    void testTimeoutApiErrorRetriesWithoutExternalError();
     void testInFlightRequestDefersExtraCheck();
     void testPaginatedChanges_RequestNextPageImmediately();
     void testExpiredChangeToken_RequestsNewStartPageTokenAndRecovers();
@@ -358,6 +359,24 @@ void TestMetadataRefreshWorker::testTransientApiErrorRetriesWithoutExternalError
     m_driveClient->setNextToken(QStringLiteral("token-2"));
     m_driveClient->injectOperationError(QStringLiteral("listChanges"),
                                         QStringLiteral("HTTP/2 protocol error"));
+
+    QSignalSpy errorSpy(m_worker, &MetadataRefreshWorker::error);
+    QSignalSpy tokenSpy(m_worker, &MetadataRefreshWorker::changeTokenUpdated);
+
+    m_worker->start();
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(m_worker->changeToken(), QStringLiteral("token-2"));
+}
+
+void TestMetadataRefreshWorker::testTimeoutApiErrorRetriesWithoutExternalError() {
+    m_db->setFuseSyncState(QStringLiteral("fuse_change_token"), QStringLiteral("token-1"));
+    m_driveClient->setPendingChanges({});
+    m_driveClient->setNextToken(QStringLiteral("token-2"));
+    m_driveClient->injectOperationError(QStringLiteral("listChanges"),
+                                        QStringLiteral("Operation timed out"));
 
     QSignalSpy errorSpy(m_worker, &MetadataRefreshWorker::error);
     QSignalSpy tokenSpy(m_worker, &MetadataRefreshWorker::changeTokenUpdated);

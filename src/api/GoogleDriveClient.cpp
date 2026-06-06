@@ -30,6 +30,7 @@ const QString GoogleDriveClient::UPLOAD_URL = "https://www.googleapis.com/upload
 
 // CON-02: 30-second timeout for blocking event loops
 static constexpr int BLOCKING_CALL_TIMEOUT_MS = 30000;
+static constexpr int ASYNC_METADATA_REQUEST_TIMEOUT_MS = 30000;
 
 namespace {
 constexpr int MAX_ERROR_BODY_PREVIEW_BYTES = 256;
@@ -87,6 +88,10 @@ void tagReply(QNetworkReply* reply, const QString& fileId, const QString& localP
 void setJsonContentType(QNetworkRequest& request) {
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       QStringLiteral("application/json; charset=UTF-8"));
+}
+
+void setAsyncMetadataRequestTimeout(QNetworkRequest& request) {
+    request.setTransferTimeout(ASYNC_METADATA_REQUEST_TIMEOUT_MS);
 }
 }  // namespace
 
@@ -337,6 +342,7 @@ void GoogleDriveClient::listFiles(const QString& folderId, const QString& pageTo
     url.setQuery(query);
 
     QNetworkRequest request = createRequest(url);
+    setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -373,6 +379,7 @@ void GoogleDriveClient::getFile(const QString& fileId) {
     url.setQuery(query);
 
     QNetworkRequest request = createRequest(url);
+    setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -398,6 +405,7 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
     url.setQuery(query);
 
     QNetworkRequest request = createRequest(url);
+    setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
     tagReply(reply, fileId, localPath);
 
@@ -885,6 +893,7 @@ void GoogleDriveClient::listChanges(const QString& startPageToken) {
     url.setQuery(query);
 
     QNetworkRequest request = createRequest(url);
+    setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -921,6 +930,7 @@ void GoogleDriveClient::getStartPageToken() {
     QUrl url(API_BASE_URL + "/changes/startPageToken");
 
     QNetworkRequest request = createRequest(url);
+    setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {

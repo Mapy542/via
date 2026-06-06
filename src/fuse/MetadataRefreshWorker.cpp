@@ -31,6 +31,10 @@ bool isTransientPollError(const QString& error) {
     return lowered.contains(QStringLiteral("goaway")) ||
            lowered.contains(QStringLiteral("protocol error")) ||
            lowered.contains(QStringLiteral("stream error")) ||
+           lowered.contains(QStringLiteral("timed out")) ||
+           lowered.contains(QStringLiteral("timeout")) ||
+           lowered.contains(QStringLiteral("operation canceled")) ||
+           lowered.contains(QStringLiteral("operation cancelled")) ||
            lowered.contains(QStringLiteral("connection reset")) ||
            lowered.contains(QStringLiteral("connection closed")) ||
            lowered.contains(QStringLiteral("remote host closed"));

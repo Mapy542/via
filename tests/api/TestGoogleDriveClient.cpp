@@ -112,6 +112,10 @@ class FakeNetworkAccessManager final : public QNetworkAccessManager {
         return QUrlQuery(m_requests.at(requestIndex).url()).queryItemValue(key);
     }
 
+    int transferTimeout(int requestIndex) const {
+        return m_requests.at(requestIndex).transferTimeout();
+    }
+
    protected:
     QNetworkReply* createRequest(Operation operation, const QNetworkRequest& request,
                                  QIODevice* outgoingData) override {
@@ -162,6 +166,7 @@ class TestGoogleDriveClient : public QObject {
     void testGetFolderIdByPath_ReleasesBlockingGuardAndEscapesPathSegment();
     void testListFiles_EscapesFolderIdInQuery();
     void testListFilesBlocking_EscapesFolderIdInQuery();
+    void testAsyncMetadataRequests_SetTransferTimeout();
 };
 
 void TestGoogleDriveClient::testCreateRequest_AttachesAuthorizationHeaderOnlyForHttps() {
@@ -227,6 +232,27 @@ void TestGoogleDriveClient::testListFilesBlocking_EscapesFolderIdInQuery() {
             "'folder\\'id' in parents and trashed = false and (not mimeType contains "
             "'application/vnd.google-apps.' or mimeType = 'application/vnd.google-apps.folder' "
             "or mimeType = 'application/vnd.google-apps.shortcut')"));
+}
+
+void TestGoogleDriveClient::testAsyncMetadataRequests_SetTransferTimeout() {
+    auto* networkManager = new FakeNetworkAccessManager();
+    networkManager->enqueueJsonResponse(QJsonObject{{QStringLiteral("files"), QJsonArray()}});
+    networkManager->enqueueJsonResponse(
+        QJsonObject{{QStringLiteral("changes"), QJsonArray()},
+                    {QStringLiteral("newStartPageToken"), QStringLiteral("next-token")}});
+    networkManager->enqueueJsonResponse(
+        QJsonObject{{QStringLiteral("startPageToken"), QStringLiteral("start-token")}});
+
+    GoogleDriveClient client(nullptr, networkManager);
+
+    client.listFiles(QStringLiteral("all"));
+    client.listChanges(QStringLiteral("known-token"));
+    client.getStartPageToken();
+
+    QCOMPARE(networkManager->requestCount(), 3);
+    QCOMPARE(networkManager->transferTimeout(0), 30000);
+    QCOMPARE(networkManager->transferTimeout(1), 30000);
+    QCOMPARE(networkManager->transferTimeout(2), 30000);
 }
 
 QTEST_MAIN(TestGoogleDriveClient)

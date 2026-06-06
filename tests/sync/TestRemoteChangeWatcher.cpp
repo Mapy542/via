@@ -165,6 +165,7 @@ class TestRemoteChangeWatcher : public QObject {
     // Error handling
     void testApiErrorEmitsErrorSignal();
     void testTransientApiErrorRetriesWithoutErrorSignal();
+    void testTimeoutApiErrorRetriesWithoutErrorSignal();
 
     // In-flight dedup
     void testInFlightDedup();
@@ -776,7 +777,7 @@ void TestRemoteChangeWatcher::testApiErrorEmitsErrorSignal() {
     m_watcher->start();
 
     QSignalSpy errorSpy(m_watcher, &RemoteChangeWatcher::error);
-    m_driveClient->emitError("listChanges", "network timeout");
+    m_driveClient->emitError("listChanges", "server rejected request");
 
     QTRY_VERIFY(errorSpy.count() >= 1);
 }
@@ -787,6 +788,24 @@ void TestRemoteChangeWatcher::testTransientApiErrorRetriesWithoutErrorSignal() {
     m_driveClient->setNextToken("token-2");
     m_driveClient->injectOperationError(QStringLiteral("listChanges"),
                                         QStringLiteral("HTTP/2 protocol error"));
+
+    QSignalSpy errorSpy(m_watcher, &RemoteChangeWatcher::error);
+    QSignalSpy tokenSpy(m_watcher, &RemoteChangeWatcher::changeTokenUpdated);
+
+    m_watcher->start();
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(m_watcher->changeToken(), QStringLiteral("token-2"));
+}
+
+void TestRemoteChangeWatcher::testTimeoutApiErrorRetriesWithoutErrorSignal() {
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setPendingChanges({});
+    m_driveClient->setNextToken("token-2");
+    m_driveClient->injectOperationError(QStringLiteral("listChanges"),
+                                        QStringLiteral("Operation timed out"));
 
     QSignalSpy errorSpy(m_watcher, &RemoteChangeWatcher::error);
     QSignalSpy tokenSpy(m_watcher, &RemoteChangeWatcher::changeTokenUpdated);
