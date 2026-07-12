@@ -22,6 +22,8 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
 #include <csignal>
@@ -30,9 +32,53 @@
 #include "auth/GoogleAuthManager.h"
 #include "auth/TokenStorage.h"
 #include "fuse/FuseDriver.h"
+#include "sync/RuntimePauseController.h"
 #include "sync/SyncDatabase.h"
 
 static FuseDriver* g_fuseDriver = nullptr;
+
+static bool authoritativeFuseRolloutEnabled() {
+    const QString envValue = qEnvironmentVariable("VIA_ENABLE_AUTHORITATIVE_FUSE").trimmed();
+    if (!envValue.isEmpty()) {
+        const QString normalized = envValue.toLower();
+        return normalized != QStringLiteral("0") && normalized != QStringLiteral("false") &&
+               normalized != QStringLiteral("off") && normalized != QStringLiteral("no");
+    }
+
+    QSettings settings;
+    return settings.value("advanced/enableAuthoritativeFuse", true).toBool();
+}
+
+static void writeHarnessState(const QString& stateFile, const QString& state) {
+    if (stateFile.isEmpty()) {
+        return;
+    }
+
+    QFile file(stateFile);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+
+    file.write(state.toUtf8());
+    file.write("\n");
+    file.close();
+}
+
+static QString takeHarnessCommand(const QString& controlFile) {
+    if (controlFile.isEmpty() || !QFile::exists(controlFile)) {
+        return QString();
+    }
+
+    QFile file(controlFile);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return QString();
+    }
+
+    const QString command = QString::fromUtf8(file.readAll()).trimmed().toLower();
+    file.close();
+    QFile::remove(controlFile);
+    return command;
+}
 
 static void signalHandler(int sig) {
     qInfo() << "Received signal" << sig << "— initiating shutdown";
@@ -54,11 +100,21 @@ int main(int argc, char* argv[]) {
     const QString refreshToken = qEnvironmentVariable("VIA_REFRESH_TOKEN");
     const QString mountPoint = qEnvironmentVariable("VIA_MOUNT_POINT", "/tmp/via-fuse-test");
     const qint64 cacheSizeMb = qEnvironmentVariable("VIA_CACHE_SIZE_MB", "500").toLongLong();
+    const QString controlFile =
+        qEnvironmentVariable("VIA_CONTROL_FILE", mountPoint + "/../.via-fuse-control");
+    const QString stateFile =
+        qEnvironmentVariable("VIA_STATE_FILE", mountPoint + "/../.via-fuse-state");
 
     if (clientId.isEmpty() || clientSecret.isEmpty() || refreshToken.isEmpty()) {
         qCritical() << "Missing required environment variables:";
         qCritical() << "  VIA_CLIENT_ID, VIA_CLIENT_SECRET, VIA_REFRESH_TOKEN";
         return 1;
+    }
+
+    if (!authoritativeFuseRolloutEnabled()) {
+        qCritical() << "Authoritative FUSE rollout gate is disabled";
+        writeHarnessState(stateFile, QStringLiteral("disabled"));
+        return 2;
     }
 
     qInfo() << "FUSE test harness starting";
@@ -104,6 +160,8 @@ int main(int argc, char* argv[]) {
     }
 
     FuseDriver fuseDriver(&driveClient, &syncDatabase);
+    RuntimePauseController pauseController;
+    fuseDriver.setPauseController(&pauseController);
     fuseDriver.setMountPoint(mountPoint);
     fuseDriver.setMaxCacheSizeBytes(cacheSizeMb * 1024LL * 1024LL);
     g_fuseDriver = &fuseDriver;
@@ -129,6 +187,45 @@ int main(int argc, char* argv[]) {
         f.write("ready\n");
         f.close();
     }
+    writeHarnessState(stateFile, QStringLiteral("running"));
+
+    QTimer controlTimer;
+    QObject::connect(&controlTimer, &QTimer::timeout, &app, [&]() {
+        const QString command = takeHarnessCommand(controlFile);
+        if (command.isEmpty()) {
+            return;
+        }
+
+        if (command == QStringLiteral("pause")) {
+            pauseController.requestManualPause();
+            fuseDriver.pauseSync();
+            writeHarnessState(stateFile, QStringLiteral("paused"));
+            return;
+        }
+
+        if (command == QStringLiteral("resume")) {
+            pauseController.requestManualResume();
+            fuseDriver.resumeSync();
+            writeHarnessState(stateFile, QStringLiteral("running"));
+            return;
+        }
+
+        if (command == QStringLiteral("status")) {
+            writeHarnessState(stateFile, pauseController.isEffectivelyPaused()
+                                             ? QStringLiteral("paused")
+                                             : QStringLiteral("running"));
+            return;
+        }
+
+        if (command == QStringLiteral("shutdown")) {
+            writeHarnessState(stateFile, QStringLiteral("stopping"));
+            if (fuseDriver.isMounted()) {
+                fuseDriver.unmount();
+            }
+            QCoreApplication::quit();
+        }
+    });
+    controlTimer.start(250);
 
     // ── Run event loop (keeps token refresh alive) ───────────────────
 
@@ -142,6 +239,8 @@ int main(int argc, char* argv[]) {
     }
 
     QFile::remove(readyFile);
+    QFile::remove(controlFile);
+    writeHarnessState(stateFile, QStringLiteral("stopped"));
     qInfo() << "FUSE test harness exiting with code" << rc;
     return rc;
 }

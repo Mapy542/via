@@ -378,15 +378,37 @@ void DirtySyncWorker::processDirtyFiles() {
     int cycleUploaded = 0;
     int cycleFailed = 0;
 
-    const auto recordLocalFailure = [&](const DirtyFileEntry& entry, const QString& errorMessage) {
+    const auto recordLocalFailure = [&](const DirtyFileEntry& entry, const QString& errorMessage,
+                                        bool clearWhenExhausted = false) {
         m_fileCache->markUploadFailed(entry.fileId);
         cycleFailed++;
+
+        int retriesForGeneration = 0;
 
         {
             QMutexLocker locker(&m_mutex);
             m_failedCount++;
-            m_retryCounts[entry.fileId] = m_retryCounts.value(entry.fileId, 0) + 1;
+            DirtyUploadRetryState& retryState = m_retryCounts[entry.fileId];
+            if (retryState.generation != entry.generation) {
+                retryState.generation = entry.generation;
+                retryState.count = 0;
+            }
+            retryState.count += 1;
+            retriesForGeneration = retryState.count;
             m_uploadError = errorMessage;
+        }
+
+        if (clearWhenExhausted && retriesForGeneration >= m_maxRetries &&
+            m_fileCache->clearDirty(entry.fileId, entry.generation)) {
+            QMutexLocker locker(&m_mutex);
+            auto retryIt = m_retryCounts.find(entry.fileId);
+            if (retryIt != m_retryCounts.end() && retryIt->generation == entry.generation) {
+                m_retryCounts.erase(retryIt);
+            }
+
+            qWarning() << "DirtySyncWorker: Cleared stale dirty entry for" << entry.path
+                       << "- local upload content remained missing after" << retriesForGeneration
+                       << "attempts";
         }
 
         emit uploadFailed(entry.fileId, entry.path, errorMessage);
@@ -416,7 +438,8 @@ void DirtySyncWorker::processDirtyFiles() {
         // GPT5.3 #8: skip files that exceeded max retries
         {
             QMutexLocker locker(&m_mutex);
-            int retries = m_retryCounts.value(entry.fileId, 0);
+            const DirtyUploadRetryState retryState = m_retryCounts.value(entry.fileId);
+            const int retries = retryState.generation == entry.generation ? retryState.count : 0;
             if (retries >= m_maxRetries) {
                 qWarning() << "DirtySyncWorker: Skipping" << entry.path
                            << "- exceeded max retries (" << retries << ")";
@@ -445,7 +468,7 @@ void DirtySyncWorker::processDirtyFiles() {
                 qDebug() << "DirtySyncWorker: Skipping stale dirty generation for" << entry.path;
                 continue;
             case UploadSnapshotStatus::MissingContent:
-                recordLocalFailure(entry, QStringLiteral("Local upload content missing"));
+                recordLocalFailure(entry, QStringLiteral("Local upload content missing"), true);
                 continue;
             case UploadSnapshotStatus::Failed:
                 recordLocalFailure(
@@ -511,6 +534,70 @@ void DirtySyncWorker::processDirtyFiles() {
                     meta.lastAccessed = QDateTime::currentDateTime();
                     m_database->saveFuseMetadata(meta);
                 }
+
+                const QString nodePath = entry.path.startsWith(QLatin1Char('/'))
+                                             ? entry.path
+                                             : QStringLiteral("/") + entry.path;
+                FuseNode node = m_database->getFuseNodeByPath(nodePath);
+                if (node.nodeId.isEmpty()) {
+                    const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+                    for (const FuseNode& candidate : nodes) {
+                        if (candidate.remoteFileId == entry.fileId) {
+                            node = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (!node.nodeId.isEmpty()) {
+                    FuseNodeContentState contentState =
+                        m_database->getFuseNodeContentState(node.nodeId);
+                    if (!contentState.nodeId.isEmpty()) {
+                        contentState.remoteAckGeneration =
+                            qMax(contentState.remoteAckGeneration, entry.generation);
+                        contentState.localContentPath = m_fileCache->getContentPath(entry.fileId);
+                        contentState.size = uploaded.size > 0 ? uploaded.size : contentState.size;
+                        m_database->saveFuseNodeContentState(contentState);
+                    }
+
+                    node.remoteFileId = entry.fileId;
+                    node.size = uploaded.size > 0 ? uploaded.size : node.size;
+                    node.lastSyncedAt = QDateTime::currentDateTimeUtc();
+                    if (uploaded.modifiedTime.isValid()) {
+                        node.modifiedTime = uploaded.modifiedTime;
+                    }
+                    m_database->saveFuseNode(node);
+
+                    const QList<FuseJournalEntry> journalEntries =
+                        m_database->getAllFuseJournalEntries();
+                    for (const FuseJournalEntry& journalEntry : journalEntries) {
+                        if (journalEntry.nodeId != node.nodeId ||
+                            journalEntry.localGeneration != entry.generation) {
+                            continue;
+                        }
+                        if (journalEntry.operationType !=
+                                FuseJournalOperationType::WriteGeneration &&
+                            journalEntry.operationType != FuseJournalOperationType::Truncate) {
+                            continue;
+                        }
+                        if (journalEntry.status == FuseJournalEntryStatus::Completed) {
+                            continue;
+                        }
+
+                        FuseOperationAck ack;
+                        ack.journalEntryId = journalEntry.entryId;
+                        ack.idempotencyKey = journalEntry.idempotencyKey;
+                        ack.nodeId = node.nodeId;
+                        ack.remoteFileId = entry.fileId;
+                        ack.remoteParentId = node.remoteParentId;
+                        ack.acknowledgedGeneration = entry.generation;
+                        ack.payloadJson = QStringLiteral("{\"operation\":\"dirty-sync\"}");
+                        ack.acknowledgedAt = QDateTime::currentDateTimeUtc();
+                        m_database->saveFuseOperationAck(ack);
+                        m_database->updateFuseJournalEntryStatus(journalEntry.entryId,
+                                                                 FuseJournalEntryStatus::Completed,
+                                                                 QString(), -1, ack.acknowledgedAt);
+                    }
+                }
             }
 
             emit uploadCompleted(entry.fileId, entry.path);
@@ -524,7 +611,12 @@ void DirtySyncWorker::processDirtyFiles() {
             {
                 QMutexLocker locker(&m_mutex);
                 m_failedCount++;
-                m_retryCounts[entry.fileId] = m_retryCounts.value(entry.fileId, 0) + 1;
+                DirtyUploadRetryState& retryState = m_retryCounts[entry.fileId];
+                if (retryState.generation != entry.generation) {
+                    retryState.generation = entry.generation;
+                    retryState.count = 0;
+                }
+                retryState.count += 1;
                 errorMsg = m_uploadError;
             }
 

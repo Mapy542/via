@@ -166,6 +166,7 @@ class TestRemoteChangeWatcher : public QObject {
     void testApiErrorEmitsErrorSignal();
     void testTransientApiErrorRetriesWithoutErrorSignal();
     void testTimeoutApiErrorRetriesWithoutErrorSignal();
+    void testRetryDelaySuppressesPollingCollision();
 
     // In-flight dedup
     void testInFlightDedup();
@@ -815,6 +816,28 @@ void TestRemoteChangeWatcher::testTimeoutApiErrorRetriesWithoutErrorSignal() {
     QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
     QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
     QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(m_watcher->changeToken(), QStringLiteral("token-2"));
+}
+
+void TestRemoteChangeWatcher::testRetryDelaySuppressesPollingCollision() {
+    m_watcher->setChangeToken("token-1");
+    m_driveClient->setPendingChanges({});
+    m_driveClient->setNextToken("token-2");
+    m_driveClient->injectOperationError(QStringLiteral("listChanges"),
+                                        QStringLiteral("Operation timed out"));
+
+    QSignalSpy tokenSpy(m_watcher, &RemoteChangeWatcher::changeTokenUpdated);
+
+    m_watcher->start();
+    m_watcher->setPollingInterval(50);
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 1, 200);
+    QTest::qWait(150);
+    QCOMPARE(m_driveClient->listChangesCallCount, 1);
+
+    QTRY_VERIFY_WITH_TIMEOUT(m_driveClient->listChangesCallCount >= 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
+    m_watcher->stop();
     QCOMPARE(m_watcher->changeToken(), QStringLiteral("token-2"));
 }
 

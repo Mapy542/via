@@ -340,9 +340,11 @@ class FileCache : public QObject {
      * or logging decisions.
      *
      * @param fileId Google Drive file ID
+     * @param sourcePath Optional authoritative local content path to stage when
+     *                  the file is not currently indexed in the cache map
      * @return New on-disk path on success, or empty string on failure
      */
-    QString moveToDirtyStore(const QString& fileId);
+    QString moveToDirtyStore(const QString& fileId, const QString& sourcePath = QString());
 
     /**
      * @brief Update last accessed time for a cached file

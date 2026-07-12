@@ -145,6 +145,14 @@ class TestSyncDatabase : public QObject {
     void testFuseDirtyFiles_RapidInterleavedUpdates();
     void testFuseCacheEntry_Basic();
     void testFuseCacheEntry_UpdateAccessAndClearAll();
+    void testFuseNode_SaveAndRetrieve();
+    void testFuseNodeContentState_SaveAndRetrieve();
+    void testFuseJournal_AppendAndRetrievePendingOrder();
+    void testFuseJournal_ValidatesOperationSpecificRequirements();
+    void testFuseJournal_UpdateStatusTracksFailureAndAck();
+    void testFuseOperationAck_SaveAndRetrieve();
+    void testFuseMutationTransaction_CommitsAtomically();
+    void testFuseMutationTransaction_RollsBackOnFailure();
     void testFuseOperations_DatabaseClosed_Graceful();
 
     // ==========================================================================
@@ -428,7 +436,7 @@ void TestSyncDatabase::testInitialize_RequiresResetForLegacySchema() {
                 "ORDER BY key"));
             QVERIFY(settingsQuery.next());
             QCOMPARE(settingsQuery.value(0).toString(), QString("sync_schema_epoch"));
-            QCOMPARE(settingsQuery.value(1).toInt(), 1);
+            QCOMPARE(settingsQuery.value(1).toInt(), 2);
             QVERIFY(settingsQuery.next());
             QCOMPARE(settingsQuery.value(0).toString(), QString("version"));
             QCOMPARE(settingsQuery.value(1).toInt(), 6);
@@ -523,27 +531,9 @@ void TestSyncDatabase::testInitialize_AdoptsCurrentLegacyVersionMetadata() {
     QSqlDatabase::removeDatabase("migration_setup_v2");
 
     m_db = new SyncDatabase();
-    QVERIFY(m_db->initialize());
-
-    QCOMPARE(m_db->getLocalPath("file-2"), QString("migrate2/file.txt"));
-    const FileSyncState migrated = m_db->getFileState("migrate2/file.txt");
-    QCOMPARE(migrated.remoteMd5AtSync, QString("legacy-md5"));
-    QCOMPARE(migrated.localHashAtSync, QString("legacy-hash"));
-
-    {
-        const QString checkConn = QStringLiteral("migration_check_v2");
-        {
-            QSqlDatabase dbCheck = QSqlDatabase::addDatabase("QSQLITE", checkConn);
-            dbCheck.setDatabaseName(dbPath);
-            QVERIFY(dbCheck.open());
-            QSqlQuery schemaQuery(dbCheck);
-            QVERIFY(schemaQuery.exec("SELECT value FROM settings WHERE key = 'sync_schema_epoch'"));
-            QVERIFY(schemaQuery.next());
-            QCOMPARE(schemaQuery.value(0).toInt(), 1);
-            dbCheck.close();
-        }
-        QSqlDatabase::removeDatabase(checkConn);
-    }
+    QVERIFY(!m_db->initialize());
+    QCOMPARE(m_db->lastSchemaCompatibility(), SyncDatabase::SchemaCompatibility::ResetRequired);
+    QVERIFY(!m_db->hasPendingDirtyUploads());
 
     m_db->close();
     delete m_db;
@@ -1496,6 +1486,315 @@ void TestSyncDatabase::testFuseCacheEntry_UpdateAccessAndClearAll() {
 
     QVERIFY(m_db->clearAllFuseCacheEntries());
     QVERIFY(m_db->getFuseCacheEntries().isEmpty());
+}
+
+void TestSyncDatabase::testFuseNode_SaveAndRetrieve() {
+    FuseNode parent;
+    parent.nodeId = QStringLiteral("node-parent");
+    parent.path = QStringLiteral("/");
+    parent.name = QStringLiteral("/");
+    parent.isFolder = true;
+    parent.createdTime = QDateTime::currentDateTime();
+    parent.modifiedTime = parent.createdTime;
+    parent.lastAccessed = parent.createdTime;
+    QVERIFY(m_db->saveFuseNode(parent));
+
+    FuseNode child;
+    child.nodeId = QStringLiteral("node-child");
+    child.parentNodeId = parent.nodeId;
+    child.remoteFileId = QStringLiteral("remote-child-id");
+    child.remoteParentId = QStringLiteral("remote-parent-id");
+    child.path = QStringLiteral("/project/board.kicad_pcb");
+    child.name = QStringLiteral("board.kicad_pcb");
+    child.remoteName = QStringLiteral("board.kicad_pcb");
+    child.mimeType = QStringLiteral("application/octet-stream");
+    child.size = 4096;
+    child.isPendingCreate = true;
+    child.createdTime = QDateTime::currentDateTime();
+    child.modifiedTime = child.createdTime;
+    child.lastAccessed = child.createdTime;
+    QVERIFY(m_db->saveFuseNode(child));
+
+    const FuseNode byId = m_db->getFuseNode(child.nodeId);
+    QCOMPARE(byId.nodeId, child.nodeId);
+    QCOMPARE(byId.parentNodeId, parent.nodeId);
+    QCOMPARE(byId.remoteFileId, QStringLiteral("remote-child-id"));
+    QCOMPARE(byId.path, QStringLiteral("/project/board.kicad_pcb"));
+    QCOMPARE(byId.size, qint64(4096));
+    QVERIFY(byId.isPendingCreate);
+
+    const FuseNode byPath = m_db->getFuseNodeByPath(child.path);
+    QCOMPARE(byPath.nodeId, child.nodeId);
+
+    const QList<FuseNode> children = m_db->getFuseChildNodes(parent.nodeId);
+    QCOMPARE(children.size(), 1);
+    QCOMPARE(children.first().nodeId, child.nodeId);
+
+    const QList<FuseNode> allNodes = m_db->getAllFuseNodes();
+    QCOMPARE(allNodes.size(), 2);
+}
+
+void TestSyncDatabase::testFuseNodeContentState_SaveAndRetrieve() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("content-node");
+    node.path = QStringLiteral("/project/cache.bin");
+    node.name = QStringLiteral("cache.bin");
+    node.createdTime = QDateTime::currentDateTime();
+    node.modifiedTime = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseNodeContentState state;
+    state.nodeId = node.nodeId;
+    state.localContentPath = QStringLiteral("/tmp/via/content-node.bin");
+    state.localGeneration = 7;
+    state.remoteAckGeneration = 3;
+    state.size = 8192;
+    state.lastLocalWrite = QDateTime::currentDateTime();
+    QVERIFY(m_db->saveFuseNodeContentState(state));
+
+    FuseNodeContentState retrieved = m_db->getFuseNodeContentState(node.nodeId);
+    QCOMPARE(retrieved.nodeId, node.nodeId);
+    QCOMPARE(retrieved.localContentPath, QStringLiteral("/tmp/via/content-node.bin"));
+    QCOMPARE(retrieved.localGeneration, static_cast<quint64>(7));
+    QCOMPARE(retrieved.remoteAckGeneration, static_cast<quint64>(3));
+    QCOMPARE(retrieved.size, qint64(8192));
+
+    state.localContentPath = QStringLiteral("/tmp/via/content-node-v2.bin");
+    state.localGeneration = 8;
+    state.remoteAckGeneration = 5;
+    state.size = 12288;
+    QVERIFY(m_db->saveFuseNodeContentState(state));
+
+    retrieved = m_db->getFuseNodeContentState(node.nodeId);
+    QCOMPARE(retrieved.localContentPath, QStringLiteral("/tmp/via/content-node-v2.bin"));
+    QCOMPARE(retrieved.localGeneration, static_cast<quint64>(8));
+    QCOMPARE(retrieved.remoteAckGeneration, static_cast<quint64>(5));
+    QCOMPARE(retrieved.size, qint64(12288));
+}
+
+void TestSyncDatabase::testFuseJournal_AppendAndRetrievePendingOrder() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("journal-node");
+    node.path = QStringLiteral("/project/offline.txt");
+    node.name = QStringLiteral("offline.txt");
+    node.isPendingCreate = true;
+    node.createdTime = QDateTime::currentDateTime();
+    node.modifiedTime = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseJournalEntry createEntry;
+    createEntry.idempotencyKey = QStringLiteral("journal-create-1");
+    createEntry.operationType = FuseJournalOperationType::CreateFile;
+    createEntry.nodeId = node.nodeId;
+    createEntry.path = node.path;
+    createEntry.payloadJson = QStringLiteral("{\"name\":\"offline.txt\"}");
+    const qint64 createEntryId = m_db->appendFuseJournalEntry(createEntry);
+    QVERIFY(createEntryId > 0);
+
+    FuseJournalEntry writeEntry;
+    writeEntry.idempotencyKey = QStringLiteral("journal-write-1");
+    writeEntry.operationType = FuseJournalOperationType::WriteGeneration;
+    writeEntry.nodeId = node.nodeId;
+    writeEntry.path = node.path;
+    writeEntry.localGeneration = 2;
+    writeEntry.dependencyEntryId = createEntryId;
+    writeEntry.payloadJson = QStringLiteral("{\"bytes\":4096}");
+    const qint64 writeEntryId = m_db->appendFuseJournalEntry(writeEntry);
+    QVERIFY(writeEntryId > createEntryId);
+
+    const QList<FuseJournalEntry> pending = m_db->getPendingFuseJournalEntries();
+    QCOMPARE(pending.size(), 2);
+    QCOMPARE(pending.at(0).entryId, createEntryId);
+    QCOMPARE(pending.at(0).operationType, FuseJournalOperationType::CreateFile);
+    QCOMPARE(pending.at(1).entryId, writeEntryId);
+    QCOMPARE(pending.at(1).dependencyEntryId, createEntryId);
+    QCOMPARE(pending.at(1).localGeneration, static_cast<quint64>(2));
+
+    const QList<FuseJournalEntry> allEntries = m_db->getAllFuseJournalEntries();
+    QCOMPARE(allEntries.size(), 2);
+}
+
+void TestSyncDatabase::testFuseJournal_ValidatesOperationSpecificRequirements() {
+    FuseJournalEntry invalidWrite;
+    invalidWrite.idempotencyKey = QStringLiteral("invalid-write");
+    invalidWrite.operationType = FuseJournalOperationType::WriteGeneration;
+    invalidWrite.nodeId = QStringLiteral("node-write");
+    invalidWrite.path = QStringLiteral("/project/write.txt");
+    QVERIFY(m_db->appendFuseJournalEntry(invalidWrite) == 0);
+
+    FuseJournalEntry invalidRename;
+    invalidRename.idempotencyKey = QStringLiteral("invalid-rename");
+    invalidRename.operationType = FuseJournalOperationType::Rename;
+    invalidRename.nodeId = QStringLiteral("node-rename");
+    invalidRename.path = QStringLiteral("/project/old.txt");
+    QVERIFY(m_db->appendFuseJournalEntry(invalidRename) == 0);
+
+    FuseJournalEntry invalidMetadata;
+    invalidMetadata.idempotencyKey = QStringLiteral("invalid-metadata");
+    invalidMetadata.operationType = FuseJournalOperationType::UpdateNativeDocMetadata;
+    invalidMetadata.nodeId = QStringLiteral("node-metadata");
+    invalidMetadata.path = QStringLiteral("/project/doc.gdoc");
+    QVERIFY(m_db->appendFuseJournalEntry(invalidMetadata) == 0);
+
+    FuseJournalEntry validCreate;
+    validCreate.idempotencyKey = QStringLiteral("valid-create");
+    validCreate.operationType = FuseJournalOperationType::CreateFile;
+    validCreate.nodeId = QStringLiteral("node-create");
+    validCreate.path = QStringLiteral("/project/board.kicad_sch");
+    const qint64 entryId = m_db->appendFuseJournalEntry(validCreate);
+    QVERIFY(entryId > 0);
+
+    const QList<FuseJournalEntry> entries = m_db->getAllFuseJournalEntries();
+    QCOMPARE(entries.size(), 1);
+    QCOMPARE(entries.first().visibleName, QStringLiteral("board.kicad_sch"));
+}
+
+void TestSyncDatabase::testFuseJournal_UpdateStatusTracksFailureAndAck() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("journal-status-node");
+    node.path = QStringLiteral("/project/status.txt");
+    node.name = QStringLiteral("status.txt");
+    node.createdTime = QDateTime::currentDateTime();
+    node.modifiedTime = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseJournalEntry entry;
+    entry.idempotencyKey = QStringLiteral("journal-status-1");
+    entry.operationType = FuseJournalOperationType::Rename;
+    entry.nodeId = node.nodeId;
+    entry.path = QStringLiteral("/project/status.txt");
+    entry.destinationPath = QStringLiteral("/project/status-renamed.txt");
+    const qint64 entryId = m_db->appendFuseJournalEntry(entry);
+    QVERIFY(entryId > 0);
+
+    QVERIFY(m_db->updateFuseJournalEntryStatus(entryId, FuseJournalEntryStatus::Failed,
+                                               QStringLiteral("timeout"), 2));
+
+    QList<FuseJournalEntry> entries = m_db->getAllFuseJournalEntries();
+    QCOMPARE(entries.size(), 1);
+    QCOMPARE(entries.first().status, FuseJournalEntryStatus::Failed);
+    QCOMPARE(entries.first().lastError, QStringLiteral("timeout"));
+    QCOMPARE(entries.first().retryCount, 2);
+    QVERIFY(entries.first().updatedAt.isValid());
+    QVERIFY(!entries.first().acknowledgedAt.isValid());
+
+    const QDateTime acknowledgedAt = QDateTime::currentDateTime();
+    QVERIFY(m_db->updateFuseJournalEntryStatus(entryId, FuseJournalEntryStatus::Completed,
+                                               QString(), -1, acknowledgedAt));
+
+    entries = m_db->getAllFuseJournalEntries();
+    QCOMPARE(entries.size(), 1);
+    QCOMPARE(entries.first().status, FuseJournalEntryStatus::Completed);
+    QCOMPARE(entries.first().lastError, QString());
+    QCOMPARE(entries.first().retryCount, 2);
+    QVERIFY(entries.first().acknowledgedAt.isValid());
+    QCOMPARE(entries.first().acknowledgedAt.toSecsSinceEpoch(), acknowledgedAt.toSecsSinceEpoch());
+
+    QVERIFY(m_db->getPendingFuseJournalEntries().isEmpty());
+}
+
+void TestSyncDatabase::testFuseOperationAck_SaveAndRetrieve() {
+    FuseJournalEntry entry;
+    entry.idempotencyKey = QStringLiteral("ack-create-1");
+    entry.operationType = FuseJournalOperationType::CreateFile;
+    entry.nodeId = QStringLiteral("ack-node");
+    entry.path = QStringLiteral("/project/offline-board.kicad_pcb");
+    const qint64 entryId = m_db->appendFuseJournalEntry(entry);
+    QVERIFY(entryId > 0);
+
+    FuseOperationAck ack;
+    ack.journalEntryId = entryId;
+    ack.idempotencyKey = entry.idempotencyKey;
+    ack.nodeId = entry.nodeId;
+    ack.remoteFileId = QStringLiteral("remote-offline-board");
+    ack.remoteParentId = QStringLiteral("remote-parent");
+    ack.acknowledgedGeneration = 4;
+    ack.remoteChangeToken = QStringLiteral("change-token-123");
+    ack.payloadJson = QStringLiteral("{\"status\":\"ok\"}");
+    ack.acknowledgedAt = QDateTime::currentDateTime();
+    QVERIFY(m_db->saveFuseOperationAck(ack));
+
+    const FuseOperationAck retrieved = m_db->getFuseOperationAck(entryId);
+    QCOMPARE(retrieved.journalEntryId, entryId);
+    QCOMPARE(retrieved.idempotencyKey, entry.idempotencyKey);
+    QCOMPARE(retrieved.remoteFileId, QStringLiteral("remote-offline-board"));
+    QCOMPARE(retrieved.remoteParentId, QStringLiteral("remote-parent"));
+    QCOMPARE(retrieved.acknowledgedGeneration, static_cast<quint64>(4));
+    QVERIFY(retrieved.acknowledgedAt.isValid());
+
+    const QList<FuseOperationAck> acks = m_db->getAllFuseOperationAcks();
+    QCOMPARE(acks.size(), 1);
+}
+
+void TestSyncDatabase::testFuseMutationTransaction_CommitsAtomically() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("txn-node");
+    node.path = QStringLiteral("/project/txn.txt");
+    node.name = QStringLiteral("txn.txt");
+    node.isPendingCreate = true;
+    node.createdTime = QDateTime::currentDateTime();
+    node.modifiedTime = node.createdTime;
+
+    FuseNodeContentState contentState;
+    contentState.nodeId = node.nodeId;
+    contentState.localContentPath = QStringLiteral("/tmp/via/txn-node.bin");
+    contentState.localGeneration = 1;
+    contentState.size = 512;
+    contentState.lastLocalWrite = QDateTime::currentDateTime();
+
+    FuseMutationTransaction mutation;
+    mutation.nodesToUpsert.append(node);
+    mutation.contentStatesToUpsert.append(contentState);
+    mutation.journalEntry.idempotencyKey = QStringLiteral("txn-create-1");
+    mutation.journalEntry.operationType = FuseJournalOperationType::CreateFile;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.parentNodeId = QStringLiteral("parent-node");
+    mutation.journalEntry.path = node.path;
+
+    qint64 journalEntryId = 0;
+    QVERIFY(m_db->commitFuseMutationTransaction(mutation, &journalEntryId));
+    QVERIFY(journalEntryId > 0);
+
+    const FuseNode storedNode = m_db->getFuseNode(node.nodeId);
+    QCOMPARE(storedNode.path, node.path);
+    QVERIFY(storedNode.isPendingCreate);
+
+    const FuseNodeContentState storedContent = m_db->getFuseNodeContentState(node.nodeId);
+    QCOMPARE(storedContent.localContentPath, QStringLiteral("/tmp/via/txn-node.bin"));
+    QCOMPARE(storedContent.localGeneration, static_cast<quint64>(1));
+
+    const QList<FuseJournalEntry> storedEntries = m_db->getAllFuseJournalEntries();
+    QCOMPARE(storedEntries.size(), 1);
+    QCOMPARE(storedEntries.first().entryId, journalEntryId);
+    QCOMPARE(storedEntries.first().visibleName, QStringLiteral("txn.txt"));
+}
+
+void TestSyncDatabase::testFuseMutationTransaction_RollsBackOnFailure() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("rollback-node");
+    node.path = QStringLiteral("/project/rollback.txt");
+    node.name = QStringLiteral("rollback.txt");
+    node.createdTime = QDateTime::currentDateTime();
+    node.modifiedTime = node.createdTime;
+
+    FuseNodeContentState invalidContentState;
+    invalidContentState.nodeId = node.nodeId;
+    invalidContentState.localGeneration = 1;
+
+    FuseMutationTransaction mutation;
+    mutation.nodesToUpsert.append(node);
+    mutation.contentStatesToUpsert.append(invalidContentState);
+    mutation.journalEntry.idempotencyKey = QStringLiteral("rollback-create-1");
+    mutation.journalEntry.operationType = FuseJournalOperationType::CreateFile;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.path = node.path;
+
+    qint64 journalEntryId = 0;
+    QVERIFY(!m_db->commitFuseMutationTransaction(mutation, &journalEntryId));
+    QCOMPARE(journalEntryId, qint64(0));
+    QVERIFY(m_db->getFuseNode(node.nodeId).nodeId.isEmpty());
+    QVERIFY(m_db->getFuseNodeContentState(node.nodeId).nodeId.isEmpty());
+    QVERIFY(m_db->getAllFuseJournalEntries().isEmpty());
 }
 
 void TestSyncDatabase::testFuseOperations_DatabaseClosed_Graceful() {

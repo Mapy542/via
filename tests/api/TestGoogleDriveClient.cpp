@@ -147,11 +147,59 @@ class FakeAuthenticatedAuthManager final : public GoogleAuthManager {
 
     bool isAuthenticated() const override { return true; }
     QString accessToken() const override { return QStringLiteral("test-token"); }
+    bool isTokenExpiringSoon(int bufferSecs = 120) const override {
+        Q_UNUSED(bufferSecs);
+        return false;
+    }
 
     bool ensureValidToken(int timeoutMs = 15000) override {
         Q_UNUSED(timeoutMs);
         ++ensureValidTokenCalls;
         return true;
+    }
+
+    int ensureValidTokenCalls = 0;
+};
+
+class FakeAuthPreflightFailureManager final : public GoogleAuthManager {
+   public:
+    explicit FakeAuthPreflightFailureManager(QObject* parent = nullptr)
+        : GoogleAuthManager(nullptr, parent) {}
+
+    bool isAuthenticated() const override { return true; }
+    QString accessToken() const override { return QStringLiteral("expired-token"); }
+    bool isTokenExpiringSoon(int bufferSecs = 120) const override {
+        Q_UNUSED(bufferSecs);
+        return true;
+    }
+
+    bool ensureValidToken(int timeoutMs = 15000) override {
+        Q_UNUSED(timeoutMs);
+        ++ensureValidTokenCalls;
+        return false;
+    }
+
+    int ensureValidTokenCalls = 0;
+};
+
+class FakeUsableTokenAfterRefreshFailureManager final : public GoogleAuthManager {
+   public:
+    explicit FakeUsableTokenAfterRefreshFailureManager(QObject* parent = nullptr)
+        : GoogleAuthManager(nullptr, parent) {}
+
+    bool isAuthenticated() const override { return true; }
+    QString accessToken() const override { return QStringLiteral("still-usable-token"); }
+    bool isTokenExpiringSoon(int bufferSecs = 120) const override {
+        if (bufferSecs <= 0) {
+            return false;
+        }
+        return true;
+    }
+
+    bool ensureValidToken(int timeoutMs = 15000) override {
+        Q_UNUSED(timeoutMs);
+        ++ensureValidTokenCalls;
+        return false;
     }
 
     int ensureValidTokenCalls = 0;
@@ -167,22 +215,23 @@ class TestGoogleDriveClient : public QObject {
     void testListFiles_EscapesFolderIdInQuery();
     void testListFilesBlocking_EscapesFolderIdInQuery();
     void testAsyncMetadataRequests_SetTransferTimeout();
+    void testReadRequests_DoNotDispatchWithoutUsableToken();
+    void testReadRequests_DispatchWhenExistingTokenStillUsable();
 };
 
 void TestGoogleDriveClient::testCreateRequest_AttachesAuthorizationHeaderOnlyForHttps() {
     FakeAuthenticatedAuthManager authManager;
-    auto* networkManager = new FakeNetworkAccessManager();
-    GoogleDriveClient client(&authManager, networkManager);
+    GoogleDriveClient client(&authManager);
 
     const QNetworkRequest httpsRequest =
         client.createRequest(QUrl(QStringLiteral("https://example.com/resource")));
     QCOMPARE(httpsRequest.rawHeader("Authorization"), QByteArray("Bearer test-token"));
-    QCOMPARE(authManager.ensureValidTokenCalls, 1);
+    QCOMPARE(authManager.ensureValidTokenCalls, 0);
 
     const QNetworkRequest httpRequest =
         client.createRequest(QUrl(QStringLiteral("http://example.com/resource")));
     QVERIFY(!httpRequest.hasRawHeader("Authorization"));
-    QCOMPARE(authManager.ensureValidTokenCalls, 1);
+    QCOMPARE(authManager.ensureValidTokenCalls, 0);
 }
 
 void TestGoogleDriveClient::testGetFolderIdByPath_ReleasesBlockingGuardAndEscapesPathSegment() {
@@ -253,6 +302,47 @@ void TestGoogleDriveClient::testAsyncMetadataRequests_SetTransferTimeout() {
     QCOMPARE(networkManager->transferTimeout(0), 30000);
     QCOMPARE(networkManager->transferTimeout(1), 30000);
     QCOMPARE(networkManager->transferTimeout(2), 30000);
+}
+
+void TestGoogleDriveClient::testReadRequests_DoNotDispatchWithoutUsableToken() {
+    FakeAuthPreflightFailureManager authManager;
+    auto* networkManager = new FakeNetworkAccessManager();
+    GoogleDriveClient client(&authManager, networkManager);
+
+    QSignalSpy errorSpy(&client, &GoogleDriveClient::error);
+    QSignalSpy errorDetailedSpy(&client, &GoogleDriveClient::errorDetailed);
+    QSignalSpy filesListedSpy(&client, &GoogleDriveClient::filesListed);
+    QSignalSpy changesSpy(&client, &GoogleDriveClient::changesReceived);
+
+    client.listFiles(QStringLiteral("all"));
+    client.listChanges(QStringLiteral("known-token"));
+
+    QCOMPARE(authManager.ensureValidTokenCalls, 2);
+    QCOMPARE(networkManager->requestCount(), 0);
+    QCOMPARE(filesListedSpy.count(), 0);
+    QCOMPARE(changesSpy.count(), 0);
+    QCOMPARE(errorSpy.count(), 2);
+    QCOMPARE(errorDetailedSpy.count(), 2);
+    QVERIFY(errorSpy.at(0).at(0).toString().contains(QStringLiteral("listFiles")));
+    QVERIFY(errorSpy.at(1).at(0).toString().contains(QStringLiteral("listChanges")));
+}
+
+void TestGoogleDriveClient::testReadRequests_DispatchWhenExistingTokenStillUsable() {
+    FakeUsableTokenAfterRefreshFailureManager authManager;
+    auto* networkManager = new FakeNetworkAccessManager();
+    networkManager->enqueueJsonResponse(QJsonObject{{QStringLiteral("files"), QJsonArray()}});
+
+    GoogleDriveClient client(&authManager, networkManager);
+
+    QSignalSpy errorSpy(&client, &GoogleDriveClient::error);
+    QSignalSpy filesListedSpy(&client, &GoogleDriveClient::filesListed);
+
+    client.listFiles(QStringLiteral("all"));
+
+    QTRY_COMPARE(filesListedSpy.count(), 1);
+    QCOMPARE(authManager.ensureValidTokenCalls, 1);
+    QCOMPARE(networkManager->requestCount(), 1);
+    QCOMPARE(errorSpy.count(), 0);
 }
 
 QTEST_MAIN(TestGoogleDriveClient)

@@ -8,6 +8,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlRecord>
@@ -19,7 +20,7 @@
 const QString SyncDatabase::DB_NAME = "via_sync.db";
 const QString SyncDatabase::SCHEMA_EPOCH_KEY = "sync_schema_epoch";
 const int SyncDatabase::DB_VERSION = 6;
-const int SyncDatabase::CURRENT_SCHEMA_EPOCH = 1;
+const int SyncDatabase::CURRENT_SCHEMA_EPOCH = 2;
 
 namespace {
 
@@ -66,6 +67,18 @@ bool addColumnIfMissing(QSqlDatabase db, const QString& tableName, const QString
     return query.exec(QString("ALTER TABLE %1 ADD COLUMN %2").arg(tableName, columnDef));
 }
 
+bool hasRequiredFuseOfflineSchemaTables(const QSqlDatabase& db) {
+    static const QStringList requiredTables = {
+        QStringLiteral("fuse_nodes"), QStringLiteral("fuse_node_contents"),
+        QStringLiteral("fuse_journal"), QStringLiteral("fuse_operation_acks")};
+    for (const QString& tableName : requiredTables) {
+        if (!tableExists(db, tableName)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
     FuseMetadata metadata;
     metadata.fileId = query.value("file_id").toString();
@@ -110,6 +123,98 @@ FuseMetadata readFuseMetadataRow(const QSqlQuery& query) {
     return metadata;
 }
 
+FuseNode readFuseNodeRow(const QSqlQuery& query) {
+    FuseNode node;
+    node.nodeId = query.value("node_id").toString();
+    node.parentNodeId = query.value("parent_node_id").toString();
+    node.remoteFileId = query.value("remote_file_id").toString();
+    node.remoteParentId = query.value("remote_parent_id").toString();
+    node.path = query.value("path").toString();
+    node.name = query.value("name").toString();
+    node.remoteName = query.value("remote_name").toString();
+    if (node.remoteName.isEmpty()) {
+        node.remoteName = node.name;
+    }
+    node.mimeType = query.value("mime_type").toString();
+    node.remoteMimeType = query.value("remote_mime_type").toString();
+    node.webViewLink = query.value("web_view_link").toString();
+    node.nativeDocModeOverride = query.value("native_doc_mode_override").toString();
+    node.isFolder = query.value("is_folder").toInt() != 0;
+    node.isPendingCreate = query.value("is_pending_create").toInt() != 0;
+    node.isTrashed = query.value("is_trashed").toInt() != 0;
+    node.size = query.value("size").toLongLong();
+    node.createdTime = QDateTime::fromString(query.value("created_time").toString(), Qt::ISODate);
+    node.modifiedTime = QDateTime::fromString(query.value("modified_time").toString(), Qt::ISODate);
+    node.lastAccessed = QDateTime::fromString(query.value("last_accessed").toString(), Qt::ISODate);
+    node.lastSyncedAt =
+        QDateTime::fromString(query.value("last_synced_at").toString(), Qt::ISODate);
+    return node;
+}
+
+FuseNodeContentState readFuseNodeContentStateRow(const QSqlQuery& query) {
+    FuseNodeContentState state;
+    state.nodeId = query.value("node_id").toString();
+    state.localContentPath = query.value("local_content_path").toString();
+    state.localGeneration = query.value("local_generation").toULongLong();
+    state.remoteAckGeneration = query.value("remote_ack_generation").toULongLong();
+    state.size = query.value("size").toLongLong();
+    state.lastLocalWrite =
+        QDateTime::fromString(query.value("last_local_write").toString(), Qt::ISODate);
+    return state;
+}
+
+FuseJournalEntry readFuseJournalEntryRow(const QSqlQuery& query) {
+    FuseJournalEntry entry;
+    entry.entryId = query.value("entry_id").toLongLong();
+    entry.idempotencyKey = query.value("idempotency_key").toString();
+    entry.operationType =
+        static_cast<FuseJournalOperationType>(query.value("operation_type").toInt());
+    entry.status = static_cast<FuseJournalEntryStatus>(query.value("status").toInt());
+    entry.nodeId = query.value("node_id").toString();
+    entry.parentNodeId = query.value("parent_node_id").toString();
+    entry.destinationParentNodeId = query.value("destination_parent_node_id").toString();
+    entry.path = query.value("path").toString();
+    const int visibleNameIndex = query.record().indexOf("visible_name");
+    if (visibleNameIndex >= 0) {
+        entry.visibleName = query.value(visibleNameIndex).toString();
+    }
+    entry.destinationPath = query.value("destination_path").toString();
+    const int destinationVisibleNameIndex = query.record().indexOf("destination_visible_name");
+    if (destinationVisibleNameIndex >= 0) {
+        entry.destinationVisibleName = query.value(destinationVisibleNameIndex).toString();
+    }
+    entry.remoteFileId = query.value("remote_file_id").toString();
+    entry.remoteParentId = query.value("remote_parent_id").toString();
+    entry.localGeneration = query.value("local_generation").toULongLong();
+    entry.dependencyEntryId = query.value("dependency_entry_id").toLongLong();
+    entry.payloadJson = query.value("payload_json").toString();
+    entry.lastError = query.value("last_error").toString();
+    entry.retryCount = query.value("retry_count").toInt();
+    entry.createdAt = QDateTime::fromString(query.value("created_at").toString(), Qt::ISODate);
+    entry.updatedAt = QDateTime::fromString(query.value("updated_at").toString(), Qt::ISODate);
+    entry.acknowledgedAt =
+        QDateTime::fromString(query.value("acknowledged_at").toString(), Qt::ISODate);
+    return entry;
+}
+
+FuseOperationAck readFuseOperationAckRow(const QSqlQuery& query) {
+    FuseOperationAck ack;
+    ack.ackId = query.value("ack_id").toLongLong();
+    ack.journalEntryId = query.value("journal_entry_id").toLongLong();
+    ack.idempotencyKey = query.value("idempotency_key").toString();
+    ack.nodeId = query.value("node_id").toString();
+    ack.remoteFileId = query.value("remote_file_id").toString();
+    ack.remoteParentId = query.value("remote_parent_id").toString();
+    ack.acknowledgedGeneration = query.value("acknowledged_generation").toULongLong();
+    ack.remoteChangeToken = query.value("remote_change_token").toString();
+    ack.payloadJson = query.value("payload_json").toString();
+    ack.lastError = query.value("last_error").toString();
+    ack.acknowledgedAt =
+        QDateTime::fromString(query.value("acknowledged_at").toString(), Qt::ISODate);
+    ack.appliedAt = QDateTime::fromString(query.value("applied_at").toString(), Qt::ISODate);
+    return ack;
+}
+
 NativeDocState readNativeDocStateRow(const QSqlQuery& query) {
     NativeDocState state;
     state.fileId = query.value("file_id").toString();
@@ -122,6 +227,89 @@ NativeDocState readNativeDocStateRow(const QSqlQuery& query) {
 
 quintptr currentThreadKey() {
     return reinterpret_cast<quintptr>(QThread::currentThreadId());
+}
+
+QString visibleNameForFusePath(const QString& path) {
+    QString normalized = QDir::cleanPath(path);
+    if (normalized.isEmpty() || normalized == QStringLiteral(".")) {
+        return QString();
+    }
+    if (normalized == QStringLiteral("/")) {
+        return QStringLiteral("/");
+    }
+
+    const int lastSlash = normalized.lastIndexOf(QLatin1Char('/'));
+    return lastSlash >= 0 ? normalized.mid(lastSlash + 1) : normalized;
+}
+
+FuseJournalEntry normalizedFuseJournalEntry(FuseJournalEntry entry) {
+    if (entry.visibleName.isEmpty()) {
+        entry.visibleName = visibleNameForFusePath(entry.path);
+    }
+    if (entry.destinationVisibleName.isEmpty() && !entry.destinationPath.isEmpty()) {
+        entry.destinationVisibleName = visibleNameForFusePath(entry.destinationPath);
+    }
+    if (!entry.updatedAt.isValid() && entry.createdAt.isValid()) {
+        entry.updatedAt = entry.createdAt;
+    }
+    return entry;
+}
+
+bool validateFuseJournalEntry(const FuseJournalEntry& entry, QString* errorOut) {
+    const auto fail = [&](const QString& message) {
+        if (errorOut) {
+            *errorOut = message;
+        }
+        return false;
+    };
+
+    if (entry.idempotencyKey.isEmpty()) {
+        return fail(QStringLiteral("Journal entry is missing an idempotency key"));
+    }
+    if (entry.nodeId.isEmpty()) {
+        return fail(QStringLiteral("Journal entry is missing a local node ID"));
+    }
+    if (entry.path.isEmpty()) {
+        return fail(QStringLiteral("Journal entry is missing a source path"));
+    }
+    if (entry.visibleName.isEmpty()) {
+        return fail(QStringLiteral("Journal entry is missing a visible name"));
+    }
+
+    switch (entry.operationType) {
+        case FuseJournalOperationType::CreateFile:
+        case FuseJournalOperationType::CreateDirectory:
+            return true;
+        case FuseJournalOperationType::WriteGeneration:
+        case FuseJournalOperationType::Truncate:
+            if (entry.localGeneration == 0) {
+                return fail(
+                    QStringLiteral("Content mutations require a non-zero local generation"));
+            }
+            return true;
+        case FuseJournalOperationType::Rename:
+            if (entry.destinationPath.isEmpty() || entry.destinationVisibleName.isEmpty()) {
+                return fail(QStringLiteral("Rename requires destination path and visible name"));
+            }
+            return true;
+        case FuseJournalOperationType::Move:
+            if (entry.destinationPath.isEmpty()) {
+                return fail(QStringLiteral("Move requires a destination path"));
+            }
+            return true;
+        case FuseJournalOperationType::Trash:
+        case FuseJournalOperationType::Delete:
+        case FuseJournalOperationType::Restore:
+            return true;
+        case FuseJournalOperationType::UpdateNativeDocMetadata:
+        case FuseJournalOperationType::UpdateShortcutMetadata:
+            if (entry.payloadJson.isEmpty()) {
+                return fail(QStringLiteral("Metadata mutations require a payload JSON blob"));
+            }
+            return true;
+    }
+
+    return fail(QStringLiteral("Journal entry uses an unknown operation type"));
 }
 }  // namespace
 
@@ -537,15 +725,21 @@ SyncDatabase::SchemaCompatibility SyncDatabase::detectSchemaCompatibility() cons
         return SchemaCompatibility::UnsupportedFutureSchema;
     }
     if (schemaEpoch == CURRENT_SCHEMA_EPOCH) {
-        return SchemaCompatibility::Current;
+        if (hasRequiredFuseOfflineSchemaTables(m_db)) {
+            return SchemaCompatibility::Current;
+        }
+        return hasPendingDirtyUploads() ? SchemaCompatibility::ResetBlockedByDirtyState
+                                        : SchemaCompatibility::ResetRequired;
+    }
+
+    if (schemaEpoch > 0) {
+        return hasPendingDirtyUploads() ? SchemaCompatibility::ResetBlockedByDirtyState
+                                        : SchemaCompatibility::ResetRequired;
     }
 
     const int legacyVersion = getStoredVersion();
     if (legacyVersion > DB_VERSION) {
         return SchemaCompatibility::UnsupportedFutureSchema;
-    }
-    if (legacyVersion == DB_VERSION) {
-        return SchemaCompatibility::Current;
     }
     if (legacyVersion > 0) {
         return hasPendingDirtyUploads() ? SchemaCompatibility::ResetBlockedByDirtyState
@@ -2004,12 +2198,138 @@ bool SyncDatabase::createFuseTables() {
         return false;
     }
 
+    QString createFuseNodesTable = R"(
+        CREATE TABLE IF NOT EXISTS fuse_nodes (
+            node_id TEXT PRIMARY KEY,
+            parent_node_id TEXT,
+            remote_file_id TEXT UNIQUE,
+            remote_parent_id TEXT,
+            path TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            remote_name TEXT,
+            mime_type TEXT,
+            remote_mime_type TEXT,
+            web_view_link TEXT,
+            native_doc_mode_override TEXT,
+            is_folder INTEGER NOT NULL DEFAULT 0,
+            is_pending_create INTEGER NOT NULL DEFAULT 0,
+            is_trashed INTEGER NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            created_time TEXT,
+            modified_time TEXT,
+            last_accessed TEXT,
+            last_synced_at TEXT
+        )
+    )";
+
+    if (!query.exec(createFuseNodesTable)) {
+        logError("createFuseTables (fuse_nodes)", query.lastError().text());
+        return false;
+    }
+
+    QString createFuseNodeContentsTable = R"(
+        CREATE TABLE IF NOT EXISTS fuse_node_contents (
+            node_id TEXT PRIMARY KEY,
+            local_content_path TEXT NOT NULL,
+            local_generation INTEGER NOT NULL DEFAULT 0,
+            remote_ack_generation INTEGER NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            last_local_write TEXT,
+            FOREIGN KEY(node_id) REFERENCES fuse_nodes(node_id) ON DELETE CASCADE
+        )
+    )";
+
+    if (!query.exec(createFuseNodeContentsTable)) {
+        logError("createFuseTables (fuse_node_contents)", query.lastError().text());
+        return false;
+    }
+
+    QString createFuseJournalTable = R"(
+        CREATE TABLE IF NOT EXISTS fuse_journal (
+            entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            operation_type INTEGER NOT NULL,
+            status INTEGER NOT NULL DEFAULT 0,
+            node_id TEXT NOT NULL,
+            parent_node_id TEXT,
+            destination_parent_node_id TEXT,
+            path TEXT NOT NULL,
+            visible_name TEXT,
+            destination_path TEXT,
+            destination_visible_name TEXT,
+            remote_file_id TEXT,
+            remote_parent_id TEXT,
+            local_generation INTEGER NOT NULL DEFAULT 0,
+            dependency_entry_id INTEGER,
+            payload_json TEXT,
+            last_error TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            acknowledged_at TEXT
+        )
+    )";
+
+    if (!query.exec(createFuseJournalTable)) {
+        logError("createFuseTables (fuse_journal)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "fuse_journal", "visible_name TEXT")) {
+        logError("createFuseTables (fuse_journal.visible_name)", query.lastError().text());
+        return false;
+    }
+
+    if (!addColumnIfMissing(m_db, "fuse_journal", "destination_visible_name TEXT")) {
+        logError("createFuseTables (fuse_journal.destination_visible_name)",
+                 query.lastError().text());
+        return false;
+    }
+
+    QString createFuseOperationAcksTable = R"(
+        CREATE TABLE IF NOT EXISTS fuse_operation_acks (
+            ack_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            journal_entry_id INTEGER NOT NULL UNIQUE,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            node_id TEXT NOT NULL,
+            remote_file_id TEXT,
+            remote_parent_id TEXT,
+            acknowledged_generation INTEGER NOT NULL DEFAULT 0,
+            remote_change_token TEXT,
+            payload_json TEXT,
+            last_error TEXT,
+            acknowledged_at TEXT NOT NULL,
+            applied_at TEXT
+        )
+    )";
+
+    if (!query.exec(createFuseOperationAcksTable)) {
+        logError("createFuseTables (fuse_operation_acks)", query.lastError().text());
+        return false;
+    }
+
     // Create indexes for FUSE tables
     query.exec("CREATE INDEX IF NOT EXISTS idx_fuse_metadata_path ON fuse_metadata(path)");
     query.exec("CREATE INDEX IF NOT EXISTS idx_fuse_metadata_parent ON fuse_metadata(parent_id)");
     query.exec(
         "CREATE INDEX IF NOT EXISTS idx_fuse_cache_last_accessed ON "
         "fuse_cache_entries(last_accessed)");
+    query.exec("CREATE INDEX IF NOT EXISTS idx_fuse_nodes_parent ON fuse_nodes(parent_node_id)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_fuse_nodes_pending_create ON "
+        "fuse_nodes(is_pending_create)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_fuse_journal_status_entry ON "
+        "fuse_journal(status, entry_id)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_fuse_journal_node ON "
+        "fuse_journal(node_id, entry_id)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_fuse_journal_dependency ON "
+        "fuse_journal(dependency_entry_id)");
+    query.exec(
+        "CREATE INDEX IF NOT EXISTS idx_fuse_operation_acks_node ON "
+        "fuse_operation_acks(node_id, ack_id)");
 
     qDebug() << "FUSE tables created successfully";
     return true;
@@ -2212,6 +2532,656 @@ int SyncDatabase::updateFuseChildrenPaths(const QString& parentFileId, const QSt
     }
 
     return updated;
+}
+
+FuseNode SyncDatabase::getFuseNode(const QString& nodeId) const {
+    QMutexLocker locker(&m_mutex);
+    FuseNode node;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodes.getByNodeId"),
+        QStringLiteral("SELECT * FROM fuse_nodes WHERE node_id = ?"), "getFuseNode");
+    if (!query) {
+        return node;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, nodeId);
+    if (query->exec() && query->next()) {
+        node = readFuseNodeRow(*query);
+    }
+
+    return node;
+}
+
+FuseNode SyncDatabase::getFuseNodeByPath(const QString& path) const {
+    QMutexLocker locker(&m_mutex);
+    FuseNode node;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodes.getByPath"),
+        QStringLiteral("SELECT * FROM fuse_nodes WHERE path = ?"), "getFuseNodeByPath");
+    if (!query) {
+        return node;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, path);
+    if (query->exec() && query->next()) {
+        node = readFuseNodeRow(*query);
+    }
+
+    return node;
+}
+
+bool SyncDatabase::saveFuseNode(const FuseNode& node) {
+    QMutexLocker locker(&m_mutex);
+
+    if (node.nodeId.isEmpty() || node.path.isEmpty() || node.name.isEmpty()) {
+        return false;
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodes.save.upsert"), QStringLiteral(R"(
+        INSERT INTO fuse_nodes
+        (node_id, parent_node_id, remote_file_id, remote_parent_id, path, name, remote_name,
+         mime_type, remote_mime_type, web_view_link, native_doc_mode_override,
+         is_folder, is_pending_create, is_trashed, size, created_time, modified_time,
+         last_accessed, last_synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+            parent_node_id = excluded.parent_node_id,
+            remote_file_id = excluded.remote_file_id,
+            remote_parent_id = excluded.remote_parent_id,
+            path = excluded.path,
+            name = excluded.name,
+            remote_name = excluded.remote_name,
+            mime_type = excluded.mime_type,
+            remote_mime_type = excluded.remote_mime_type,
+            web_view_link = excluded.web_view_link,
+            native_doc_mode_override = excluded.native_doc_mode_override,
+            is_folder = excluded.is_folder,
+            is_pending_create = excluded.is_pending_create,
+            is_trashed = excluded.is_trashed,
+            size = excluded.size,
+            created_time = excluded.created_time,
+            modified_time = excluded.modified_time,
+            last_accessed = excluded.last_accessed,
+            last_synced_at = excluded.last_synced_at
+    )"),
+        "saveFuseNode");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, node.nodeId);
+    query->bindValue(1, node.parentNodeId);
+    query->bindValue(2, node.remoteFileId);
+    query->bindValue(3, node.remoteParentId);
+    query->bindValue(4, node.path);
+    query->bindValue(5, node.name);
+    query->bindValue(6, node.remoteName.isEmpty() ? node.name : node.remoteName);
+    query->bindValue(7, node.mimeType);
+    query->bindValue(8, node.remoteMimeType);
+    query->bindValue(9, node.webViewLink);
+    query->bindValue(10, node.nativeDocModeOverride);
+    query->bindValue(11, node.isFolder ? 1 : 0);
+    query->bindValue(12, node.isPendingCreate ? 1 : 0);
+    query->bindValue(13, node.isTrashed ? 1 : 0);
+    query->bindValue(14, node.size);
+    query->bindValue(15, node.createdTime.toString(Qt::ISODate));
+    query->bindValue(16, node.modifiedTime.toString(Qt::ISODate));
+    query->bindValue(17, node.lastAccessed.toString(Qt::ISODate));
+    query->bindValue(18, node.lastSyncedAt.toString(Qt::ISODate));
+
+    if (!query->exec()) {
+        logError("saveFuseNode", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+QList<FuseNode> SyncDatabase::getFuseChildNodes(const QString& parentNodeId) const {
+    QMutexLocker locker(&m_mutex);
+    QList<FuseNode> nodes;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodes.getChildren"),
+        QStringLiteral("SELECT * FROM fuse_nodes WHERE parent_node_id = ? ORDER BY path"),
+        "getFuseChildNodes");
+    if (!query) {
+        return nodes;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, parentNodeId);
+    if (query->exec()) {
+        while (query->next()) {
+            nodes.append(readFuseNodeRow(*query));
+        }
+    }
+
+    return nodes;
+}
+
+QList<FuseNode> SyncDatabase::getAllFuseNodes() const {
+    QMutexLocker locker(&m_mutex);
+    QList<FuseNode> nodes;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodes.getAll"),
+        QStringLiteral("SELECT * FROM fuse_nodes ORDER BY path"), "getAllFuseNodes");
+    if (!query) {
+        return nodes;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    if (query->exec()) {
+        while (query->next()) {
+            nodes.append(readFuseNodeRow(*query));
+        }
+    }
+
+    return nodes;
+}
+
+bool SyncDatabase::deleteFuseNode(const QString& nodeId) {
+    QMutexLocker locker(&m_mutex);
+
+    if (nodeId.isEmpty()) {
+        return true;
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodes.deleteByNodeId"),
+        QStringLiteral("DELETE FROM fuse_nodes WHERE node_id = ?"), "deleteFuseNode");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, nodeId);
+    if (!query->exec()) {
+        logError("deleteFuseNode", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+FuseNodeContentState SyncDatabase::getFuseNodeContentState(const QString& nodeId) const {
+    QMutexLocker locker(&m_mutex);
+    FuseNodeContentState state;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodeContents.getByNodeId"),
+        QStringLiteral("SELECT * FROM fuse_node_contents WHERE node_id = ?"),
+        "getFuseNodeContentState");
+    if (!query) {
+        return state;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, nodeId);
+    if (query->exec() && query->next()) {
+        state = readFuseNodeContentStateRow(*query);
+    }
+
+    return state;
+}
+
+QList<FuseNodeContentState> SyncDatabase::getAllFuseNodeContentStates() const {
+    QMutexLocker locker(&m_mutex);
+    QList<FuseNodeContentState> states;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodeContents.getAll"),
+        QStringLiteral("SELECT * FROM fuse_node_contents ORDER BY node_id"),
+        "getAllFuseNodeContentStates");
+    if (!query) {
+        return states;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    if (query->exec()) {
+        while (query->next()) {
+            states.append(readFuseNodeContentStateRow(*query));
+        }
+    }
+
+    return states;
+}
+
+bool SyncDatabase::saveFuseNodeContentState(const FuseNodeContentState& state) {
+    QMutexLocker locker(&m_mutex);
+
+    if (state.nodeId.isEmpty() || state.localContentPath.isEmpty()) {
+        return false;
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodeContents.save.upsert"), QStringLiteral(R"(
+        INSERT INTO fuse_node_contents
+        (node_id, local_content_path, local_generation, remote_ack_generation, size,
+         last_local_write)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+            local_content_path = excluded.local_content_path,
+            local_generation = excluded.local_generation,
+            remote_ack_generation = excluded.remote_ack_generation,
+            size = excluded.size,
+            last_local_write = excluded.last_local_write
+    )"),
+        "saveFuseNodeContentState");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, state.nodeId);
+    query->bindValue(1, state.localContentPath);
+    query->bindValue(2, static_cast<qulonglong>(state.localGeneration));
+    query->bindValue(3, static_cast<qulonglong>(state.remoteAckGeneration));
+    query->bindValue(4, state.size);
+    query->bindValue(5, state.lastLocalWrite.toString(Qt::ISODate));
+
+    if (!query->exec()) {
+        logError("saveFuseNodeContentState", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+bool SyncDatabase::deleteFuseNodeContentState(const QString& nodeId) {
+    QMutexLocker locker(&m_mutex);
+
+    if (nodeId.isEmpty()) {
+        return true;
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseNodeContents.deleteByNodeId"),
+        QStringLiteral("DELETE FROM fuse_node_contents WHERE node_id = ?"),
+        "deleteFuseNodeContentState");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, nodeId);
+    if (!query->exec()) {
+        logError("deleteFuseNodeContentState", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+qint64 SyncDatabase::appendFuseJournalEntry(const FuseJournalEntry& entry) {
+    QMutexLocker locker(&m_mutex);
+
+    const FuseJournalEntry normalizedEntry = normalizedFuseJournalEntry(entry);
+    QString validationError;
+    if (!validateFuseJournalEntry(normalizedEntry, &validationError)) {
+        logError("appendFuseJournalEntry", validationError);
+        return 0;
+    }
+
+    const QDateTime createdAt = normalizedEntry.createdAt.isValid() ? normalizedEntry.createdAt
+                                                                    : QDateTime::currentDateTime();
+    const QDateTime updatedAt =
+        normalizedEntry.updatedAt.isValid() ? normalizedEntry.updatedAt : createdAt;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(QStringLiteral("fuseJournal.append"),
+                                                             QStringLiteral(R"(
+        INSERT INTO fuse_journal
+        (idempotency_key, operation_type, status, node_id, parent_node_id,
+         destination_parent_node_id, path, visible_name, destination_path,
+         destination_visible_name, remote_file_id, remote_parent_id,
+         local_generation, dependency_entry_id, payload_json, last_error,
+         retry_count, created_at, updated_at, acknowledged_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    )"),
+                                                             "appendFuseJournalEntry");
+    if (!query) {
+        return 0;
+    }
+
+    query->bindValue(0, normalizedEntry.idempotencyKey);
+    query->bindValue(1, static_cast<int>(normalizedEntry.operationType));
+    query->bindValue(2, static_cast<int>(normalizedEntry.status));
+    query->bindValue(3, normalizedEntry.nodeId);
+    query->bindValue(4, normalizedEntry.parentNodeId);
+    query->bindValue(5, normalizedEntry.destinationParentNodeId);
+    query->bindValue(6, normalizedEntry.path);
+    query->bindValue(7, normalizedEntry.visibleName);
+    query->bindValue(8, normalizedEntry.destinationPath);
+    query->bindValue(9, normalizedEntry.destinationVisibleName);
+    query->bindValue(10, normalizedEntry.remoteFileId);
+    query->bindValue(11, normalizedEntry.remoteParentId);
+    query->bindValue(12, static_cast<qulonglong>(normalizedEntry.localGeneration));
+    query->bindValue(13, normalizedEntry.dependencyEntryId > 0
+                             ? QVariant::fromValue(normalizedEntry.dependencyEntryId)
+                             : QVariant());
+    query->bindValue(14, normalizedEntry.payloadJson);
+    query->bindValue(15, normalizedEntry.lastError);
+    query->bindValue(16, normalizedEntry.retryCount);
+    query->bindValue(17, createdAt.toString(Qt::ISODate));
+    query->bindValue(18, updatedAt.toString(Qt::ISODate));
+    query->bindValue(19, normalizedEntry.acknowledgedAt.toString(Qt::ISODate));
+
+    if (!query->exec()) {
+        logError("appendFuseJournalEntry", query->lastError().text());
+        return 0;
+    }
+
+    return query->lastInsertId().toLongLong();
+}
+
+QList<FuseJournalEntry> SyncDatabase::getAllFuseJournalEntries() const {
+    QMutexLocker locker(&m_mutex);
+    QList<FuseJournalEntry> entries;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseJournal.getAll"),
+        QStringLiteral("SELECT * FROM fuse_journal ORDER BY entry_id"), "getAllFuseJournalEntries");
+    if (!query) {
+        return entries;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    if (query->exec()) {
+        while (query->next()) {
+            entries.append(readFuseJournalEntryRow(*query));
+        }
+    }
+
+    return entries;
+}
+
+QList<FuseJournalEntry> SyncDatabase::getPendingFuseJournalEntries() const {
+    QMutexLocker locker(&m_mutex);
+    QList<FuseJournalEntry> entries;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseJournal.getPending"),
+        QStringLiteral("SELECT * FROM fuse_journal WHERE status = ? ORDER BY entry_id"),
+        "getPendingFuseJournalEntries");
+    if (!query) {
+        return entries;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, static_cast<int>(FuseJournalEntryStatus::Pending));
+    if (query->exec()) {
+        while (query->next()) {
+            entries.append(readFuseJournalEntryRow(*query));
+        }
+    }
+
+    return entries;
+}
+
+bool SyncDatabase::updateFuseJournalEntryStatus(qint64 entryId, FuseJournalEntryStatus status,
+                                                const QString& lastError, int retryCount,
+                                                const QDateTime& acknowledgedAt) {
+    QMutexLocker locker(&m_mutex);
+
+    if (entryId <= 0) {
+        return false;
+    }
+
+    const QString acknowledgedAtText = acknowledgedAt.toString(Qt::ISODate);
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseJournal.updateStatus"), QStringLiteral(R"(
+        UPDATE fuse_journal
+        SET status = ?,
+            last_error = ?,
+            retry_count = CASE WHEN ? < 0 THEN retry_count ELSE ? END,
+            updated_at = ?,
+            acknowledged_at = CASE WHEN ? = '' THEN acknowledged_at ELSE ? END
+        WHERE entry_id = ?
+    )"),
+        "updateFuseJournalEntryStatus");
+    if (!query) {
+        return false;
+    }
+
+    const QString updatedAtText = QDateTime::currentDateTime().toString(Qt::ISODate);
+    query->bindValue(0, static_cast<int>(status));
+    query->bindValue(1, lastError);
+    query->bindValue(2, retryCount);
+    query->bindValue(3, retryCount);
+    query->bindValue(4, updatedAtText);
+    query->bindValue(5, acknowledgedAtText);
+    query->bindValue(6, acknowledgedAtText);
+    query->bindValue(7, entryId);
+
+    if (!query->exec()) {
+        logError("updateFuseJournalEntryStatus", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+bool SyncDatabase::saveFuseOperationAck(const FuseOperationAck& ack) {
+    QMutexLocker locker(&m_mutex);
+
+    if (ack.journalEntryId <= 0 || ack.nodeId.isEmpty() || ack.idempotencyKey.isEmpty()) {
+        return false;
+    }
+
+    const QDateTime acknowledgedAt =
+        ack.acknowledgedAt.isValid() ? ack.acknowledgedAt : QDateTime::currentDateTime();
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseOperationAcks.save.upsert"), QStringLiteral(R"(
+        INSERT INTO fuse_operation_acks
+        (journal_entry_id, idempotency_key, node_id, remote_file_id, remote_parent_id,
+         acknowledged_generation, remote_change_token, payload_json, last_error,
+         acknowledged_at, applied_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(journal_entry_id) DO UPDATE SET
+            idempotency_key = excluded.idempotency_key,
+            node_id = excluded.node_id,
+            remote_file_id = excluded.remote_file_id,
+            remote_parent_id = excluded.remote_parent_id,
+            acknowledged_generation = excluded.acknowledged_generation,
+            remote_change_token = excluded.remote_change_token,
+            payload_json = excluded.payload_json,
+            last_error = excluded.last_error,
+            acknowledged_at = excluded.acknowledged_at,
+            applied_at = excluded.applied_at
+    )"),
+        "saveFuseOperationAck");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, ack.journalEntryId);
+    query->bindValue(1, ack.idempotencyKey);
+    query->bindValue(2, ack.nodeId);
+    query->bindValue(3, ack.remoteFileId);
+    query->bindValue(4, ack.remoteParentId);
+    query->bindValue(5, static_cast<qulonglong>(ack.acknowledgedGeneration));
+    query->bindValue(6, ack.remoteChangeToken);
+    query->bindValue(7, ack.payloadJson);
+    query->bindValue(8, ack.lastError);
+    query->bindValue(9, acknowledgedAt.toString(Qt::ISODate));
+    query->bindValue(10, ack.appliedAt.toString(Qt::ISODate));
+
+    if (!query->exec()) {
+        logError("saveFuseOperationAck", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+FuseOperationAck SyncDatabase::getFuseOperationAck(qint64 journalEntryId) const {
+    QMutexLocker locker(&m_mutex);
+    FuseOperationAck ack;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseOperationAcks.getByJournalEntryId"),
+        QStringLiteral("SELECT * FROM fuse_operation_acks WHERE journal_entry_id = ?"),
+        "getFuseOperationAck");
+    if (!query) {
+        return ack;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, journalEntryId);
+    if (query->exec() && query->next()) {
+        ack = readFuseOperationAckRow(*query);
+    }
+
+    return ack;
+}
+
+QList<FuseOperationAck> SyncDatabase::getAllFuseOperationAcks() const {
+    QMutexLocker locker(&m_mutex);
+    QList<FuseOperationAck> acks;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseOperationAcks.getAll"),
+        QStringLiteral("SELECT * FROM fuse_operation_acks ORDER BY ack_id"),
+        "getAllFuseOperationAcks");
+    if (!query) {
+        return acks;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    if (query->exec()) {
+        while (query->next()) {
+            acks.append(readFuseOperationAckRow(*query));
+        }
+    }
+
+    return acks;
+}
+
+FuseOperationAck SyncDatabase::getPendingFuseOperationAckByRemoteFileId(
+    const QString& remoteFileId) const {
+    QMutexLocker locker(&m_mutex);
+    FuseOperationAck ack;
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseOperationAcks.getPendingByRemoteFileId"), QStringLiteral(R"(
+        SELECT * FROM fuse_operation_acks
+        WHERE remote_file_id = ? AND (applied_at IS NULL OR applied_at = '')
+        ORDER BY ack_id
+        LIMIT 1
+    )"),
+        "getPendingFuseOperationAckByRemoteFileId");
+    if (!query) {
+        return ack;
+    }
+    PreparedQueryResetGuard resetGuard(query);
+
+    query->bindValue(0, remoteFileId);
+    if (query->exec() && query->next()) {
+        ack = readFuseOperationAckRow(*query);
+    }
+
+    return ack;
+}
+
+bool SyncDatabase::markFuseOperationAckApplied(qint64 ackId) {
+    QMutexLocker locker(&m_mutex);
+    if (ackId <= 0) {
+        return false;
+    }
+
+    QSqlQuery* query = preparedQueryForCurrentThreadUnlocked(
+        QStringLiteral("fuseOperationAcks.markApplied"),
+        QStringLiteral("UPDATE fuse_operation_acks SET applied_at = ? WHERE ack_id = ?"),
+        "markFuseOperationAckApplied");
+    if (!query) {
+        return false;
+    }
+
+    query->bindValue(0, QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    query->bindValue(1, ackId);
+    if (!query->exec()) {
+        logError("markFuseOperationAckApplied", query->lastError().text());
+        return false;
+    }
+
+    return true;
+}
+
+bool SyncDatabase::commitFuseMutationTransaction(const FuseMutationTransaction& mutation,
+                                                 qint64* journalEntryIdOut) {
+    QMutexLocker locker(&m_mutex);
+
+    if (journalEntryIdOut) {
+        *journalEntryIdOut = 0;
+    }
+
+    const FuseJournalEntry normalizedEntry = normalizedFuseJournalEntry(mutation.journalEntry);
+    QString validationError;
+    if (!validateFuseJournalEntry(normalizedEntry, &validationError)) {
+        logError("commitFuseMutationTransaction", validationError);
+        return false;
+    }
+
+    QSqlDatabase db = databaseForCurrentThreadUnlocked();
+    if (!db.isOpen()) {
+        logError("commitFuseMutationTransaction", QStringLiteral("Database is not open"));
+        return false;
+    }
+
+    if (!db.transaction()) {
+        logError("commitFuseMutationTransaction (begin)", db.lastError().text());
+        return false;
+    }
+
+    for (const QString& nodeId : mutation.contentStateNodeIdsToDelete) {
+        if (!deleteFuseNodeContentState(nodeId)) {
+            db.rollback();
+            return false;
+        }
+    }
+
+    for (const QString& nodeId : mutation.nodeIdsToDelete) {
+        if (!deleteFuseNode(nodeId)) {
+            db.rollback();
+            return false;
+        }
+    }
+
+    for (const FuseNode& node : mutation.nodesToUpsert) {
+        if (!saveFuseNode(node)) {
+            db.rollback();
+            return false;
+        }
+    }
+
+    for (const FuseNodeContentState& state : mutation.contentStatesToUpsert) {
+        if (!saveFuseNodeContentState(state)) {
+            db.rollback();
+            return false;
+        }
+    }
+
+    const qint64 entryId = appendFuseJournalEntry(normalizedEntry);
+    if (entryId <= 0) {
+        db.rollback();
+        return false;
+    }
+
+    if (!db.commit()) {
+        logError("commitFuseMutationTransaction (commit)", db.lastError().text());
+        db.rollback();
+        return false;
+    }
+
+    if (journalEntryIdOut) {
+        *journalEntryIdOut = entryId;
+    }
+
+    return true;
 }
 
 QList<FuseDirtyFile> SyncDatabase::getFuseDirtyFiles() const {
@@ -2549,9 +3519,10 @@ bool SyncDatabase::clearAllData() {
     // Order matters: delete from child tables before parents to satisfy
     // any future foreign-key constraints without requiring PRAGMA changes.
     static const char* tables[] = {
-        "conflict_versions", "conflicts",        "deleted_files",      "files",
-        "native_doc_state",  "fuse_dirty_files", "fuse_cache_entries", "fuse_metadata",
-        "fuse_sync_state",   "settings"};
+        "conflict_versions",   "conflicts",        "deleted_files",      "files",
+        "fuse_operation_acks", "native_doc_state", "fuse_journal",       "fuse_node_contents",
+        "fuse_nodes",          "fuse_dirty_files", "fuse_cache_entries", "fuse_metadata",
+        "fuse_sync_state",     "settings"};
     QSqlQuery query(m_db);
     for (const char* table : tables) {
         QString sql;

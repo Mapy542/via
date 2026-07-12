@@ -42,6 +42,7 @@ class FileCache;
 class SyncDatabase;
 struct DriveChange;
 struct DriveFile;
+struct FuseFileMetadata;
 
 /**
  * @class MetadataRefreshWorker
@@ -252,8 +253,9 @@ class MetadataRefreshWorker : public QObject {
     /**
      * @brief Update MetadataCache with file information
      * @param file File metadata from API
+     * @return Resolved metadata after cache reconciliation, or invalid metadata if unresolved
      */
-    void updateMetadataCache(const DriveFile& file);
+    FuseFileMetadata updateMetadataCache(const DriveFile& file);
 
     /**
      * @brief Remove file from caches (for deleted files)
@@ -312,6 +314,7 @@ class MetadataRefreshWorker : public QObject {
 
     // Polling timer
     QTimer* m_pollingTimer;
+    QTimer* m_retryTimer;
 
     // State
     QString m_changeToken;
@@ -319,6 +322,7 @@ class MetadataRefreshWorker : public QObject {
     mutable QMutex m_mutex;
     bool m_waitingForToken;
     bool m_changesRequestInFlight = false;
+    bool m_retryScheduled = false;
     bool m_pendingCheckRequested = false;
     int m_consecutiveTransientFailures = 0;
 

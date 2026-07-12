@@ -206,12 +206,14 @@ class RemoteChangeWatcher : public QObject {
     SyncDatabase* m_syncDatabase;
     GoogleDriveClient* m_driveClient;
     QTimer* m_pollingTimer;
+    QTimer* m_retryTimer;
 
     QString m_changeToken;
     State m_state;
     mutable QMutex m_mutex;
     bool m_waitingForToken;
     bool m_changesRequestInFlight = false;
+    bool m_retryScheduled = false;
     bool m_pendingCheckRequested = false;
     int m_consecutiveTransientFailures = 0;
 

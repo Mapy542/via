@@ -91,6 +91,7 @@ RemoteChangeWatcher::RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveCl
       m_syncDatabase(syncDatabase),
       m_driveClient(driveClient),
       m_pollingTimer(new QTimer(this)),
+      m_retryTimer(new QTimer(this)),
       m_state(State::Stopped),
       m_waitingForToken(false) {
     // Configure polling timer
@@ -99,9 +100,17 @@ RemoteChangeWatcher::RemoteChangeWatcher(ChangeQueue* changeQueue, GoogleDriveCl
     m_pollingTimer->setInterval(m_settings.remotePollIntervalMs > 0
                                     ? m_settings.remotePollIntervalMs
                                     : DEFAULT_POLL_INTERVAL_MS);
+    m_retryTimer->setSingleShot(true);
 
     // Connect signals
     connect(m_pollingTimer, &QTimer::timeout, this, &RemoteChangeWatcher::onPollingTimeout);
+    connect(m_retryTimer, &QTimer::timeout, this, [this]() {
+        {
+            QMutexLocker locker(&m_mutex);
+            m_retryScheduled = false;
+        }
+        checkNow();
+    });
 
     if (m_driveClient) {
         connect(m_driveClient, &GoogleDriveClient::changesReceived, this,
@@ -172,7 +181,9 @@ void RemoteChangeWatcher::start() {
         // Need to get the start page token first
         m_waitingForToken = true;
         m_changesRequestInFlight = true;
+        m_retryScheduled = false;
         m_pendingCheckRequested = false;
+        m_retryTimer->stop();
         locker.unlock();
         m_driveClient->getStartPageToken();
         return;
@@ -180,7 +191,9 @@ void RemoteChangeWatcher::start() {
 
     m_state = State::Running;
     m_changesRequestInFlight = false;
+    m_retryScheduled = false;
     m_pendingCheckRequested = false;
+    m_retryTimer->stop();
     m_pollingTimer->start();
     locker.unlock();
 
@@ -196,9 +209,11 @@ void RemoteChangeWatcher::stop() {
     QMutexLocker locker(&m_mutex);
 
     m_pollingTimer->stop();
+    m_retryTimer->stop();
     m_state = State::Stopped;
     m_waitingForToken = false;
     m_changesRequestInFlight = false;
+    m_retryScheduled = false;
     m_pendingCheckRequested = false;
     m_consecutiveTransientFailures = 0;
     m_pendingChanges.clear();
@@ -229,7 +244,10 @@ void RemoteChangeWatcher::pause() {
     }
 
     m_pollingTimer->stop();
+    m_retryTimer->stop();
     m_state = State::Paused;
+    m_retryScheduled = false;
+    m_pendingCheckRequested = false;
 
     locker.unlock();
 
@@ -245,6 +263,8 @@ void RemoteChangeWatcher::resume() {
     }
 
     m_state = State::Running;
+    m_retryTimer->stop();
+    m_retryScheduled = false;
     m_pollingTimer->start();
 
     locker.unlock();
@@ -273,7 +293,7 @@ void RemoteChangeWatcher::checkNow() {
         return;
     }
 
-    if (m_changesRequestInFlight) {
+    if (m_changesRequestInFlight || m_retryScheduled) {
         m_pendingCheckRequested = true;
         qDebug() << "Remote changes request already in flight; deferring check";
         return;
@@ -312,10 +332,12 @@ void RemoteChangeWatcher::onChangesReceived(const QList<DriveChange>& changes,
         if (m_state != State::Running) {
             m_changesRequestInFlight = false;
             m_pendingCheckRequested = false;
+            m_retryScheduled = false;
             m_pendingChanges.clear();
             m_pendingToken.clear();
             m_pendingHasMorePages = false;
             m_pendingChangeIndex = 0;
+            m_retryTimer->stop();
             return;
         }
 
@@ -372,6 +394,7 @@ void RemoteChangeWatcher::finalizePendingChangeBatch() {
         tokenUpdated = (m_changeToken != newToken);
         m_changeToken = newToken;
         m_changesRequestInFlight = false;
+        m_retryScheduled = false;
         runDeferredCheck = m_pendingCheckRequested;
         m_pendingCheckRequested = false;
         m_consecutiveTransientFailures = 0;
@@ -380,6 +403,7 @@ void RemoteChangeWatcher::finalizePendingChangeBatch() {
         m_pendingHasMorePages = false;
         m_pendingChangeIndex = 0;
     }
+    m_retryTimer->stop();
 
     emit changeTokenUpdated(newToken);
 
@@ -407,10 +431,12 @@ void RemoteChangeWatcher::onStartPageTokenReceived(const QString& token) {
     bool wasWaiting = m_waitingForToken;
     m_waitingForToken = false;
     m_changesRequestInFlight = false;
+    m_retryScheduled = false;
     m_pendingCheckRequested = false;
     m_consecutiveTransientFailures = 0;
 
     locker.unlock();
+    m_retryTimer->stop();
 
     emit changeTokenUpdated(token);
     qInfo() << "Received start page token:" << token;
@@ -443,7 +469,9 @@ void RemoteChangeWatcher::onApiError(const QString& operation, const QString& er
                 shouldRetry = (m_state == State::Running || m_waitingForToken);
                 shouldSurface = m_consecutiveTransientFailures >= kTransientFailureSurfaceThreshold;
                 retryDelayMs = transientRetryDelayMs(m_consecutiveTransientFailures);
+                m_retryScheduled = shouldRetry;
             } else {
+                m_retryScheduled = false;
                 m_consecutiveTransientFailures = 0;
             }
         }
@@ -457,11 +485,14 @@ void RemoteChangeWatcher::onApiError(const QString& operation, const QString& er
             }
 
             if (shouldRetry) {
-                QTimer::singleShot(retryDelayMs, this, &RemoteChangeWatcher::checkNow);
+                m_retryTimer->start(retryDelayMs);
+            } else {
+                m_retryTimer->stop();
             }
             return;
         }
 
+        m_retryTimer->stop();
         emit this->error("API error in " + operation + ": " + error);
         qWarning() << "RemoteChangeWatcher API error:" << operation << error;
 

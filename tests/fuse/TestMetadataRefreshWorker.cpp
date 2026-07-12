@@ -10,6 +10,7 @@
 #include <QtTest/QtTest>
 
 #include "api/GoogleDriveClient.h"
+#include "fuse/FileCache.h"
 #include "fuse/MetadataCache.h"
 #include "fuse/MetadataRefreshWorker.h"
 #include "sync/SyncDatabase.h"
@@ -142,8 +143,13 @@ class TestMetadataRefreshWorker : public QObject {
     void testDeletedChange_EmitsStoredPathBeforeRemoval();
     void testCreatedChange_FallsBackToFileNameWhenPathUnavailable();
     void testTrashChange_IsIgnored();
+    void testModifiedChange_ConsumesPendingOperationAck();
+    void testModifiedChange_SkipsInvalidationWhenLocalGenerationAhead();
+    void testModifiedChange_UpdatesAuthoritativeNodePathWhenSafe();
+    void testDeletedChange_PreservesNodeWhenLocalRenamePending();
     void testTransientApiErrorRetriesWithoutExternalError();
     void testTimeoutApiErrorRetriesWithoutExternalError();
+    void testRetryDelaySuppressesPollingCollision();
     void testInFlightRequestDefersExtraCheck();
     void testPaginatedChanges_RequestNextPageImmediately();
     void testExpiredChangeToken_RequestsNewStartPageTokenAndRecovers();
@@ -162,6 +168,7 @@ class TestMetadataRefreshWorker : public QObject {
     SyncDatabase* m_db = nullptr;
     FakeDriveClientMRW* m_driveClient = nullptr;
     MetadataCache* m_cache = nullptr;
+    FileCache* m_fileCache = nullptr;
     MetadataRefreshWorker* m_worker = nullptr;
 };
 
@@ -240,12 +247,19 @@ void TestMetadataRefreshWorker::init() {
     QVERIFY(m_cache->initialize());
     m_cache->setRootFolderId(QStringLiteral("root"));
 
-    m_worker = new MetadataRefreshWorker(m_cache, nullptr, m_db, m_driveClient, this);
+    m_fileCache = new FileCache(m_db, m_driveClient, this);
+    m_fileCache->setCacheDirectory(m_tempDir->path() + QStringLiteral("/cache"));
+    m_fileCache->setDirtyDirectory(m_tempDir->path() + QStringLiteral("/pending"));
+    QVERIFY(m_fileCache->initialize());
+
+    m_worker = new MetadataRefreshWorker(m_cache, m_fileCache, m_db, m_driveClient, this);
 }
 
 void TestMetadataRefreshWorker::cleanup() {
     delete m_worker;
     m_worker = nullptr;
+    delete m_fileCache;
+    m_fileCache = nullptr;
     delete m_cache;
     m_cache = nullptr;
     delete m_driveClient;
@@ -353,6 +367,182 @@ void TestMetadataRefreshWorker::testTrashChange_IsIgnored() {
     QVERIFY(m_db->getFuseMetadataByPath(QStringLiteral(".Trash-1000")).fileId.isEmpty());
 }
 
+void TestMetadataRefreshWorker::testModifiedChange_ConsumesPendingOperationAck() {
+    m_cache->setMetadata(makeFolder(QStringLiteral("folder-1"), QStringLiteral("Projects")));
+    const FuseFileMetadata cachedFile = makeFile(
+        QStringLiteral("file-ack"), QStringLiteral("Projects/ack.txt"), QStringLiteral("folder-1"));
+    m_cache->setMetadata(cachedFile);
+
+    const QString cachePath = m_fileCache->getCachePathForFile(QStringLiteral("file-ack"));
+    QVERIFY(QDir().mkpath(QFileInfo(cachePath).dir().absolutePath()));
+    QFile cacheFile(cachePath);
+    QVERIFY(cacheFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(cacheFile.write("ack-bytes"), qint64(9));
+    cacheFile.close();
+    QVERIFY(m_fileCache->recordCacheEntry(QStringLiteral("file-ack"), cachePath,
+                                          QFileInfo(cachePath).size()));
+
+    FuseJournalEntry entry;
+    entry.idempotencyKey = QStringLiteral("ack-entry-1");
+    entry.operationType = FuseJournalOperationType::WriteGeneration;
+    entry.nodeId = QStringLiteral("ack-node");
+    entry.path = QStringLiteral("/Projects/ack.txt");
+    entry.remoteFileId = QStringLiteral("file-ack");
+    entry.localGeneration = 1;
+    const qint64 entryId = m_db->appendFuseJournalEntry(entry);
+    QVERIFY(entryId > 0);
+    QVERIFY(m_db->updateFuseJournalEntryStatus(entryId, FuseJournalEntryStatus::Completed));
+
+    FuseOperationAck ack;
+    ack.journalEntryId = entryId;
+    ack.idempotencyKey = entry.idempotencyKey;
+    ack.nodeId = entry.nodeId;
+    ack.remoteFileId = QStringLiteral("file-ack");
+    ack.acknowledgedGeneration = 1;
+    ack.acknowledgedAt = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseOperationAck(ack));
+
+    QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+
+    m_driveClient->emitChangesBatch(
+        {makeChange(QStringLiteral("change-ack"), QStringLiteral("file-ack"),
+                    QStringLiteral("ack.txt"), QStringLiteral("folder-1"))});
+
+    QCOMPARE(changeSpy.count(), 1);
+    QVERIFY(m_fileCache->isCached(QStringLiteral("file-ack")));
+    const FuseOperationAck consumedAck = m_db->getFuseOperationAck(entryId);
+    QVERIFY(consumedAck.appliedAt.isValid());
+    QVERIFY(m_db->getPendingFuseOperationAckByRemoteFileId(QStringLiteral("file-ack")).ackId <= 0);
+}
+
+void TestMetadataRefreshWorker::testModifiedChange_SkipsInvalidationWhenLocalGenerationAhead() {
+    m_cache->setMetadata(makeFolder(QStringLiteral("folder-1"), QStringLiteral("Projects")));
+    const FuseFileMetadata cachedFile =
+        makeFile(QStringLiteral("file-modified-local"), QStringLiteral("Projects/report.txt"),
+                 QStringLiteral("folder-1"));
+    m_cache->setMetadata(cachedFile);
+
+    const QString cachePath =
+        m_fileCache->getCachePathForFile(QStringLiteral("file-modified-local"));
+    const QByteArray localBytes("fresh local bytes");
+    QVERIFY(QDir().mkpath(QFileInfo(cachePath).dir().absolutePath()));
+    QFile cacheFile(cachePath);
+    QVERIFY(cacheFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(cacheFile.write(localBytes), localBytes.size());
+    cacheFile.close();
+    QVERIFY(m_fileCache->recordCacheEntry(QStringLiteral("file-modified-local"), cachePath,
+                                          QFileInfo(cachePath).size()));
+    QVERIFY(m_fileCache->isCached(QStringLiteral("file-modified-local")));
+
+    FuseNode node;
+    node.nodeId = QStringLiteral("local-newer-node");
+    node.remoteFileId = QStringLiteral("file-modified-local");
+    node.path = QStringLiteral("/Projects/report.txt");
+    node.name = QStringLiteral("report.txt");
+    node.remoteName = QStringLiteral("report.txt");
+    node.isFolder = false;
+    node.size = QFileInfo(cachePath).size();
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseNodeContentState state;
+    state.nodeId = node.nodeId;
+    state.localContentPath = cachePath;
+    state.localGeneration = 2;
+    state.remoteAckGeneration = 1;
+    state.size = QFileInfo(cachePath).size();
+    state.lastLocalWrite = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseNodeContentState(state));
+
+    QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+
+    m_driveClient->emitChangesBatch(
+        {makeChange(QStringLiteral("change-modified-local"), QStringLiteral("file-modified-local"),
+                    QStringLiteral("report.txt"), QStringLiteral("folder-1"))});
+
+    QCOMPARE(changeSpy.count(), 1);
+    QVERIFY(m_fileCache->isCached(QStringLiteral("file-modified-local")));
+}
+
+void TestMetadataRefreshWorker::testModifiedChange_UpdatesAuthoritativeNodePathWhenSafe() {
+    m_cache->setMetadata(makeFolder(QStringLiteral("folder-1"), QStringLiteral("Projects")));
+    m_cache->setMetadata(makeFile(QStringLiteral("file-rename-safe"),
+                                  QStringLiteral("Projects/report.txt"),
+                                  QStringLiteral("folder-1")));
+
+    FuseNode node;
+    node.nodeId = QStringLiteral("safe-rename-node");
+    node.remoteFileId = QStringLiteral("file-rename-safe");
+    node.remoteParentId = QStringLiteral("folder-1");
+    node.path = QStringLiteral("/Projects/report.txt");
+    node.name = QStringLiteral("report.txt");
+    node.remoteName = QStringLiteral("report.txt");
+    node.isFolder = false;
+    node.size = 100;
+    node.mimeType = QStringLiteral("text/plain");
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    m_driveClient->emitChangesBatch(
+        {makeChange(QStringLiteral("change-rename-safe"), QStringLiteral("file-rename-safe"),
+                    QStringLiteral("report-renamed.txt"), QStringLiteral("folder-1"))});
+
+    const FuseNode updated = m_db->getFuseNode(node.nodeId);
+    QCOMPARE(updated.path, QStringLiteral("/Projects/report-renamed.txt"));
+    QCOMPARE(updated.name, QStringLiteral("report-renamed.txt"));
+
+    const FuseFileMetadata metadata =
+        m_cache->getMetadataByFileId(QStringLiteral("file-rename-safe"));
+    QVERIFY(metadata.isValid());
+    QCOMPARE(metadata.path, QStringLiteral("Projects/report-renamed.txt"));
+}
+
+void TestMetadataRefreshWorker::testDeletedChange_PreservesNodeWhenLocalRenamePending() {
+    m_cache->setMetadata(makeFolder(QStringLiteral("folder-1"), QStringLiteral("Projects")));
+    m_cache->setMetadata(makeFile(QStringLiteral("file-delete-local"),
+                                  QStringLiteral("Projects/remove.txt"),
+                                  QStringLiteral("folder-1")));
+
+    FuseNode node;
+    node.nodeId = QStringLiteral("delete-preserve-node");
+    node.remoteFileId = QStringLiteral("file-delete-local");
+    node.remoteParentId = QStringLiteral("folder-1");
+    node.path = QStringLiteral("/Projects/remove-local-name.txt");
+    node.name = QStringLiteral("remove-local-name.txt");
+    node.remoteName = QStringLiteral("remove.txt");
+    node.isFolder = false;
+    node.size = 100;
+    node.mimeType = QStringLiteral("text/plain");
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseMutationTransaction renameMutation;
+    renameMutation.journalEntry.idempotencyKey = QStringLiteral("pending-local-rename");
+    renameMutation.journalEntry.operationType = FuseJournalOperationType::Rename;
+    renameMutation.journalEntry.nodeId = node.nodeId;
+    renameMutation.journalEntry.path = QStringLiteral("/Projects/remove.txt");
+    renameMutation.journalEntry.destinationPath = QStringLiteral("/Projects/remove-local-name.txt");
+    QVERIFY(m_db->commitFuseMutationTransaction(renameMutation, nullptr));
+
+    QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+
+    m_driveClient->emitChangesBatch(
+        {makeChange(QStringLiteral("change-delete-preserve"), QStringLiteral("file-delete-local"),
+                    QStringLiteral("remove.txt"), QStringLiteral("folder-1"), true)});
+
+    QCOMPARE(changeSpy.count(), 1);
+    QVERIFY(!m_db->getFuseNode(node.nodeId).nodeId.isEmpty());
+    const FuseFileMetadata metadata =
+        m_cache->getMetadataByPath(QStringLiteral("Projects/remove-local-name.txt"));
+    QVERIFY(metadata.isValid());
+}
+
 void TestMetadataRefreshWorker::testTransientApiErrorRetriesWithoutExternalError() {
     m_db->setFuseSyncState(QStringLiteral("fuse_change_token"), QStringLiteral("token-1"));
     m_driveClient->setPendingChanges({});
@@ -386,6 +576,28 @@ void TestMetadataRefreshWorker::testTimeoutApiErrorRetriesWithoutExternalError()
     QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 2, 1500);
     QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
     QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(m_worker->changeToken(), QStringLiteral("token-2"));
+}
+
+void TestMetadataRefreshWorker::testRetryDelaySuppressesPollingCollision() {
+    m_db->setFuseSyncState(QStringLiteral("fuse_change_token"), QStringLiteral("token-1"));
+    m_driveClient->setPendingChanges({});
+    m_driveClient->setNextToken(QStringLiteral("token-2"));
+    m_driveClient->injectOperationError(QStringLiteral("listChanges"),
+                                        QStringLiteral("Operation timed out"));
+    m_worker->setPollingInterval(50);
+
+    QSignalSpy tokenSpy(m_worker, &MetadataRefreshWorker::changeTokenUpdated);
+
+    m_worker->start();
+
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->listChangesCallCount, 1, 200);
+    QTest::qWait(150);
+    QCOMPARE(m_driveClient->listChangesCallCount, 1);
+
+    QTRY_VERIFY_WITH_TIMEOUT(m_driveClient->listChangesCallCount >= 2, 1500);
+    QTRY_VERIFY_WITH_TIMEOUT(tokenSpy.count() >= 1, 1500);
+    m_worker->stop();
     QCOMPARE(m_worker->changeToken(), QStringLiteral("token-2"));
 }
 

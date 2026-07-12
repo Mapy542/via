@@ -149,6 +149,8 @@ class TestDirtySyncWorker : public QObject {
 
     // GPT5.3 #8: retry budget
     void testRetryBudget_SkipsExceededFiles();
+    void testRetryBudget_ResetsForNewGeneration();
+    void testMissingContent_ClearsStaleGenerationAfterRetryBudget();
 
     // Cache content recycling: clearDirty must recycle content into LRU cache
     void testClearDirty_RecyclesContentToCache();
@@ -157,6 +159,7 @@ class TestDirtySyncWorker : public QObject {
     // Metadata size correctness after upload (simulated)
     void testUpload_MetadataSizeFromRecycledFile();
     void testUpload_MetadataSizePrefersDriveApiSize();
+    void testUpload_AdvancesNodeAckGeneration();
 
     // Self-upload marker: recently uploaded files skip invalidation
     void testRecentlyUploaded_SkipsInvalidation();
@@ -377,6 +380,47 @@ void TestDirtySyncWorker::testRetryBudget_SkipsExceededFiles() {
     QVERIFY2(foundSkipMessage, "Expected 'Exceeded max retries' message in uploadFailed signals");
 }
 
+void TestDirtySyncWorker::testRetryBudget_ResetsForNewGeneration() {
+    const QString fid = "file_retry_reset";
+    createCacheFile(fid);
+    m_fileCache->markDirty(fid, "/retry_reset.txt");
+
+    m_driveClient->setFailForFileId(fid);
+    m_worker->setMaxRetries(1);
+
+    QSignalSpy cycleSpy(m_worker, &DirtySyncWorker::syncCycleCompleted);
+
+    m_worker->start();
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 2, 15000);
+    m_worker->stop();
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 1);
+    QVERIFY(m_fileCache->isDirty(fid));
+
+    m_driveClient->clearFailForFileId(fid);
+    m_fileCache->markDirty(fid, "/retry_reset.txt");
+
+    m_worker->start();
+    QTRY_COMPARE_WITH_TIMEOUT(m_driveClient->updateCallCountForFileId(fid), 2, 5000);
+    m_worker->stop();
+
+    QCOMPARE(m_driveClient->updateCallCountForFileId(fid), 2);
+    QVERIFY(m_fileCache->isDirty(fid));
+}
+
+void TestDirtySyncWorker::testMissingContent_ClearsStaleGenerationAfterRetryBudget() {
+    const QString fid = "missing_content_generation";
+    m_worker->setMaxRetries(2);
+    m_fileCache->markDirty(fid, "/missing_content_generation.txt");
+
+    QSignalSpy cycleSpy(m_worker, &DirtySyncWorker::syncCycleCompleted);
+
+    m_worker->start();
+    QTRY_VERIFY_WITH_TIMEOUT(cycleSpy.size() >= 2, 15000);
+    QTRY_VERIFY_WITH_TIMEOUT(!m_fileCache->isDirty(fid), 5000);
+    m_worker->stop();
+}
+
 // ---------------------------------------------------------------------------
 // Cache content recycling: clearDirty recycles to LRU cache
 // ---------------------------------------------------------------------------
@@ -522,6 +566,64 @@ void TestDirtySyncWorker::testUpload_MetadataSizePrefersDriveApiSize() {
 
     FuseMetadata finalMeta = m_db->getFuseMetadata(fid);
     QCOMPARE(finalMeta.size, static_cast<qint64>(content.size()));
+}
+
+void TestDirtySyncWorker::testUpload_AdvancesNodeAckGeneration() {
+    const QString fid = QStringLiteral("node_ack_generation");
+    const QString relativePath = QStringLiteral("projects/node_ack_generation.txt");
+    const QByteArray content = QByteArray("offline bytes pending upload");
+
+    FuseMetadata meta;
+    meta.fileId = fid;
+    meta.path = relativePath;
+    meta.name = QStringLiteral("node_ack_generation.txt");
+    meta.parentId = QStringLiteral("root");
+    meta.isFolder = false;
+    meta.size = content.size();
+    meta.mimeType = QStringLiteral("text/plain");
+    meta.createdTime = QDateTime::currentDateTimeUtc();
+    meta.modifiedTime = meta.createdTime;
+    meta.cachedAt = meta.createdTime;
+    meta.lastAccessed = meta.createdTime;
+    QVERIFY(m_db->saveFuseMetadata(meta));
+
+    FuseNode node;
+    node.nodeId = QStringLiteral("node-ack-generation");
+    node.remoteFileId = fid;
+    node.path = QStringLiteral("/") + relativePath;
+    node.name = meta.name;
+    node.remoteName = meta.name;
+    node.isFolder = false;
+    node.size = content.size();
+    node.createdTime = meta.createdTime;
+    node.modifiedTime = meta.modifiedTime;
+    node.lastAccessed = meta.lastAccessed;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseNodeContentState state;
+    state.nodeId = node.nodeId;
+    state.localContentPath = m_fileCache->getDirtyPathForFile(fid);
+    state.localGeneration = 1;
+    state.remoteAckGeneration = 0;
+    state.size = content.size();
+    state.lastLocalWrite = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseNodeContentState(state));
+
+    createDirtyPendingFile(fid, content);
+
+    ThreadedDirtySyncWorkerHarness threadedWorker(m_fileCache, m_driveClient, m_db);
+    QSignalSpy completeSpy(threadedWorker.worker(), &DirtySyncWorker::uploadCompleted);
+
+    QTRY_COMPARE_WITH_TIMEOUT(completeSpy.size(), 1, 5000);
+
+    const FuseNodeContentState updatedState = m_db->getFuseNodeContentState(node.nodeId);
+    QCOMPARE(updatedState.remoteAckGeneration, static_cast<quint64>(1));
+    QVERIFY(!updatedState.localContentPath.isEmpty());
+    QVERIFY(QFile::exists(updatedState.localContentPath));
+
+    const FuseNode updatedNode = m_db->getFuseNode(node.nodeId);
+    QCOMPARE(updatedNode.remoteFileId, fid);
+    QVERIFY(updatedNode.lastSyncedAt.isValid());
 }
 
 // ---------------------------------------------------------------------------

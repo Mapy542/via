@@ -398,6 +398,9 @@ class GoogleDriveClient : public QObject {
 
    private:
     QNetworkRequest createRequest(const QUrl& url);
+    bool prepareAuthorizedRequest(const QUrl& url, const QString& operation,
+                                  QNetworkRequest* requestOut, const QString& fileId = QString(),
+                                  const QString& localPath = QString());
     void handleNetworkError(QNetworkReply* reply, const QString& operation);
     DriveFile parseFileJson(const QJsonObject& json) const;
     DriveChange parseChangeJson(const QJsonObject& json) const;

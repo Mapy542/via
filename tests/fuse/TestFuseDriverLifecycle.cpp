@@ -169,6 +169,10 @@ class TestFuseDriverLifecycle : public QObject {
     void testMoveLiveEntryToTrash_SnapshotsFolderChildrenAndClearsSubtree();
     void testRestoreTrashEntryToLive_UploadsLocalFileAndRemovesOverlay();
     void testRestoreTrashEntryToLive_RecreatesFolderTreeAndCachesFiles();
+    void testCreateAuthoritativeLocalFile_CommitsNodeAndJournal();
+    void testCommitNodeContentMutation_AdvancesGenerationAndSize();
+    void testApplyLocalNodeRename_UpdatesNodeAndJournal();
+    void testApplyLocalNodeRemoval_RemovesProvisionalNodeAndJournal();
 
     void testTruncateWithoutHandle_StagesDirtyFile();
     void testStageDirtyFileForUpload_RetargetsRemainingHandles();
@@ -521,6 +525,109 @@ void TestFuseDriverLifecycle::testRestoreTrashEntryToLive_RecreatesFolderTreeAnd
     QVERIFY(cachedChild.open(QIODevice::ReadOnly));
     QCOMPARE(cachedChild.readAll(), childContent);
     cachedChild.close();
+}
+
+void TestFuseDriverLifecycle::testCreateAuthoritativeLocalFile_CommitsNodeAndJournal() {
+    FuseOpenFile openFile;
+
+    QVERIFY(
+        m_driver->createAuthoritativeLocalFile(QStringLiteral("/project.kicad_pcb"), &openFile));
+
+    QVERIFY(!openFile.nodeId.isEmpty());
+    QVERIFY(openFile.fileId.isEmpty());
+    QCOMPARE(openFile.path, QStringLiteral("/project.kicad_pcb"));
+    QVERIFY(QFile::exists(openFile.contentPath));
+    QVERIFY(openFile.localFd >= 0);
+
+    const FuseNode node = m_db->getFuseNode(openFile.nodeId);
+    QCOMPARE(node.path, QStringLiteral("/project.kicad_pcb"));
+    QCOMPARE(node.name, QStringLiteral("project.kicad_pcb"));
+    QVERIFY(node.isPendingCreate);
+    QVERIFY(!node.isFolder);
+
+    const FuseNodeContentState state = m_db->getFuseNodeContentState(openFile.nodeId);
+    QCOMPARE(state.localContentPath, openFile.contentPath);
+    QCOMPARE(state.localGeneration, static_cast<quint64>(0));
+    QCOMPARE(state.remoteAckGeneration, static_cast<quint64>(0));
+
+    const QList<FuseJournalEntry> journal = m_db->getAllFuseJournalEntries();
+    QCOMPARE(journal.size(), 1);
+    QCOMPARE(journal.first().operationType, FuseJournalOperationType::CreateFile);
+    QCOMPARE(journal.first().nodeId, openFile.nodeId);
+    QCOMPARE(journal.first().path, QStringLiteral("/project.kicad_pcb"));
+
+    m_driver->unregisterOpenFile(m_driver->registerOpenFile(openFile));
+}
+
+void TestFuseDriverLifecycle::testCommitNodeContentMutation_AdvancesGenerationAndSize() {
+    FuseOpenFile openFile;
+    QVERIFY(m_driver->createAuthoritativeLocalFile(QStringLiteral("/board.kicad_sch"), &openFile));
+
+    const QByteArray payload("updated schematic bytes");
+    QCOMPARE(::pwrite(openFile.localFd, payload.constData(), payload.size(), 0),
+             static_cast<ssize_t>(payload.size()));
+
+    QVERIFY(
+        m_driver->commitNodeContentMutation(openFile, FuseJournalOperationType::WriteGeneration));
+
+    const FuseNodeContentState state = m_db->getFuseNodeContentState(openFile.nodeId);
+    QCOMPARE(state.localGeneration, static_cast<quint64>(1));
+    QCOMPARE(state.remoteAckGeneration, static_cast<quint64>(0));
+    QCOMPARE(state.size, qint64(payload.size()));
+    QCOMPARE(state.localContentPath, openFile.contentPath);
+
+    const FuseNode node = m_db->getFuseNode(openFile.nodeId);
+    QCOMPARE(node.size, qint64(payload.size()));
+
+    const QList<FuseJournalEntry> journal = m_db->getAllFuseJournalEntries();
+    QCOMPARE(journal.size(), 2);
+    QCOMPARE(journal.last().operationType, FuseJournalOperationType::WriteGeneration);
+    QCOMPARE(journal.last().localGeneration, static_cast<quint64>(1));
+
+    m_driver->unregisterOpenFile(m_driver->registerOpenFile(openFile));
+}
+
+void TestFuseDriverLifecycle::testApplyLocalNodeRename_UpdatesNodeAndJournal() {
+    FuseOpenFile openFile;
+    QVERIFY(m_driver->createAuthoritativeLocalFile(QStringLiteral("/draft.txt"), &openFile));
+
+    QVERIFY(m_driver->applyLocalNodeRename(QStringLiteral("/draft.txt"),
+                                           QStringLiteral("/renamed.txt")));
+
+    QVERIFY(m_db->getFuseNodeByPath(QStringLiteral("/draft.txt")).nodeId.isEmpty());
+    const FuseNode renamedNode = m_db->getFuseNodeByPath(QStringLiteral("/renamed.txt"));
+    QCOMPARE(renamedNode.nodeId, openFile.nodeId);
+    QCOMPARE(renamedNode.name, QStringLiteral("renamed.txt"));
+
+    const QList<FuseJournalEntry> journal = m_db->getAllFuseJournalEntries();
+    QCOMPARE(journal.size(), 2);
+    QCOMPARE(journal.last().operationType, FuseJournalOperationType::Rename);
+    QCOMPARE(journal.last().path, QStringLiteral("/draft.txt"));
+    QCOMPARE(journal.last().destinationPath, QStringLiteral("/renamed.txt"));
+
+    ::close(openFile.localFd);
+}
+
+void TestFuseDriverLifecycle::testApplyLocalNodeRemoval_RemovesProvisionalNodeAndJournal() {
+    FuseOpenFile openFile;
+    QVERIFY(m_driver->createAuthoritativeLocalFile(QStringLiteral("/remove-me.txt"), &openFile));
+
+    const FuseNodeContentState stateBefore = m_db->getFuseNodeContentState(openFile.nodeId);
+    QVERIFY(!stateBefore.localContentPath.isEmpty());
+    QVERIFY(QFile::exists(stateBefore.localContentPath));
+
+    ::close(openFile.localFd);
+
+    QCOMPARE(m_driver->applyLocalNodeRemoval(QStringLiteral("/remove-me.txt"), false, false), 0);
+
+    QVERIFY(m_db->getFuseNode(openFile.nodeId).nodeId.isEmpty());
+    QVERIFY(m_db->getFuseNodeContentState(openFile.nodeId).nodeId.isEmpty());
+    QVERIFY(!QFile::exists(stateBefore.localContentPath));
+
+    const QList<FuseJournalEntry> journal = m_db->getAllFuseJournalEntries();
+    QCOMPARE(journal.size(), 2);
+    QCOMPARE(journal.last().operationType, FuseJournalOperationType::Trash);
+    QCOMPARE(journal.last().path, QStringLiteral("/remove-me.txt"));
 }
 
 void TestFuseDriverLifecycle::testTruncateWithoutHandle_StagesDirtyFile() {

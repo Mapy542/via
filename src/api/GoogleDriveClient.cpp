@@ -117,21 +117,53 @@ QNetworkRequest GoogleDriveClient::createRequest(const QUrl& url) {
         return QNetworkRequest(url);
     }
 
+    if (!m_authManager) {
+        return QNetworkRequest(url);
+    }
+
     QNetworkRequest request(url);
-
-    if (m_authManager) {
-        // Proactively refresh the token if it is expiring soon.
-        // This prevents the vast majority of 401 errors that would otherwise
-        // surface as user-visible notifications before a retry can occur.
-        m_authManager->ensureValidToken();
-
-        if (m_authManager->isAuthenticated()) {
-            QString bearer = "Bearer " + m_authManager->accessToken();
-            request.setRawHeader("Authorization", bearer.toUtf8());
-        }
+    const QString accessToken = m_authManager->accessToken();
+    const bool hasUsableToken = m_authManager->isAuthenticated() && !accessToken.isEmpty() &&
+                                !m_authManager->isTokenExpiringSoon(0);
+    if (hasUsableToken) {
+        const QString bearer = "Bearer " + accessToken;
+        request.setRawHeader("Authorization", bearer.toUtf8());
     }
 
     return request;
+}
+
+bool GoogleDriveClient::prepareAuthorizedRequest(const QUrl& url, const QString& operation,
+                                                 QNetworkRequest* requestOut, const QString& fileId,
+                                                 const QString& localPath) {
+    if (!requestOut) {
+        return false;
+    }
+
+    if (!m_authManager) {
+        *requestOut = createRequest(url);
+        return true;
+    }
+
+    const bool refreshSucceeded = m_authManager->ensureValidToken();
+    const QString accessToken = m_authManager->accessToken();
+    const bool hasUsableToken = m_authManager->isAuthenticated() && !accessToken.isEmpty() &&
+                                !m_authManager->isTokenExpiringSoon(0);
+
+    if (!hasUsableToken) {
+        const QString errorMsg =
+            refreshSucceeded ? QStringLiteral("Authentication unavailable: no usable access token")
+                             : QStringLiteral(
+                                   "Authentication unavailable: token refresh failed or "
+                                   "timed out and no usable access token is available");
+        qWarning() << operation << "preflight auth failed:" << errorMsg;
+        emit error(operation, errorMsg);
+        emit errorDetailed(operation, errorMsg, 0, fileId, localPath);
+        return false;
+    }
+
+    *requestOut = createRequest(url);
+    return true;
 }
 
 QString GoogleDriveClient::describeErrorResponse(const QByteArray& responseBody, int httpStatus,
@@ -341,7 +373,10 @@ void GoogleDriveClient::listFiles(const QString& folderId, const QString& pageTo
 
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("listFiles"), &request)) {
+        return;
+    }
     setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
@@ -378,7 +413,10 @@ void GoogleDriveClient::getFile(const QString& fileId) {
                        "starred,shared,webViewLink,webContentLink,iconLink");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getFile"), &request, fileId)) {
+        return;
+    }
     setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
@@ -404,7 +442,11 @@ void GoogleDriveClient::downloadFile(const QString& fileId, const QString& local
     query.addQueryItem("alt", "media");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("downloadFile:") + fileId, &request, fileId,
+                                  localPath)) {
+        return;
+    }
     setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
     tagReply(reply, fileId, localPath);
@@ -451,7 +493,11 @@ void GoogleDriveClient::exportFile(const QString& fileId, const QString& exportM
     query.addQueryItem("mimeType", exportMimeType);
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("exportFile:") + fileId, &request, fileId,
+                                  localPath)) {
+        return;
+    }
     QNetworkReply* reply = m_networkManager->get(request);
     tagReply(reply, fileId, localPath);
 
@@ -583,7 +629,11 @@ void GoogleDriveClient::uploadFile(const QString& localPath, const QString& pare
     file->setParent(multiPart);  // Ensure file is deleted with multiPart
     multiPart->append(filePart);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("uploadFile"), &request, QString(),
+                                  localPath)) {
+        return;
+    }
     request.setHeader(QNetworkRequest::ContentTypeHeader,
                       "multipart/related; boundary=" + multiPart->boundary());
 
@@ -639,7 +689,10 @@ void GoogleDriveClient::updateFile(const QString& fileId, const QString& localPa
         return;
     }
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("updateFile"), &request, fileId, localPath)) {
+        return;
+    }
     request.setHeader(QNetworkRequest::ContentTypeHeader, mimeType.name());
 
     QNetworkReply* reply = m_networkManager->sendCustomRequest(request, "PATCH", file);
@@ -676,7 +729,10 @@ void GoogleDriveClient::moveFile(const QString& fileId, const QString& newParent
     query.addQueryItem("fields", "id,name,mimeType,modifiedTime,parents");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("moveFile"), &request, fileId)) {
+        return;
+    }
     QNetworkReply* reply = m_networkManager->sendCustomRequest(request, "PATCH");
     tagReply(reply, fileId, QString());
 
@@ -708,7 +764,10 @@ void GoogleDriveClient::renameFile(const QString& fileId, const QString& newName
     QJsonObject metadata;
     metadata["name"] = newName;
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("renameFile"), &request, fileId)) {
+        return;
+    }
     setJsonContentType(request);
     QNetworkReply* reply = m_networkManager->sendCustomRequest(
         request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
@@ -745,7 +804,10 @@ void GoogleDriveClient::moveAndRenameFile(const QString& fileId, const QString& 
     QJsonObject metadata;
     metadata["name"] = newName;
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("moveAndRenameFile"), &request, fileId)) {
+        return;
+    }
     setJsonContentType(request);
     QNetworkReply* reply = m_networkManager->sendCustomRequest(
         request, "PATCH", QJsonDocument(metadata).toJson(QJsonDocument::Compact));
@@ -774,7 +836,10 @@ void GoogleDriveClient::moveAndRenameFile(const QString& fileId, const QString& 
 void GoogleDriveClient::deleteFile(const QString& fileId) {
     QUrl url(API_BASE_URL + "/files/" + fileId);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("deleteFile"), &request, fileId)) {
+        return;
+    }
 
     QNetworkReply* reply = m_networkManager->deleteResource(request);
     tagReply(reply, fileId, QString());
@@ -797,7 +862,10 @@ void GoogleDriveClient::trashFile(const QString& fileId) {
     QJsonObject body;
     body["trashed"] = true;
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("trashFile"), &request, fileId)) {
+        return;
+    }
     setJsonContentType(request);
     QNetworkReply* reply = m_networkManager->sendCustomRequest(
         request, "PATCH", QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -821,7 +889,10 @@ void GoogleDriveClient::untrashFile(const QString& fileId) {
     QJsonObject body;
     body["trashed"] = false;
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("untrashFile"), &request, fileId)) {
+        return;
+    }
     setJsonContentType(request);
     QNetworkReply* reply = m_networkManager->sendCustomRequest(
         request, "PATCH", QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -851,7 +922,11 @@ void GoogleDriveClient::createFolder(const QString& name, const QString& parentI
     metadata["mimeType"] = "application/vnd.google-apps.folder";
     metadata["parents"] = QJsonArray({parentId});
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("createFolder"), &request, QString(),
+                                  localPath)) {
+        return;
+    }
     setJsonContentType(request);
     QNetworkReply* reply =
         m_networkManager->post(request, QJsonDocument(metadata).toJson(QJsonDocument::Compact));
@@ -892,7 +967,10 @@ void GoogleDriveClient::listChanges(const QString& startPageToken) {
     query.addQueryItem("pageSize", "100");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("listChanges"), &request)) {
+        return;
+    }
     setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
@@ -929,7 +1007,10 @@ void GoogleDriveClient::listChanges(const QString& startPageToken) {
 void GoogleDriveClient::getStartPageToken() {
     QUrl url(API_BASE_URL + "/changes/startPageToken");
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getStartPageToken"), &request)) {
+        return;
+    }
     setAsyncMetadataRequestTimeout(request);
     QNetworkReply* reply = m_networkManager->get(request);
 
@@ -955,7 +1036,10 @@ void GoogleDriveClient::getAboutInfo() {
     query.addQueryItem("fields", "storageQuota,user");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getAboutInfo"), &request)) {
+        return;
+    }
     QNetworkReply* reply = m_networkManager->get(request);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -996,7 +1080,10 @@ QJsonArray GoogleDriveClient::getParentsByFileId(const QString& fileId) {
     query.addQueryItem("fields", "parents");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getParentByFileId"), &request, fileId)) {
+        return {};
+    }
     QNetworkReply* reply = m_networkManager->get(request);
 
     // CON-02: Blocking call with timeout
@@ -1035,7 +1122,11 @@ DriveFile GoogleDriveClient::getFileMetadataBlocking(const QString& fileId) {
     query.addQueryItem("fields", "id,name,parents,mimeType,modifiedTime,md5Checksum,webViewLink");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getFileMetadataBlocking"), &request,
+                                  fileId)) {
+        return {};
+    }
     QNetworkReply* reply = m_networkManager->get(request);
 
     // CON-02: Blocking call with timeout
@@ -1094,7 +1185,10 @@ QString GoogleDriveClient::getFolderIdByPath(const QString& path) {
         query.addQueryItem("fields", "files(id,name)");
         url.setQuery(query);
 
-        QNetworkRequest request = createRequest(url);
+        QNetworkRequest request;
+        if (!prepareAuthorizedRequest(url, QStringLiteral("getFolderIdByPath"), &request)) {
+            return QString();
+        }
         QNetworkReply* reply = m_networkManager->get(request);
 
         // CON-02: Blocking call with timeout
@@ -1148,7 +1242,10 @@ QDateTime GoogleDriveClient::getRemoteModifiedTime(const QString& fileId) {
     query.addQueryItem("fields", "modifiedTime");
     url.setQuery(query);
 
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getRemoteModifiedTime"), &request, fileId)) {
+        return {};
+    }
     QNetworkReply* reply = m_networkManager->get(request);
 
     // CON-02: Blocking call with timeout
@@ -1187,7 +1284,10 @@ QString GoogleDriveClient::getRootFolderId() {
     QUrlQuery query;
     query.addQueryItem("fields", "id");
     url.setQuery(query);
-    QNetworkRequest request = createRequest(url);
+    QNetworkRequest request;
+    if (!prepareAuthorizedRequest(url, QStringLiteral("getRootFolderId"), &request)) {
+        return QString();
+    }
     QNetworkReply* reply = m_networkManager->get(request);
     // CON-02: Blocking call with timeout
     QEventLoop loop;
@@ -1239,7 +1339,10 @@ QList<DriveFile> GoogleDriveClient::listFilesBlocking(const QString& folderId) {
 
         url.setQuery(query);
 
-        QNetworkRequest request = createRequest(url);
+        QNetworkRequest request;
+        if (!prepareAuthorizedRequest(url, QStringLiteral("listFilesBlocking"), &request)) {
+            break;
+        }
         QNetworkReply* reply = m_networkManager->get(request);
 
         // CON-02: Blocking call with timeout

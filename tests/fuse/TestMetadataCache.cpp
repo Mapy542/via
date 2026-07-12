@@ -67,6 +67,8 @@ class TestMetadataCache : public QObject {
     void testGetOrFetchChildren_ColdEmptyFolderDoesNotMarkChildrenCached();
     void testGetOrFetchChildren_DbChildrenHydrateAndMarkChildrenCached();
     void testGetOrFetchChildren_NestedNativeDocTextModeUsesVisibleExtension();
+    void testGetMetadataByPath_ProvisionalLocalNodeVisible();
+    void testReplaceRemoteChildren_UsesLocalNodeOverridePath();
 
     // Edge cases
     void testGetByPath_UnknownReturnsInvalid();
@@ -254,6 +256,88 @@ void TestMetadataCache::testGetChildren() {
         ids.insert(c.fileId);
     QVERIFY(ids.contains("p1"));
     QVERIFY(ids.contains("p2"));
+}
+
+void TestMetadataCache::testGetMetadataByPath_ProvisionalLocalNodeVisible() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("local-provisional-node");
+    node.path = QStringLiteral("/draft.txt");
+    node.name = QStringLiteral("draft.txt");
+    node.remoteName = node.name;
+    node.isFolder = false;
+    node.size = 42;
+    node.mimeType = QStringLiteral("text/plain");
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseNodeContentState state;
+    state.nodeId = node.nodeId;
+    state.localContentPath = m_tempDir->path() + QStringLiteral("/draft.txt");
+    state.localGeneration = 1;
+    state.remoteAckGeneration = 0;
+    state.size = 42;
+    state.lastLocalWrite = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseNodeContentState(state));
+
+    const FuseFileMetadata metadata = m_cache->getMetadataByPath(QStringLiteral("draft.txt"));
+    QVERIFY(metadata.isValid());
+    QCOMPARE(metadata.path, QStringLiteral("draft.txt"));
+    QCOMPARE(metadata.name, QStringLiteral("draft.txt"));
+    QCOMPARE(metadata.size, qint64(42));
+    QVERIFY(metadata.fileId.isEmpty());
+
+    const QList<FuseFileMetadata> rootChildren = m_cache->getChildren(QStringLiteral("/"));
+    QCOMPARE(rootChildren.size(), 1);
+    QCOMPARE(rootChildren.first().path, QStringLiteral("draft.txt"));
+}
+
+void TestMetadataCache::testReplaceRemoteChildren_UsesLocalNodeOverridePath() {
+    FuseNode node;
+    node.nodeId = QStringLiteral("renamed-local-node");
+    node.remoteFileId = QStringLiteral("remote-1");
+    node.remoteParentId = QStringLiteral("root");
+    node.path = QStringLiteral("/renamed.txt");
+    node.name = QStringLiteral("renamed.txt");
+    node.remoteName = QStringLiteral("old.txt");
+    node.isFolder = false;
+    node.size = 10;
+    node.mimeType = QStringLiteral("text/plain");
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+    QVERIFY(m_db->saveFuseNode(node));
+
+    FuseNodeContentState state;
+    state.nodeId = node.nodeId;
+    state.localContentPath = m_tempDir->path() + QStringLiteral("/renamed.txt");
+    state.localGeneration = 2;
+    state.remoteAckGeneration = 1;
+    state.size = 10;
+    state.lastLocalWrite = QDateTime::currentDateTimeUtc();
+    QVERIFY(m_db->saveFuseNodeContentState(state));
+
+    FuseMutationTransaction mutation;
+    mutation.journalEntry.idempotencyKey = QStringLiteral("pending-local-rename-metadata-cache");
+    mutation.journalEntry.operationType = FuseJournalOperationType::Rename;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.path = QStringLiteral("/old.txt");
+    mutation.journalEntry.destinationPath = QStringLiteral("/renamed.txt");
+    QVERIFY(m_db->commitFuseMutationTransaction(mutation, nullptr));
+
+    const QList<FuseFileMetadata> children = m_cache->replaceRemoteChildren(
+        QStringLiteral("root"),
+        {makeRemoteEntry(QStringLiteral("remote-1"), QStringLiteral("old.txt"),
+                         QStringLiteral("root"), false, 10)});
+
+    QCOMPARE(children.size(), 1);
+    QCOMPARE(children.first().path, QStringLiteral("renamed.txt"));
+    QCOMPARE(children.first().name, QStringLiteral("renamed.txt"));
+
+    const FuseFileMetadata byPath = m_cache->getMetadataByPath(QStringLiteral("renamed.txt"));
+    QVERIFY(byPath.isValid());
+    QCOMPARE(byPath.fileId, QStringLiteral("remote-1"));
 }
 
 // ---------------------------------------------------------------------------

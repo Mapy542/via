@@ -52,7 +52,11 @@ SKIP_HARNESS=false
 VERBOSE=false
 HARNESS_PID=""
 READY_FILE="${MOUNT_POINT}/../.via-fuse-ready"
+CONTROL_FILE="${MOUNT_POINT}/../.via-fuse-control"
+STATE_FILE="${MOUNT_POINT}/../.via-fuse-state"
 RESULTS_DIR="${PROJECT_DIR}/build/rigour-results"
+HARNESS_STATE_ROOT="${RESULTS_DIR}/harness-state"
+AUTHORITATIVE_FUSE="${VIA_ENABLE_AUTHORITATIVE_FUSE:-1}"
 PASS_COUNT=0
 FAIL_COUNT=0
 WARN_COUNT=0
@@ -72,21 +76,118 @@ fail()    { echo -e "\033[1;31m  ✗\033[0m $*"; FAIL_COUNT=$((FAIL_COUNT + 1));
 warn()    { echo -e "\033[1;33m  ⚠\033[0m $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
 pass()    { echo -e "\033[1;32m  ✓\033[0m $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 
-cleanup() {
-    local exit_code=$?
-    info "Cleaning up..."
+wait_for_state() {
+    local expected="$1"
+    local timeout_s="${2:-20}"
+    local elapsed=0
 
-    if [[ "${SKIP_HARNESS}" == false && -n "${HARNESS_PID}" ]] && kill -0 "${HARNESS_PID}" 2>/dev/null; then
-        info "Sending SIGTERM to FUSE harness (PID ${HARNESS_PID})"
-        kill -TERM "${HARNESS_PID}" 2>/dev/null || true
-        for i in $(seq 1 20); do
-            if ! kill -0 "${HARNESS_PID}" 2>/dev/null; then break; fi
-            sleep 0.5
+    while [[ ${elapsed} -lt $((timeout_s * 4)) ]]; do
+        if [[ -f "${STATE_FILE}" ]]; then
+            local current
+            current="$(tr -d '\r\n' < "${STATE_FILE}")"
+            if [[ "${current}" == "${expected}" ]]; then
+                return 0
+            fi
+        fi
+        sleep 0.25
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
+send_control() {
+    local command="$1"
+    printf '%s\n' "${command}" > "${CONTROL_FILE}"
+}
+
+stop_harness() {
+    if [[ -n "${HARNESS_PID}" ]] && kill -0 "${HARNESS_PID}" 2>/dev/null; then
+        if [[ -n "${CONTROL_FILE}" ]]; then
+            send_control shutdown || true
+        fi
+
+        for i in $(seq 1 40); do
+            if ! kill -0 "${HARNESS_PID}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.25
         done
+
+        if kill -0 "${HARNESS_PID}" 2>/dev/null; then
+            info "Sending SIGTERM to FUSE harness (PID ${HARNESS_PID})"
+            kill -TERM "${HARNESS_PID}" 2>/dev/null || true
+            for i in $(seq 1 20); do
+                if ! kill -0 "${HARNESS_PID}" 2>/dev/null; then break; fi
+                sleep 0.5
+            done
+        fi
+
         if kill -0 "${HARNESS_PID}" 2>/dev/null; then
             warn "Harness did not exit gracefully, sending SIGKILL"
             kill -9 "${HARNESS_PID}" 2>/dev/null || true
         fi
+    fi
+
+    HARNESS_PID=""
+}
+
+start_harness() {
+    info "Starting FUSE test harness..."
+    info "  Mount point: ${MOUNT_POINT}"
+
+    mkdir -p "${MOUNT_POINT}"
+    mkdir -p "${HARNESS_STATE_ROOT}/data" "${HARNESS_STATE_ROOT}/cache" "${HARNESS_STATE_ROOT}/config"
+    export VIA_MOUNT_POINT="${MOUNT_POINT}"
+    export VIA_CONTROL_FILE="${CONTROL_FILE}"
+    export VIA_STATE_FILE="${STATE_FILE}"
+    export VIA_ENABLE_AUTHORITATIVE_FUSE="${AUTHORITATIVE_FUSE}"
+    export XDG_DATA_HOME="${HARNESS_STATE_ROOT}/data"
+    export XDG_CACHE_HOME="${HARNESS_STATE_ROOT}/cache"
+    export XDG_CONFIG_HOME="${HARNESS_STATE_ROOT}/config"
+    export QT_QPA_PLATFORM=offscreen
+
+    rm -f "${READY_FILE}" "${CONTROL_FILE}" "${STATE_FILE}"
+
+    "${HARNESS_BIN}" &
+    HARNESS_PID=$!
+    info "  Harness PID: ${HARNESS_PID}"
+
+    info "Waiting for FUSE mount to become ready..."
+    TIMEOUT=60
+    ELAPSED=0
+    while [[ ${ELAPSED} -lt ${TIMEOUT} ]]; do
+        if [[ -f "${READY_FILE}" ]] && mountpoint -q "${MOUNT_POINT}" 2>/dev/null; then
+            success "FUSE filesystem mounted and ready (${ELAPSED}s)"
+            break
+        fi
+        if ! kill -0 "${HARNESS_PID}" 2>/dev/null; then
+            echo "ERROR: FUSE harness exited prematurely" >&2
+            wait "${HARNESS_PID}" || true
+            HARNESS_PID=""
+            exit 1
+        fi
+        sleep 1
+        ELAPSED=$((ELAPSED + 1))
+    done
+
+    if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+        echo "ERROR: Timed out waiting for FUSE mount (${TIMEOUT}s)" >&2
+        exit 1
+    fi
+
+    if ! wait_for_state running 10; then
+        echo "ERROR: Timed out waiting for harness running state" >&2
+        exit 1
+    fi
+}
+
+cleanup() {
+    local exit_code=$?
+    info "Cleaning up..."
+
+    if [[ "${SKIP_HARNESS}" == false ]]; then
+        stop_harness
     fi
 
     if [[ "${SKIP_HARNESS}" == false ]] && mountpoint -q "${MOUNT_POINT}" 2>/dev/null; then
@@ -95,7 +196,7 @@ cleanup() {
         fusermount  -u -z "${MOUNT_POINT}" 2>/dev/null || true
     fi
 
-    rm -f "${READY_FILE}" 2>/dev/null || true
+    rm -f "${READY_FILE}" "${CONTROL_FILE}" "${STATE_FILE}" 2>/dev/null || true
 
     if [[ ${exit_code} -ne 0 ]]; then
         echo ""
@@ -114,6 +215,7 @@ while [[ $# -gt 0 ]]; do
         --harness)     HARNESS_BIN="$2"; shift 2 ;;
         --iterations)  ITERATIONS="$2";  shift 2 ;;
         --skip-harness) SKIP_HARNESS=true; shift ;;
+        --disable-authoritative-fuse) AUTHORITATIVE_FUSE=0; shift ;;
         --verbose)     VERBOSE=true; shift ;;
         --pjdfstest)   RUN_PJDFSTEST=true; shift ;;
         --skip-pjdfstest) RUN_PJDFSTEST=false; shift ;;
@@ -156,41 +258,7 @@ mkdir -p "${RESULTS_DIR}"
 # ── Step 1: Start FUSE test harness (unless --skip-harness) ─────────────────
 
 if [[ "${SKIP_HARNESS}" == false ]]; then
-    info "Starting FUSE test harness..."
-    info "  Mount point: ${MOUNT_POINT}"
-
-    mkdir -p "${MOUNT_POINT}"
-    export VIA_MOUNT_POINT="${MOUNT_POINT}"
-    export QT_QPA_PLATFORM=offscreen
-
-    rm -f "${READY_FILE}"
-
-    "${HARNESS_BIN}" &
-    HARNESS_PID=$!
-    info "  Harness PID: ${HARNESS_PID}"
-
-    info "Waiting for FUSE mount to become ready..."
-    TIMEOUT=60
-    ELAPSED=0
-    while [[ ${ELAPSED} -lt ${TIMEOUT} ]]; do
-        if [[ -f "${READY_FILE}" ]] && mountpoint -q "${MOUNT_POINT}" 2>/dev/null; then
-            success "FUSE filesystem mounted and ready (${ELAPSED}s)"
-            break
-        fi
-        if ! kill -0 "${HARNESS_PID}" 2>/dev/null; then
-            echo "ERROR: FUSE harness exited prematurely" >&2
-            wait "${HARNESS_PID}" || true
-            HARNESS_PID=""
-            exit 1
-        fi
-        sleep 1
-        ELAPSED=$((ELAPSED + 1))
-    done
-
-    if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
-        echo "ERROR: Timed out waiting for FUSE mount (${TIMEOUT}s)" >&2
-        exit 1
-    fi
+    start_harness
 else
     info "Skipping harness startup (--skip-harness)"
     if ! [[ -d "${MOUNT_POINT}" ]]; then
@@ -504,6 +572,105 @@ if mkdir -p "${WRITE_TEST_DIR}" 2>/dev/null; then
     rmdir "${WRITE_TEST_DIR}" 2>/dev/null || true
 else
     warn "Cannot create test directory (mount may be read-only)"
+fi
+
+# ── Test 12: Offline local-first mutations with reconnect ───────────────────
+
+info "Test 12: Offline local-first mutations with reconnect"
+
+if [[ "${SKIP_HARNESS}" == true ]]; then
+    warn "Skipping offline/reconnect phase with --skip-harness (no control channel)"
+else
+    send_control pause
+    if wait_for_state paused 15; then
+        OFFLINE_DIR="${MOUNT_POINT}/.offline-phase-$$"
+        OFFLINE_FILE="${OFFLINE_DIR}/draft.txt"
+        OFFLINE_RENAMED="${OFFLINE_DIR}/renamed.txt"
+        OFFLINE_DELETE="${OFFLINE_DIR}/delete-me.txt"
+        OFFLINE_PAYLOAD="offline phase payload $(date +%s) $$"
+
+        if mkdir -p "${OFFLINE_DIR}" 2>/dev/null && \
+           printf '%s\n' "${OFFLINE_PAYLOAD}" > "${OFFLINE_FILE}" 2>/dev/null && \
+           stat "${OFFLINE_FILE}" >/dev/null 2>&1 && \
+           [[ "$(cat "${OFFLINE_FILE}" 2>/dev/null || true)" == "${OFFLINE_PAYLOAD}" ]] && \
+           printf 'delete me\n' > "${OFFLINE_DELETE}" 2>/dev/null && \
+           mv "${OFFLINE_FILE}" "${OFFLINE_RENAMED}" 2>/dev/null && \
+           rm -f "${OFFLINE_DELETE}" 2>/dev/null; then
+            pass "Offline create/write/stat/rename/delete succeeded while paused"
+        else
+            fail "Offline mutation phase failed while paused"
+        fi
+
+        send_control resume
+        if wait_for_state running 15; then
+            sleep 2
+            if [[ -f "${OFFLINE_RENAMED}" && ! -e "${OFFLINE_DELETE}" ]]; then
+                READBACK="$(cat "${OFFLINE_RENAMED}" 2>/dev/null || true)"
+                if [[ "${READBACK}" == "${OFFLINE_PAYLOAD}" ]]; then
+                    pass "Reconnect preserved offline local state after resume"
+                else
+                    fail "Reconnect read-back mismatch after offline rename"
+                fi
+            else
+                fail "Reconnect local state missing after resume"
+            fi
+            rm -f "${OFFLINE_RENAMED}" 2>/dev/null || true
+            rmdir "${OFFLINE_DIR}" 2>/dev/null || true
+        else
+            fail "Harness did not resume after offline mutation phase"
+        fi
+    else
+        fail "Harness did not enter paused state for offline phase"
+    fi
+fi
+
+# ── Test 13: Restart recovery of paused local state ─────────────────────────
+
+info "Test 13: Restart recovery of authoritative local state"
+
+if [[ "${SKIP_HARNESS}" == true ]]; then
+    warn "Skipping restart recovery with --skip-harness (requires harness restart)"
+else
+    send_control pause
+    if wait_for_state paused 15; then
+        RECOVERY_DIR="${MOUNT_POINT}/.recovery-phase-$$"
+        RECOVERY_FILE="${RECOVERY_DIR}/resume-after-restart.txt"
+        RECOVERY_PAYLOAD="restart recovery payload $(date +%s) $$"
+
+        if mkdir -p "${RECOVERY_DIR}" 2>/dev/null && \
+           printf '%s\n' "${RECOVERY_PAYLOAD}" > "${RECOVERY_FILE}" 2>/dev/null; then
+            pass "Prepared offline local state before harness restart"
+        else
+            fail "Failed to prepare restart recovery state"
+        fi
+
+        stop_harness
+        if mountpoint -q "${MOUNT_POINT}" 2>/dev/null; then
+            fail "Mount still active after stopping harness for restart recovery"
+        fi
+
+        start_harness
+        if [[ -f "${RECOVERY_FILE}" ]]; then
+            READBACK="$(cat "${RECOVERY_FILE}" 2>/dev/null || true)"
+            if [[ "${READBACK}" == "${RECOVERY_PAYLOAD}" ]]; then
+                pass "Paused local state survived harness restart"
+            else
+                fail "Restart recovery payload mismatch"
+            fi
+        else
+            fail "Recovery file missing after harness restart"
+        fi
+
+        send_control resume
+        if ! wait_for_state running 15; then
+            fail "Harness did not resume after restart recovery"
+        fi
+
+        rm -f "${RECOVERY_FILE}" 2>/dev/null || true
+        rmdir "${RECOVERY_DIR}" 2>/dev/null || true
+    else
+        fail "Harness did not enter paused state for restart recovery"
+    fi
 fi
 
 # ==============================================================================

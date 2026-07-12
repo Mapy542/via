@@ -50,9 +50,9 @@ struct FuseFileMetadata {
 
     /**
      * @brief Check if this metadata entry is valid
-     * @return true if the entry has required fields (fileId and path)
+     * @return true if the entry has the fields needed for a visible filesystem row
      */
-    bool isValid() const { return !fileId.isEmpty() && !path.isEmpty(); }
+    bool isValid() const { return !path.isEmpty() && (!fileId.isEmpty() || !name.isEmpty()); }
 
     /**
      * @brief Check if the cached metadata is stale

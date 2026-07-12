@@ -138,6 +138,142 @@ struct FuseDirtyFile {
 };
 
 /**
+ * @struct FuseNode
+ * @brief Authoritative local FUSE node persisted independently of remote IDs
+ *
+ * Maps to fuse_nodes table schema.
+ */
+struct FuseNode {
+    QString nodeId;                 ///< Stable local node identity
+    QString parentNodeId;           ///< Parent local node identity (empty for root children)
+    QString remoteFileId;           ///< Google Drive file ID once replay is acknowledged
+    QString remoteParentId;         ///< Remote parent ID when known
+    QString path;                   ///< Visible logical path in FUSE filesystem
+    QString name;                   ///< Visible basename
+    QString remoteName;             ///< Remote-visible name when it diverges locally
+    QString mimeType;               ///< Current local MIME type when known
+    QString remoteMimeType;         ///< Remote Drive MIME type when known
+    QString webViewLink;            ///< Remote web link for native docs or shortcuts
+    QString nativeDocModeOverride;  ///< Per-node native-doc representation override
+    bool isFolder = false;          ///< Whether the node represents a directory
+    bool isPendingCreate = false;   ///< Whether the node still needs remote creation replay
+    bool isTrashed = false;         ///< Whether the node currently lives in local trash state
+    qint64 size = 0;                ///< Last authoritative local size
+    QDateTime createdTime;          ///< Local creation timestamp
+    QDateTime modifiedTime;         ///< Last local mutation timestamp
+    QDateTime lastAccessed;         ///< Last access time for read-model and LRU decisions
+    QDateTime lastSyncedAt;         ///< Last successful remote reconciliation time
+};
+
+/**
+ * @struct FuseNodeContentState
+ * @brief Authoritative local content state for a persisted FUSE node
+ *
+ * Maps to fuse_node_contents table schema.
+ */
+struct FuseNodeContentState {
+    QString nodeId;                   ///< Stable local node identity
+    QString localContentPath;         ///< Absolute path to authoritative local content
+    quint64 localGeneration = 0;      ///< Latest committed local content generation
+    quint64 remoteAckGeneration = 0;  ///< Latest local generation acknowledged remotely
+    qint64 size = 0;                  ///< Last committed content size in bytes
+    QDateTime lastLocalWrite;         ///< Last successful local write timestamp
+};
+
+/**
+ * @enum FuseJournalOperationType
+ * @brief Replayable local FUSE operation categories persisted in the journal
+ */
+enum class FuseJournalOperationType {
+    CreateFile = 0,
+    CreateDirectory,
+    WriteGeneration,
+    Truncate,
+    Rename,
+    Move,
+    Trash,
+    Delete,
+    Restore,
+    UpdateNativeDocMetadata,
+    UpdateShortcutMetadata,
+};
+
+/**
+ * @enum FuseJournalEntryStatus
+ * @brief Durable lifecycle state for a replayable journal entry
+ */
+enum class FuseJournalEntryStatus {
+    Pending = 0,
+    InFlight,
+    Completed,
+    Failed,
+    BlockedConflict,
+};
+
+/**
+ * @struct FuseJournalEntry
+ * @brief Durable local mutation intent recorded before remote replay
+ *
+ * Maps to fuse_journal table schema.
+ */
+struct FuseJournalEntry {
+    qint64 entryId = 0;      ///< Monotonic journal sequence number
+    QString idempotencyKey;  ///< Stable replay token for remote dedupe
+    FuseJournalOperationType operationType = FuseJournalOperationType::CreateFile;
+    FuseJournalEntryStatus status = FuseJournalEntryStatus::Pending;
+    QString nodeId;                   ///< Local node identity being mutated
+    QString parentNodeId;             ///< Source parent node identity when relevant
+    QString destinationParentNodeId;  ///< Destination parent node identity when relevant
+    QString path;                     ///< Source visible path when relevant
+    QString visibleName;              ///< Source visible basename
+    QString destinationPath;          ///< Destination visible path when relevant
+    QString destinationVisibleName;   ///< Destination visible basename when relevant
+    QString remoteFileId;             ///< Remote file ID snapshot when known
+    QString remoteParentId;           ///< Remote parent ID snapshot when known
+    quint64 localGeneration = 0;      ///< Local content generation tied to this intent
+    qint64 dependencyEntryId = 0;     ///< Earlier journal entry that must replay first
+    QString payloadJson;              ///< Extensible structured operation payload
+    QString lastError;                ///< Last replay failure message
+    int retryCount = 0;               ///< Retry attempts consumed so far
+    QDateTime createdAt;              ///< When the journal entry was first appended
+    QDateTime updatedAt;              ///< Last status transition time
+    QDateTime acknowledgedAt;         ///< When remote replay was confirmed
+};
+
+/**
+ * @struct FuseOperationAck
+ * @brief Remote acknowledgement details recorded for replay bookkeeping
+ *
+ * Maps to fuse_operation_acks table schema.
+ */
+struct FuseOperationAck {
+    qint64 ackId = 0;                    ///< Monotonic acknowledgement row ID
+    qint64 journalEntryId = 0;           ///< Associated local journal entry ID
+    QString idempotencyKey;              ///< Stable replay token acknowledged remotely
+    QString nodeId;                      ///< Local node identity associated with the ack
+    QString remoteFileId;                ///< Authoritative remote file ID when acknowledged
+    QString remoteParentId;              ///< Authoritative remote parent ID when acknowledged
+    quint64 acknowledgedGeneration = 0;  ///< Highest local generation acknowledged remotely
+    QString remoteChangeToken;           ///< Remote change-token snapshot when available
+    QString payloadJson;                 ///< Extensible remote response payload
+    QString lastError;                   ///< Replay failure message associated with the ack
+    QDateTime acknowledgedAt;            ///< When the remote replay was acknowledged
+    QDateTime appliedAt;                 ///< When local state consumed the acknowledgement
+};
+
+/**
+ * @struct FuseMutationTransaction
+ * @brief Crash-safe local mutation batch persisted atomically with a journal entry
+ */
+struct FuseMutationTransaction {
+    QList<FuseNode> nodesToUpsert;                      ///< Authoritative nodes to save
+    QList<QString> nodeIdsToDelete;                     ///< Node IDs to delete from local state
+    QList<FuseNodeContentState> contentStatesToUpsert;  ///< Content-state rows to save
+    QList<QString> contentStateNodeIdsToDelete;         ///< Content-state node IDs to delete
+    FuseJournalEntry journalEntry;                      ///< Replay intent appended in the same tx
+};
+
+/**
  * @class SyncDatabase
  * @brief SQLite database for file sync tracking
  *
@@ -511,6 +647,151 @@ class SyncDatabase : public QObject {
      */
     int updateFuseChildrenPaths(const QString& parentFileId, const QString& oldParentPath,
                                 const QString& newParentPath);
+
+    // FUSE authoritative offline node state
+
+    /**
+     * @brief Get an authoritative local FUSE node by local node ID
+     * @param nodeId Stable local node identity
+     * @return FuseNode structure or empty if not found
+     */
+    FuseNode getFuseNode(const QString& nodeId) const;
+
+    /**
+     * @brief Get an authoritative local FUSE node by visible FUSE path
+     * @param path Visible logical FUSE path
+     * @return FuseNode structure or empty if not found
+     */
+    FuseNode getFuseNodeByPath(const QString& path) const;
+
+    /**
+     * @brief Save or update an authoritative local FUSE node
+     * @param node Persisted local node state
+     * @return true if save successful
+     */
+    bool saveFuseNode(const FuseNode& node);
+
+    /**
+     * @brief Get immediate children of an authoritative local FUSE node
+     * @param parentNodeId Stable local parent node identity
+     * @return List of child nodes
+     */
+    QList<FuseNode> getFuseChildNodes(const QString& parentNodeId) const;
+
+    /**
+     * @brief Get all authoritative local FUSE nodes
+     * @return List of all local nodes sorted by path
+     */
+    QList<FuseNode> getAllFuseNodes() const;
+
+    /**
+     * @brief Delete an authoritative local FUSE node by local node ID
+     * @param nodeId Stable local node identity
+     * @return true if deletion succeeded
+     */
+    bool deleteFuseNode(const QString& nodeId);
+
+    /**
+     * @brief Get persisted authoritative content state for a local FUSE node
+     * @param nodeId Stable local node identity
+     * @return FuseNodeContentState structure or empty if not found
+     */
+    FuseNodeContentState getFuseNodeContentState(const QString& nodeId) const;
+
+    /**
+     * @brief Save or update authoritative local content state for a FUSE node
+     * @param state Persisted content state
+     * @return true if save successful
+     */
+    bool saveFuseNodeContentState(const FuseNodeContentState& state);
+
+    /**
+     * @brief Get all persisted authoritative content-state rows for mount recovery
+     * @return List of content-state rows sorted by node ID
+     */
+    QList<FuseNodeContentState> getAllFuseNodeContentStates() const;
+
+    /**
+     * @brief Delete authoritative content state for a local FUSE node
+     * @param nodeId Stable local node identity
+     * @return true if deletion succeeded
+     */
+    bool deleteFuseNodeContentState(const QString& nodeId);
+
+    /**
+     * @brief Append a new offline FUSE journal entry
+     * @param entry Durable local mutation intent
+     * @return Monotonic entry ID on success, or 0 on failure
+     */
+    qint64 appendFuseJournalEntry(const FuseJournalEntry& entry);
+
+    /**
+     * @brief Get all offline FUSE journal entries in append order
+     * @return List of journal entries ordered by entry ID
+     */
+    QList<FuseJournalEntry> getAllFuseJournalEntries() const;
+
+    /**
+     * @brief Get pending offline FUSE journal entries in replay order
+     * @return List of pending journal entries ordered by entry ID
+     */
+    QList<FuseJournalEntry> getPendingFuseJournalEntries() const;
+
+    /**
+     * @brief Update replay status for a persisted journal entry
+     * @param entryId Journal entry ID
+     * @param status New status value
+     * @param lastError Optional replay failure message
+     * @param retryCount Retry count to persist; pass negative to leave unchanged
+     * @param acknowledgedAt Optional acknowledgement timestamp
+     * @return true if update successful
+     */
+    bool updateFuseJournalEntryStatus(qint64 entryId, FuseJournalEntryStatus status,
+                                      const QString& lastError = QString(), int retryCount = -1,
+                                      const QDateTime& acknowledgedAt = QDateTime());
+
+    /**
+     * @brief Persist or update remote replay acknowledgement details
+     * @param ack Replay acknowledgement row
+     * @return true if save successful
+     */
+    bool saveFuseOperationAck(const FuseOperationAck& ack);
+
+    /**
+     * @brief Get remote replay acknowledgement details for a journal entry
+     * @param journalEntryId Local journal entry ID
+     * @return Acknowledgement row or empty if not found
+     */
+    FuseOperationAck getFuseOperationAck(qint64 journalEntryId) const;
+
+    /**
+     * @brief Get all remote replay acknowledgements in append order
+     * @return List of acknowledgement rows ordered by ack ID
+     */
+    QList<FuseOperationAck> getAllFuseOperationAcks() const;
+
+    /**
+     * @brief Get the oldest unapplied replay acknowledgement for a remote file ID
+     * @param remoteFileId Remote file ID to match
+     * @return Acknowledgement row or empty if no unapplied ack exists
+     */
+    FuseOperationAck getPendingFuseOperationAckByRemoteFileId(const QString& remoteFileId) const;
+
+    /**
+     * @brief Mark a replay acknowledgement as consumed by metadata reconciliation
+     * @param ackId Acknowledgement row ID
+     * @return true if the update succeeded
+     */
+    bool markFuseOperationAckApplied(qint64 ackId);
+
+    /**
+     * @brief Atomically persist local node-tree changes with a replay journal entry
+     * @param mutation Crash-safe local mutation batch
+     * @param journalEntryIdOut Optional returned journal entry ID
+     * @return true if the transaction committed successfully
+     */
+    bool commitFuseMutationTransaction(const FuseMutationTransaction& mutation,
+                                       qint64* journalEntryIdOut = nullptr);
 
     // FUSE dirty file tracking
 

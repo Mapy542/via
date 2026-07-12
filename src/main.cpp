@@ -168,12 +168,30 @@ int handleNativeDocShortcutLaunch(const QStringList& arguments) {
     return openedCount > 0 ? 0 : 1;
 }
 
-void startFuseComponent(FuseDriver* fuseDriver, const QString& syncFolder) {
+bool authoritativeFuseRolloutEnabled() {
+    const QString envValue = qEnvironmentVariable("VIA_ENABLE_AUTHORITATIVE_FUSE").trimmed();
+    if (!envValue.isEmpty()) {
+        const QString normalized = envValue.toLower();
+        return normalized != QStringLiteral("0") && normalized != QStringLiteral("false") &&
+               normalized != QStringLiteral("off") && normalized != QStringLiteral("no");
+    }
+
+    QSettings settings;
+    return settings.value("advanced/enableAuthoritativeFuse", true).toBool();
+}
+
+void startFuseComponent(FuseDriver* fuseDriver, const QString& syncFolder,
+                        bool authoritativeFuseEnabled) {
     if (!fuseDriver) {
         return;
     }
 
     if (fuseDriver->isMounted()) {
+        return;
+    }
+
+    if (!authoritativeFuseEnabled) {
+        qInfo() << "Authoritative FUSE rollout gate disabled; skipping FUSE mount";
         return;
     }
 
@@ -353,9 +371,13 @@ int main(int argc, char* argv[]) {
     }
     const bool fuseEnabled = (syncSystemMode == "fuse-only" || syncSystemMode == "both");
     const bool mirrorEnabled = (syncSystemMode == "mirror-only" || syncSystemMode == "both");
+    const bool authoritativeFuseEnabled = authoritativeFuseRolloutEnabled();
     const bool syncControlsEnabled = mirrorEnabled || fuseEnabled;
     qInfo() << "Sync system mode:" << syncSystemMode << "(mirror:" << mirrorEnabled
             << "fuse:" << fuseEnabled << ")";
+    if (fuseEnabled && !authoritativeFuseEnabled) {
+        qWarning() << "Authoritative FUSE rollout gate disabled via settings or environment";
+    }
 
     const QString fuseMountPoint =
         settings.value("advanced/fuseMountPoint", QDir::homePath() + "/GoogleDriveFuse").toString();
@@ -789,20 +811,34 @@ int main(int argc, char* argv[]) {
             qInfo() << "Resume handler: refreshing auth and restarting components";
             statusCoordinator.updateMirrorStatus("Recovering from sleep...");
 
-            // 1. Force a token refresh — connections are likely stale and the
-            //    access token may have expired while the machine was asleep.
-            if (!authManager.refreshToken().isEmpty()) {
-                wakeRefreshNotificationGate.beginWakeRefreshAttempt();
-                authManager.refreshTokens();
-            }
+            const auto hasUsableAccessToken = [&authManager]() {
+                return authManager.isAuthenticated() && !authManager.accessToken().isEmpty() &&
+                       !authManager.isTokenExpiringSoon(0);
+            };
 
-            // 2. After the refresh completes (or fails), restart workers that
-            //    may be stuck on dead connections.
-            auto* resumeConn = new QMetaObject::Connection;
+            struct ResumeRestartState {
+                QMetaObject::Connection refreshedConnection;
+                QMetaObject::Connection refreshErrorConnection;
+                bool restartIssued = false;
+            };
+
+            auto restartState = std::make_shared<ResumeRestartState>();
+
+            // After the refresh completes (or fails), restart workers that may
+            // be stuck on dead connections.
             auto doRestart =
-                [&, resumeConn]() {
-                    QObject::disconnect(*resumeConn);
-                    delete resumeConn;
+                [&, restartState]() {
+                    if (restartState->restartIssued) {
+                        return;
+                    }
+                    restartState->restartIssued = true;
+
+                    if (restartState->refreshedConnection) {
+                        QObject::disconnect(restartState->refreshedConnection);
+                    }
+                    if (restartState->refreshErrorConnection) {
+                        QObject::disconnect(restartState->refreshErrorConnection);
+                    }
 
                     if (!authManager.isAuthenticated()) {
                         qWarning()
@@ -823,34 +859,69 @@ int main(int argc, char* argv[]) {
                         fuseDriver.refreshMetadata();
                     }
 
-                    statusCoordinator.updateMirrorStatus("Syncing...");
-                    qInfo() << "Resume handler: recovery complete";
+                    qInfo() << "Resume handler: recovery restart scheduled";
                 };
 
-            // Connect to both success and failure so we always resume.
-            *resumeConn = QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed,
-                                           &authManager, doRestart, Qt::SingleShotConnection);
-            // Also handle the case where refresh fails — still restart workers
-            // so cached operations can proceed.
-            QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshError, &authManager,
-                             doRestart, Qt::SingleShotConnection);
-            // If there's no refresh token, trigger restart immediately.
+            auto handleRefreshFailure = [&, restartState, hasUsableAccessToken]() {
+                if (restartState->restartIssued) {
+                    return;
+                }
+
+                if (restartState->refreshedConnection) {
+                    QObject::disconnect(restartState->refreshedConnection);
+                }
+                if (restartState->refreshErrorConnection) {
+                    QObject::disconnect(restartState->refreshErrorConnection);
+                }
+
+                if (hasUsableAccessToken()) {
+                    qInfo() << "Resume handler: refresh failed but existing token is still usable";
+                    doRestart();
+                    return;
+                }
+
+                qWarning() << "Resume handler: token refresh failed and no usable access token"
+                              "is available; deferring restart";
+                statusCoordinator.updateMirrorStatus("Authentication unavailable");
+            };
+
             if (authManager.refreshToken().isEmpty()) {
-                doRestart();
+                if (hasUsableAccessToken()) {
+                    doRestart();
+                } else {
+                    qWarning() << "Resume handler: no refresh token and no usable access token;"
+                                  "deferring restart";
+                    statusCoordinator.updateMirrorStatus("Authentication unavailable");
+                }
+                return;
             }
+
+            // Connect to both success and failure so we always resume.
+            restartState->refreshedConnection =
+                QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &authManager,
+                                 doRestart, Qt::SingleShotConnection);
+            restartState->refreshErrorConnection =
+                QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshError, &authManager,
+                                 handleRefreshFailure, Qt::SingleShotConnection);
+
+            // Force a token refresh after the wake handlers are armed.
+            // Connections are likely stale and the access token may have
+            // expired while the machine was asleep.
+            wakeRefreshNotificationGate.beginWakeRefreshAttempt();
+            authManager.refreshTokens();
         });
 
     // Connect signals for application-wide coordination
 
     // When authenticated, start sync components based on configured mode
     QObject::connect(&authManager, &GoogleAuthManager::authenticated, &app,
-                     [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled, &syncFolder,
-                      queueMirrorStartupSync]() {
+                     [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled,
+                      authoritativeFuseEnabled, &syncFolder, queueMirrorStartupSync]() {
                          Q_UNUSED(mirrorEnabled);
                          Q_UNUSED(pauseController);
                          queueMirrorStartupSync();
                          if (fuseEnabled) {
-                             startFuseComponent(&fuseDriver, syncFolder);
+                             startFuseComponent(&fuseDriver, syncFolder, authoritativeFuseEnabled);
                              if (pauseController.isEffectivelyPaused()) {
                                  fuseDriver.pauseSync();
                              }
@@ -1228,6 +1299,7 @@ int main(int argc, char* argv[]) {
 
     bool refreshInFlight = false;
     qint64 lastRefreshAttemptMs = 0;
+    bool wakeRecoveryDeferredRestartPending = false;
     constexpr qint64 AUTH_REFRESH_COOLDOWN_MS = 10000;
 
     const auto handleDriveAuthenticationFailure =
@@ -1260,20 +1332,51 @@ int main(int argc, char* argv[]) {
                          handleDriveAuthenticationFailure);
     }
 
-    QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &app,
-                     [&refreshInFlight, &wakeRefreshNotificationGate]() {
-                         refreshInFlight = false;
-                         wakeRefreshNotificationGate.markTokenRefreshed();
-                     });
+    QObject::connect(
+        &authManager, &GoogleAuthManager::tokenRefreshed, &app,
+        [&refreshInFlight, &wakeRefreshNotificationGate, &wakeRecoveryDeferredRestartPending,
+         &fuseDriver, &statusCoordinator, &pauseController, mirrorEnabled, fuseEnabled,
+         queueMirrorRestartAfterWake, &authManager]() {
+            refreshInFlight = false;
+            wakeRefreshNotificationGate.markTokenRefreshed();
+
+            if (!wakeRecoveryDeferredRestartPending) {
+                return;
+            }
+
+            wakeRecoveryDeferredRestartPending = false;
+            qInfo() << "Resume handler: token refreshed after deferred wake recovery;"
+                       "restarting components";
+            statusCoordinator.updateMirrorStatus("Recovering from sleep...");
+
+            if (!authManager.isAuthenticated() || authManager.accessToken().isEmpty() ||
+                authManager.isTokenExpiringSoon(0)) {
+                qWarning() << "Resume handler: token refresh completed without a usable"
+                              "access token; keeping restart deferred";
+                statusCoordinator.updateMirrorStatus("Authentication unavailable");
+                return;
+            }
+
+            if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
+                queueMirrorRestartAfterWake();
+            }
+            if (fuseEnabled && fuseDriver.isMounted() && !pauseController.isEffectivelyPaused()) {
+                fuseDriver.refreshMetadata();
+            }
+        });
 
     QObject::connect(
         &authManager, &GoogleAuthManager::tokenRefreshError, &app,
-        [&refreshInFlight, &notificationManager, &mainWindow,
-         &wakeRefreshNotificationGate](const QString& error) {
+        [&refreshInFlight, &notificationManager, &mainWindow, &wakeRefreshNotificationGate,
+         &wakeRecoveryDeferredRestartPending, &authManager](const QString& error) {
             refreshInFlight = false;
 
-            const bool wakeAuthExpired = wakeRefreshNotificationGate.sawWakeAuthExpired();
             if (wakeRefreshNotificationGate.consumeTokenRefreshWarningSuppression()) {
+                const bool wakeAuthExpired = wakeRefreshNotificationGate.sawWakeAuthExpired();
+                const bool hasUsableAccessToken = authManager.isAuthenticated() &&
+                                                  !authManager.accessToken().isEmpty() &&
+                                                  !authManager.isTokenExpiringSoon(0);
+                wakeRecoveryDeferredRestartPending = !wakeAuthExpired && !hasUsableAccessToken;
                 qWarning() << "Resume handler: suppressed wake token refresh warning"
                            << (wakeAuthExpired ? "after auth expiration:" : ":") << error;
                 return;
@@ -1284,10 +1387,11 @@ int main(int argc, char* argv[]) {
         });
 
     QObject::connect(&authManager, &GoogleAuthManager::authExpired, &app,
-                     [&refreshInFlight, &mirrorSyncRuntime, &trayManager, &mainWindow,
-                      &notificationManager, &statusCoordinator, &fuseDriver,
-                      &wakeRefreshNotificationGate, &app](const QString& reason) {
+                     [&refreshInFlight, &wakeRecoveryDeferredRestartPending, &mirrorSyncRuntime,
+                      &trayManager, &mainWindow, &notificationManager, &statusCoordinator,
+                      &fuseDriver, &wakeRefreshNotificationGate, &app](const QString& reason) {
                          refreshInFlight = false;
+                         wakeRecoveryDeferredRestartPending = false;
                          wakeRefreshNotificationGate.markAuthExpired();
                          mirrorSyncRuntime.cancelAndStop();
                          stopFuseComponent(&fuseDriver);
@@ -1324,22 +1428,23 @@ int main(int argc, char* argv[]) {
             qInfo() << "Starting sync components immediately";
 
             // Use QTimer::singleShot to ensure event loop is running
-            QTimer::singleShot(
-                100, &app,
-                [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled, &syncFolder,
-                 &trayManager, &statusCoordinator, queueMirrorStartupSync]() {
-                    Q_UNUSED(mirrorEnabled);
-                    Q_UNUSED(pauseController);
-                    queueMirrorStartupSync();
-                    if (fuseEnabled) {
-                        startFuseComponent(&fuseDriver, syncFolder);
-                        if (pauseController.isEffectivelyPaused()) {
-                            fuseDriver.pauseSync();
-                        }
-                    }
-                    statusCoordinator.updateAuthState(true);
-                    trayManager.updateAuthState(true);
-                });
+            QTimer::singleShot(100, &app,
+                               [&fuseDriver, &pauseController, fuseEnabled, mirrorEnabled,
+                                authoritativeFuseEnabled, &syncFolder, &trayManager,
+                                &statusCoordinator, queueMirrorStartupSync]() {
+                                   Q_UNUSED(mirrorEnabled);
+                                   Q_UNUSED(pauseController);
+                                   queueMirrorStartupSync();
+                                   if (fuseEnabled) {
+                                       startFuseComponent(&fuseDriver, syncFolder,
+                                                          authoritativeFuseEnabled);
+                                       if (pauseController.isEffectivelyPaused()) {
+                                           fuseDriver.pauseSync();
+                                       }
+                                   }
+                                   statusCoordinator.updateAuthState(true);
+                                   trayManager.updateAuthState(true);
+                               });
         }
     }
 

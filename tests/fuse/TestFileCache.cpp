@@ -239,6 +239,7 @@ class TestFileCache : public QObject {
 
     // Pending-store (dirty file migration)
     void testMoveToDirtyStore_MovesFile();
+    void testMoveToDirtyStore_UsesExplicitSourcePathWithoutCacheEntry();
     void testGetContentPath_DirtyFile_ReturnsPendingPath();
     void testGetContentPath_CleanFile_ReturnsCachePath();
     void testClearDirty_RemovesPendingFile();
@@ -414,7 +415,8 @@ void TestFileCache::testGetDirtyFiles_ReturnsAll() {
     QCOMPARE(dirty.size(), 2);
 
     QSet<QString> ids;
-    for (const auto& e : dirty) ids.insert(e.fileId);
+    for (const auto& e : dirty)
+        ids.insert(e.fileId);
     QVERIFY(ids.contains("a"));
     QVERIFY(ids.contains("b"));
 }
@@ -695,6 +697,30 @@ void TestFileCache::testMoveToDirtyStore_MovesFile() {
 
     // Pending path must live under the dirty directory
     QVERIFY(pendingPath.startsWith(m_cache->dirtyDirectory()));
+}
+
+void TestFileCache::testMoveToDirtyStore_UsesExplicitSourcePathWithoutCacheEntry() {
+    const QString fileId = QStringLiteral("explicit_source");
+    const QString sourcePath = m_tempDir->filePath(QStringLiteral("authoritative/source.txt"));
+
+    QFileInfo sourceInfo(sourcePath);
+    QVERIFY(QDir().mkpath(sourceInfo.dir().absolutePath()));
+
+    QFile sourceFile(sourcePath);
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    sourceFile.write("authoritative bytes");
+    sourceFile.close();
+
+    m_cache->markDirty(fileId, QStringLiteral("/authoritative/source.txt"));
+    QVERIFY(!m_cache->isCached(fileId));
+
+    const QString pendingPath = m_cache->moveToDirtyStore(fileId, sourcePath);
+
+    QVERIFY(!pendingPath.isEmpty());
+    QVERIFY(QFile::exists(pendingPath));
+    QVERIFY(!QFile::exists(sourcePath));
+    QVERIFY(m_cache->isDirty(fileId));
+    QCOMPARE(m_cache->getContentPath(fileId), pendingPath);
 }
 
 // When a file is dirty and its content has already been moved to the pending

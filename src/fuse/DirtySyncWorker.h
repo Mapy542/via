@@ -70,6 +70,11 @@ struct UploadResult {
     QDateTime uploadedAt;  ///< When upload completed
 };
 
+struct DirtyUploadRetryState {
+    quint64 generation = 0;
+    int count = 0;
+};
+
 Q_DECLARE_METATYPE(DirtySyncWorkerState)
 Q_DECLARE_METATYPE(UploadResult)
 
@@ -358,7 +363,7 @@ class DirtySyncWorker : public QObject {
     DriveFile m_lastUploadedFile;  ///< Populated by onFileUploaded for metadata update
 
     // Retry tracking  (GPT5.3 #8)
-    QMap<QString, int> m_retryCounts;
+    QMap<QString, DirtyUploadRetryState> m_retryCounts;
 
     // Shared sync policy
     SyncSettings m_syncSettings;

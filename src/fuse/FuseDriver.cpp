@@ -27,10 +27,12 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QUuid>
 #include <functional>
 
 #include "DirtySyncWorker.h"
 #include "FileCache.h"
+#include "FuseReplayWorker.h"
 #include "MetadataCache.h"
 #include "MetadataRefreshWorker.h"
 #include "api/GoogleDriveClient.h"
@@ -433,237 +435,6 @@ bool waitForUpdate(GoogleDriveClient* driveClient, const QString& fileId, DriveF
     return success;
 }
 
-bool waitForMove(GoogleDriveClient* driveClient, const QString& fileId, DriveFile* movedFile,
-                 const std::function<bool()>& startRequest, QString* errorOut,
-                 bool* authFailureOut = nullptr) {
-    if (!driveClient) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
-        }
-        return false;
-    }
-
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    bool success = false;
-    QString error;
-    int errorStatus = 0;
-    DriveFile result;
-
-    QMetaObject::Connection movedConn;
-    QMetaObject::Connection errorConn;
-    QMetaObject::Connection timeoutConn;
-
-    movedConn = QObject::connect(driveClient, &GoogleDriveClient::fileMovedDetailed, &loop,
-                                 [&](const DriveFile& file) {
-                                     if (file.id != fileId) {
-                                         return;
-                                     }
-                                     success = file.isValid();
-                                     result = file;
-                                     loop.quit();
-                                 });
-
-    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg,
-                                     int httpStatus, const QString& errorFileId, const QString&) {
-                                     if (operation != QStringLiteral("moveFile")) {
-                                         return;
-                                     }
-                                     if (!errorFileId.isEmpty() && errorFileId != fileId) {
-                                         return;
-                                     }
-                                     error = errorMsg;
-                                     errorStatus = httpStatus;
-                                     loop.quit();
-                                 });
-
-    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
-        error = QStringLiteral("moveFile timeout");
-        loop.quit();
-    });
-
-    if (!startRequest || !startRequest()) {
-        error = QStringLiteral("Failed to dispatch moveFile request");
-    } else {
-        timeout.start(FUSE_API_TIMEOUT_MS);
-        loop.exec();
-    }
-
-    QObject::disconnect(movedConn);
-    QObject::disconnect(errorConn);
-    QObject::disconnect(timeoutConn);
-
-    if (!success && errorOut) {
-        *errorOut = error.isEmpty() ? QStringLiteral("moveFile failed") : error;
-    }
-
-    if (authFailureOut) {
-        *authFailureOut = isAuthOrPermissionFailure(errorStatus, error);
-    }
-
-    if (success && movedFile) {
-        *movedFile = result;
-    }
-
-    return success;
-}
-
-bool waitForRename(GoogleDriveClient* driveClient, const QString& fileId, DriveFile* renamedFile,
-                   const std::function<bool()>& startRequest, QString* errorOut,
-                   bool* authFailureOut = nullptr) {
-    if (!driveClient) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
-        }
-        return false;
-    }
-
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    bool success = false;
-    QString error;
-    int errorStatus = 0;
-    DriveFile result;
-
-    QMetaObject::Connection renamedConn;
-    QMetaObject::Connection errorConn;
-    QMetaObject::Connection timeoutConn;
-
-    renamedConn = QObject::connect(driveClient, &GoogleDriveClient::fileRenamedDetailed, &loop,
-                                   [&](const DriveFile& file) {
-                                       if (file.id != fileId) {
-                                           return;
-                                       }
-                                       success = file.isValid();
-                                       result = file;
-                                       loop.quit();
-                                   });
-
-    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg,
-                                     int httpStatus, const QString& errorFileId, const QString&) {
-                                     if (operation != QStringLiteral("renameFile")) {
-                                         return;
-                                     }
-                                     if (!errorFileId.isEmpty() && errorFileId != fileId) {
-                                         return;
-                                     }
-                                     error = errorMsg;
-                                     errorStatus = httpStatus;
-                                     loop.quit();
-                                 });
-
-    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
-        error = QStringLiteral("renameFile timeout");
-        loop.quit();
-    });
-
-    if (!startRequest || !startRequest()) {
-        error = QStringLiteral("Failed to dispatch renameFile request");
-    } else {
-        timeout.start(FUSE_API_TIMEOUT_MS);
-        loop.exec();
-    }
-
-    QObject::disconnect(renamedConn);
-    QObject::disconnect(errorConn);
-    QObject::disconnect(timeoutConn);
-
-    if (!success && errorOut) {
-        *errorOut = error.isEmpty() ? QStringLiteral("renameFile failed") : error;
-    }
-
-    if (authFailureOut) {
-        *authFailureOut = isAuthOrPermissionFailure(errorStatus, error);
-    }
-
-    if (success && renamedFile) {
-        *renamedFile = result;
-    }
-
-    return success;
-}
-
-bool waitForMoveAndRename(GoogleDriveClient* driveClient, const QString& fileId,
-                          DriveFile* resultFile, const std::function<bool()>& startRequest,
-                          QString* errorOut, bool* authFailureOut = nullptr) {
-    if (!driveClient) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("GoogleDriveClient unavailable");
-        }
-        return false;
-    }
-
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    bool success = false;
-    QString error;
-    int errorStatus = 0;
-    DriveFile result;
-
-    QMetaObject::Connection resultConn;
-    QMetaObject::Connection errorConn;
-    QMetaObject::Connection timeoutConn;
-
-    resultConn = QObject::connect(driveClient, &GoogleDriveClient::fileMovedAndRenamedDetailed,
-                                  &loop, [&](const DriveFile& file) {
-                                      if (file.id != fileId) {
-                                          return;
-                                      }
-                                      success = file.isValid();
-                                      result = file;
-                                      loop.quit();
-                                  });
-
-    errorConn = QObject::connect(driveClient, &GoogleDriveClient::errorDetailed, &loop,
-                                 [&](const QString& operation, const QString& errorMsg,
-                                     int httpStatus, const QString& errorFileId, const QString&) {
-                                     if (operation != QStringLiteral("moveAndRenameFile")) {
-                                         return;
-                                     }
-                                     if (!errorFileId.isEmpty() && errorFileId != fileId) {
-                                         return;
-                                     }
-                                     error = errorMsg;
-                                     errorStatus = httpStatus;
-                                     loop.quit();
-                                 });
-
-    timeoutConn = QObject::connect(&timeout, &QTimer::timeout, &loop, [&]() {
-        error = QStringLiteral("moveAndRenameFile timeout");
-        loop.quit();
-    });
-
-    if (!startRequest || !startRequest()) {
-        error = QStringLiteral("Failed to dispatch moveAndRenameFile request");
-    } else {
-        timeout.start(FUSE_API_TIMEOUT_MS);
-        loop.exec();
-    }
-
-    QObject::disconnect(resultConn);
-    QObject::disconnect(errorConn);
-    QObject::disconnect(timeoutConn);
-
-    if (!success && errorOut) {
-        *errorOut = error.isEmpty() ? QStringLiteral("moveAndRenameFile failed") : error;
-    }
-
-    if (authFailureOut) {
-        *authFailureOut = isAuthOrPermissionFailure(errorStatus, error);
-    }
-
-    if (success && resultFile) {
-        *resultFile = result;
-    }
-
-    return success;
-}
-
 bool waitForTrash(GoogleDriveClient* driveClient, const QString& fileId,
                   const std::function<bool()>& startRequest, QString* errorOut,
                   bool* authFailureOut = nullptr) {
@@ -840,8 +611,10 @@ FuseDriver::FuseDriver(GoogleDriveClient* driveClient, SyncDatabase* database, Q
       m_session(nullptr),
       m_dirtySyncThread(nullptr),
       m_metadataRefreshThread(nullptr),
+      m_replayThread(nullptr),
       m_dirtySyncWorker(nullptr),
       m_metadataRefreshWorker(nullptr),
+      m_replayWorker(nullptr),
       m_pauseController(nullptr),
       m_backgroundSyncPaused(false),
       m_syncSettings(SyncSettings::load()),
@@ -1289,6 +1062,9 @@ void FuseDriver::reloadSyncSettings() {
     if (m_dirtySyncWorker) {
         QMetaObject::invokeMethod(m_dirtySyncWorker, "reloadSettings", Qt::QueuedConnection);
     }
+    if (m_replayWorker) {
+        QMetaObject::invokeMethod(m_replayWorker, "reloadSettings", Qt::QueuedConnection);
+    }
 
     qInfo() << "FuseDriver: Reloaded sync settings, mode=" << currentSyncSettings().syncMode;
 }
@@ -1302,6 +1078,9 @@ void FuseDriver::pauseSync() {
     if (m_metadataRefreshWorker) {
         QMetaObject::invokeMethod(m_metadataRefreshWorker, "pause", Qt::QueuedConnection);
     }
+    if (m_replayWorker) {
+        QMetaObject::invokeMethod(m_replayWorker, "pause", Qt::QueuedConnection);
+    }
 
     stageDirtyFilesForPause();
 }
@@ -1314,6 +1093,9 @@ void FuseDriver::resumeSync() {
     }
     if (m_metadataRefreshWorker) {
         QMetaObject::invokeMethod(m_metadataRefreshWorker, "resume", Qt::QueuedConnection);
+    }
+    if (m_replayWorker) {
+        QMetaObject::invokeMethod(m_replayWorker, "resume", Qt::QueuedConnection);
     }
 }
 
@@ -1623,6 +1405,50 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
         lookupPath = lookupPath.mid(1);
     }
 
+    const auto fillNodeBackedStat = [&](const FuseNode& node) -> bool {
+        if (node.nodeId.isEmpty()) {
+            return false;
+        }
+
+        if (node.isFolder) {
+            stbuf->st_mode = S_IFDIR | 0755;
+            stbuf->st_nlink = 2;
+            stbuf->st_uid = getuid();
+            stbuf->st_gid = getgid();
+            stbuf->st_mtime = node.modifiedTime.toSecsSinceEpoch();
+            stbuf->st_atime = node.lastAccessed.isValid() ? node.lastAccessed.toSecsSinceEpoch()
+                                                          : stbuf->st_mtime;
+            stbuf->st_ctime =
+                node.createdTime.isValid() ? node.createdTime.toSecsSinceEpoch() : stbuf->st_mtime;
+            return true;
+        }
+
+        const FuseNodeContentState state = drv->m_database->getFuseNodeContentState(node.nodeId);
+        QFileInfo localInfo(state.localContentPath);
+        if (!localInfo.exists()) {
+            return false;
+        }
+
+        stbuf->st_mode = S_IFREG | 0644;
+        stbuf->st_nlink = 1;
+        stbuf->st_uid = getuid();
+        stbuf->st_gid = getgid();
+        stbuf->st_size = localInfo.size();
+        stbuf->st_mtime = localInfo.lastModified().toSecsSinceEpoch();
+        stbuf->st_atime = stbuf->st_mtime;
+        stbuf->st_ctime = stbuf->st_mtime;
+        return true;
+    };
+
+    FuseNode localNode;
+    if (drv && drv->m_database) {
+        localNode = drv->m_database->getFuseNodeByPath(qpath);
+        if (!localNode.nodeId.isEmpty() && localNode.remoteFileId.isEmpty() &&
+            fillNodeBackedStat(localNode)) {
+            return 0;
+        }
+    }
+
     // Look up in FUSE metadata database
     if (drv && drv->m_database) {
         FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
@@ -1686,6 +1512,17 @@ int FuseDriver::fuseGetattr(const char* path, struct stat* stbuf, struct fuse_fi
         }
 
         if (!meta.fileId.isEmpty()) {
+            localNode = drv->ensureLocalNodeForMetadata(qpath, meta);
+            const FuseNodeContentState localState =
+                localNode.nodeId.isEmpty()
+                    ? FuseNodeContentState()
+                    : drv->m_database->getFuseNodeContentState(localNode.nodeId);
+            if (!localNode.nodeId.isEmpty() &&
+                localState.localGeneration > localState.remoteAckGeneration &&
+                fillNodeBackedStat(localNode)) {
+                return 0;
+            }
+
             if (meta.isFolder) {
                 stbuf->st_mode = S_IFDIR | 0755;
                 stbuf->st_nlink = 2;
@@ -1808,6 +1645,8 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
             queueNativeDocPrefetch(drv->m_fileCache, child, mode);
         }
 
+        drv->appendLocalNodeChildrenToListing(qpath, buf, filler, emittedNames);
+
         if (qpath == QStringLiteral("/")) {
             QDir overlayDir(drv->trashOverlayRoot());
             if (overlayDir.exists()) {
@@ -1825,6 +1664,14 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
             }
         }
 
+        return 0;
+    }
+
+    const FuseNode localDirNode = drv->m_database->getFuseNodeByPath(qpath);
+    if (!localDirNode.nodeId.isEmpty() && localDirNode.isFolder &&
+        localDirNode.remoteFileId.isEmpty()) {
+        QSet<QString> emittedNames;
+        drv->appendLocalNodeChildrenToListing(qpath, buf, filler, emittedNames);
         return 0;
     }
 
@@ -1896,6 +1743,8 @@ int FuseDriver::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
         queueNativeDocPrefetch(drv->m_fileCache, child, mode);
     }
 
+    drv->appendLocalNodeChildrenToListing(qpath, buf, filler, emittedNames);
+
     if (qpath == QStringLiteral("/")) {
         QDir overlayDir(drv->trashOverlayRoot());
         if (overlayDir.exists()) {
@@ -1928,11 +1777,52 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         return -EIO;
     }
 
+    FuseNode localNode = drv->m_database->getFuseNodeByPath(qpath);
+
     // Get file metadata
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
     if (meta.fileId.isEmpty()) {
-        return -ENOENT;
+        if (localNode.nodeId.isEmpty()) {
+            return -ENOENT;
+        }
+
+        if (localNode.isFolder) {
+            return -EISDIR;
+        }
+
+        if ((fi->flags & O_WRONLY) || (fi->flags & O_RDWR)) {
+            const int syncModeError = drv->enforceSyncModeForRemoteMutation(
+                RemoteMutationType::Upload, QStringLiteral("modify files"), qpath);
+            if (syncModeError != 0) {
+                return syncModeError;
+            }
+        }
+
+        const QString contentPath = drv->authoritativeContentPathForNode(localNode);
+        if (contentPath.isEmpty() || !QFile::exists(contentPath)) {
+            return -EIO;
+        }
+
+        FuseOpenFile openFile;
+        openFile.nodeId = localNode.nodeId;
+        openFile.cacheKey = localNode.nodeId;
+        openFile.path = qpath;
+        openFile.contentPath = contentPath;
+        openFile.writable = (fi->flags & O_WRONLY) || (fi->flags & O_RDWR);
+        openFile.dirty = false;
+        openFile.synthetic = false;
+        openFile.localFd = openLocalHandle(contentPath, openFile.writable);
+        if (openFile.localFd < 0) {
+            return -EIO;
+        }
+        openFile.size = sizeForOpenHandle(openFile.localFd);
+
+        fi->fh = drv->registerOpenFile(openFile);
+        emit drv->fileAccessed(qpath);
+        return 0;
     }
+
+    localNode = drv->ensureLocalNodeForMetadata(qpath, meta);
 
     if (meta.isFolder) {
         return -EISDIR;
@@ -1950,6 +1840,7 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
             // Synthetic stub — bypass FileCache entirely; content is
             // generated on-the-fly in fuseRead from nativeDocShortcutPayload().
             FuseOpenFile openFile;
+            openFile.nodeId = localNode.nodeId;
             openFile.fileId = meta.fileId;
             openFile.cacheKey = meta.fileId;
             openFile.path = qpath;
@@ -1987,9 +1878,11 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
             fi->direct_io = 1;
 
             FuseOpenFile openFile;
+            openFile.nodeId = localNode.nodeId;
             openFile.fileId = meta.fileId;
             openFile.cacheKey = meta.fileId + QLatin1Char('|') + repr.outputMimeType;
             openFile.path = qpath;
+            openFile.contentPath = cachePath;
             openFile.writable = false;
             openFile.dirty = false;
             openFile.synthetic = false;
@@ -2019,22 +1912,35 @@ int FuseDriver::fuseOpen(const char* path, struct fuse_file_info* fi) {
         }
     }
 
+    QString cachePath = drv->authoritativeContentPathForNode(localNode);
+    if (!cachePath.isEmpty() && !QFile::exists(cachePath)) {
+        cachePath.clear();
+    }
+
     // Get cached file path (may trigger download)
-    if (!drv->isDriveApiAllowed() && !drv->m_fileCache->hasLocalContent(meta.fileId)) {
+    if (cachePath.isEmpty() && !drv->isDriveApiAllowed() &&
+        !drv->m_fileCache->hasLocalContent(meta.fileId)) {
         drv->emitDriveOperationBlocked(QStringLiteral("download uncached files"), qpath);
         return -EHOSTDOWN;
     }
 
-    QString cachePath = drv->m_fileCache->getCachedPath(meta.fileId, meta.size);
     if (cachePath.isEmpty()) {
-        return -EIO;
+        cachePath = drv->m_fileCache->getCachedPath(meta.fileId, meta.size);
+        if (cachePath.isEmpty()) {
+            return -EIO;
+        }
+        if (!localNode.nodeId.isEmpty()) {
+            drv->updateNodeContentPath(localNode.nodeId, cachePath);
+        }
     }
 
     // Create open file handle
     FuseOpenFile openFile;
+    openFile.nodeId = localNode.nodeId;
     openFile.fileId = meta.fileId;
     openFile.cacheKey = meta.fileId;
     openFile.path = qpath;
+    openFile.contentPath = cachePath;
     openFile.writable = (fi->flags & O_WRONLY) || (fi->flags & O_RDWR);
     openFile.dirty = false;
     openFile.synthetic = false;
@@ -2143,11 +2049,20 @@ int FuseDriver::fuseWrite(const char* path, const char* buf, size_t size, off_t 
 
     QString lookupPath = openFile.path.startsWith("/") ? openFile.path.mid(1) : openFile.path;
 
+    if (!openFile.nodeId.isEmpty() &&
+        !drv->commitNodeContentMutation(openFile, FuseJournalOperationType::WriteGeneration)) {
+        return -EIO;
+    }
+
     // Mark file as dirty (for DirtySyncWorker to upload).  We bump the
     // FileCache generation on every successful write so an older upload can
     // never clear newer bytes written through the same handle.
     if (drv->m_fileCache && !openFile.fileId.isEmpty()) {
         drv->m_fileCache->markDirty(openFile.fileId, lookupPath);
+    }
+
+    if (::fsync(openFile.localFd) != 0) {
+        return -EIO;
     }
 
     if (!openFile.dirty) {
@@ -2167,7 +2082,8 @@ int FuseDriver::fuseRelease(const char* path, struct fuse_file_info* fi) {
 
         if (openFileOpt && openFileOpt->dirty && !openFileOpt->fileId.isEmpty()) {
             FuseOpenFile openFile = *openFileOpt;
-            drv->stageDirtyFileForUpload(openFile.fileId, openFile.path, openFile.localFd);
+            drv->stageDirtyFileForUpload(openFile.fileId, openFile.path, openFile.localFd,
+                                         openFile.nodeId, openFile.contentPath);
         }
 
         drv->unregisterOpenFile(fi->fh);
@@ -2210,19 +2126,13 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
 
     QString qpath = normalizePath(path);
     QString parentPath = getParentPath(qpath);
-    QString folderName = getFileName(qpath);
 
     if (drv && drv->isTrashFusePath(qpath)) {
         return drv->mkdirTrashOverlay(qpath);
     }
 
-    if (!drv || !drv->m_driveClient || !drv->m_database) {
+    if (!drv || !drv->m_database) {
         return -EIO;
-    }
-
-    if (!drv->isDriveApiAllowed()) {
-        drv->emitDriveOperationBlocked(QStringLiteral("create folders"), qpath);
-        return drv->pausedMutationErrorCode();
     }
 
     const int syncModeError = drv->enforceSyncModeForRemoteMutation(
@@ -2231,55 +2141,8 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
         return syncModeError;
     }
 
-    // Get parent folder ID
-    QString parentId = "root";
-    if (!parentPath.isEmpty() && parentPath != "/") {
-        QString lookupPath = parentPath.startsWith("/") ? parentPath.mid(1) : parentPath;
-        FuseMetadata parentMeta = drv->m_database->getFuseMetadataByPath(lookupPath);
-        if (!parentMeta.fileId.isEmpty()) {
-            parentId = parentMeta.fileId;
-        } else {
-            return -ENOENT;  // Parent doesn't exist
-        }
-    }
-
-    // Create folder via API
-    QString requestLocalPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
-    QString error;
-    DriveFile createdFolder;
-    bool authFailure = false;
-    if (!waitForFolderCreate(
-            drv->m_driveClient, requestLocalPath,
-            [&]() {
-                return invokeDriveCall(drv->m_driveClient, [&]() {
-                    drv->m_driveClient->createFolder(folderName, parentId, requestLocalPath);
-                });
-            },
-            &createdFolder, &error, &authFailure)) {
-        qWarning() << "FuseDriver: mkdir failed for" << qpath << ":" << error;
-        return authFailure ? -EACCES : -EIO;
-    }
-
-    if (!createdFolder.isValid()) {
-        return -EIO;
-    }
-
-    FuseMetadata newMeta;
-    newMeta.fileId = createdFolder.id;
-    newMeta.path = requestLocalPath;
-    newMeta.name = folderName;
-    newMeta.remoteName = folderName;
-    newMeta.parentId = parentId;
-    newMeta.isFolder = true;
-    newMeta.size = 0;
-    newMeta.mimeType = createdFolder.mimeType;
-    newMeta.createdTime = createdFolder.createdTime;
-    newMeta.modifiedTime = createdFolder.modifiedTime;
-    newMeta.cachedAt = QDateTime::currentDateTime();
-    newMeta.lastAccessed = QDateTime::currentDateTime();
-
-    if (!drv->saveMetadataEntry(newMeta)) {
-        return -EIO;
+    if (!drv->createAuthoritativeLocalDirectory(qpath)) {
+        return drv->m_database->getFuseNodeByPath(qpath).nodeId.isEmpty() ? -EIO : -EEXIST;
     }
 
     drv->invalidateFusePaths({parentPath, qpath});
@@ -2293,19 +2156,13 @@ int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
 int FuseDriver::fuseRmdir(const char* path) {
     auto* drv = self();
     QString qpath = normalizePath(path);
-    QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
     if (drv && drv->isTrashFusePath(qpath)) {
         return drv->rmdirTrashOverlay(qpath);
     }
 
-    if (!drv || !drv->m_database || !drv->m_driveClient) {
+    if (!drv || !drv->m_database) {
         return -EIO;
-    }
-
-    if (!drv->isDriveApiAllowed()) {
-        drv->emitDriveOperationBlocked(QStringLiteral("trash folders"), qpath);
-        return drv->pausedMutationErrorCode();
     }
 
     const int syncModeError = drv->enforceSyncModeForRemoteMutation(
@@ -2314,42 +2171,10 @@ int FuseDriver::fuseRmdir(const char* path) {
         return syncModeError;
     }
 
-    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
-    if (meta.fileId.isEmpty()) {
-        return -ENOENT;
+    const int result = drv->applyLocalNodeRemoval(qpath, true, true);
+    if (result != 0) {
+        return result;
     }
-
-    if (!meta.isFolder) {
-        return -ENOTDIR;
-    }
-
-    // Check if directory is empty
-    QList<FuseMetadata> children = drv->m_database->getFuseChildren(meta.fileId);
-    if (!children.isEmpty()) {
-        return -ENOTEMPTY;
-    }
-
-    // Trash via API (synchronous) — moves to Drive trash instead of permanent delete
-    QString error;
-    bool authFailure = false;
-    if (!waitForTrash(
-            drv->m_driveClient, meta.fileId,
-            [&]() {
-                return invokeDriveCall(drv->m_driveClient,
-                                       [&]() { drv->m_driveClient->trashFile(meta.fileId); });
-            },
-            &error, &authFailure)) {
-        qWarning() << "FuseDriver: rmdir trash failed for" << lookupPath << ":" << error;
-        return authFailure ? -EACCES : -EIO;
-    }
-
-    // Remove from metadata only after remote trash confirmed
-    if (!drv->m_database->deleteFuseMetadata(meta.fileId)) {
-        return -EIO;
-    }
-    drv->m_database->deleteNativeDocState(meta.fileId);
-    drv->removeMetadataEntryFromCache(meta);
-    drv->invalidateFusePaths({getParentPath(qpath), qpath});
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseItemTrashed(qpath); }, Qt::QueuedConnection);
@@ -2360,19 +2185,13 @@ int FuseDriver::fuseRmdir(const char* path) {
 int FuseDriver::fuseUnlink(const char* path) {
     auto* drv = self();
     QString qpath = normalizePath(path);
-    QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
     if (drv && drv->isTrashFusePath(qpath)) {
         return drv->unlinkTrashOverlay(qpath);
     }
 
-    if (!drv || !drv->m_database || !drv->m_driveClient) {
+    if (!drv || !drv->m_database) {
         return -EIO;
-    }
-
-    if (!drv->isDriveApiAllowed()) {
-        drv->emitDriveOperationBlocked(QStringLiteral("trash files"), qpath);
-        return drv->pausedMutationErrorCode();
     }
 
     const int syncModeError = drv->enforceSyncModeForRemoteMutation(
@@ -2381,51 +2200,10 @@ int FuseDriver::fuseUnlink(const char* path) {
         return syncModeError;
     }
 
-    FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
-    if (meta.fileId.isEmpty()) {
-        return -ENOENT;
+    const int result = drv->applyLocalNodeRemoval(qpath, false, false);
+    if (result != 0) {
+        return result;
     }
-
-    if (meta.isFolder) {
-        return -EISDIR;
-    }
-
-    // Trash via API (synchronous) — moves to Drive trash instead of permanent delete.
-    // Treat "file not found" (404) as success — the file may have already been
-    // deleted from Drive by a concurrent operation (e.g. MetadataRefreshWorker
-    // processing a remote deletion, or a previous unlink that raced with an
-    // orphaned updateFile response).
-    QString error;
-    bool authFailure = false;
-    if (!waitForTrash(
-            drv->m_driveClient, meta.fileId,
-            [&]() {
-                return invokeDriveCall(drv->m_driveClient,
-                                       [&]() { drv->m_driveClient->trashFile(meta.fileId); });
-            },
-            &error, &authFailure)) {
-        // Accept "not found" as success — the remote file is already gone.
-        bool notFound = error.contains(QLatin1String("not found"), Qt::CaseInsensitive) ||
-                        error.contains(QLatin1String("404"));
-        if (!notFound) {
-            qWarning() << "FuseDriver: unlink trash failed for" << lookupPath << ":" << error;
-            return authFailure ? -EACCES : -EIO;
-        }
-        qDebug() << "FuseDriver: unlink – file already deleted from Drive:" << lookupPath;
-    }
-
-    // Remove from cache only after remote delete confirmed
-    if (drv->m_fileCache) {
-        drv->m_fileCache->removeFromCache(meta.fileId);
-    }
-
-    // Remove from metadata
-    if (!drv->m_database->deleteFuseMetadata(meta.fileId)) {
-        return -EIO;
-    }
-    drv->m_database->deleteNativeDocState(meta.fileId);
-    drv->removeMetadataEntryFromCache(meta);
-    drv->invalidateFusePaths({getParentPath(qpath), qpath});
 
     QMetaObject::invokeMethod(
         drv, [drv, qpath]() { emit drv->fuseItemTrashed(qpath); }, Qt::QueuedConnection);
@@ -2448,7 +2226,7 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         return drv->renameWithinTrashOverlay(fromPath, toPath);
     }
 
-    if (!drv || !drv->m_database || !drv->m_driveClient) {
+    if (!drv || !drv->m_database) {
         return -EIO;
     }
 
@@ -2484,27 +2262,25 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
     }
 
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(fromLookup);
-    if (meta.fileId.isEmpty()) {
+    FuseNode localNode = drv->m_database->getFuseNodeByPath(fromPath);
+    if (localNode.nodeId.isEmpty() && !meta.fileId.isEmpty()) {
+        localNode = drv->ensureLocalNodeForMetadata(fromPath, meta);
+    }
+    if (meta.fileId.isEmpty() && localNode.nodeId.isEmpty()) {
         return -ENOENT;
     }
 
     if (toIsTrash) {
-        if (!drv->isDriveApiAllowed()) {
-            drv->emitDriveOperationBlocked(QStringLiteral("trash items"), fromPath);
-            return drv->pausedMutationErrorCode();
-        }
-
         const int syncModeError = drv->enforceSyncModeForRemoteMutation(
             RemoteMutationType::Trash, QStringLiteral("trash items"), fromPath);
         if (syncModeError != 0) {
             return syncModeError;
         }
 
-        QString error;
-        if (!drv->moveLiveEntryToTrash(meta, fromPath, toPath, &error)) {
-            qWarning() << "FuseDriver: move-to-trash failed" << fromPath << "->" << toPath << ":"
-                       << error;
-            return -EIO;
+        const int result =
+            drv->applyLocalNodeRemoval(fromPath, localNode.isFolder, localNode.isFolder);
+        if (result != 0) {
+            return result;
         }
 
         QMetaObject::invokeMethod(
@@ -2525,14 +2301,6 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         return 0;
     }
 
-    if (!drv->isDriveApiAllowed()) {
-        const QString action = (isMove && isRename) ? QStringLiteral("move or rename items")
-                                                    : (isMove ? QStringLiteral("move items")
-                                                              : QStringLiteral("rename items"));
-        drv->emitDriveOperationBlocked(action, fromPath);
-        return drv->pausedMutationErrorCode();
-    }
-
     if (isMove) {
         const int syncModeError = drv->enforceSyncModeForRemoteMutation(
             RemoteMutationType::Move, QStringLiteral("move items"), fromPath);
@@ -2548,115 +2316,9 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
         }
     }
 
-    // LOG-02: When both move and rename are needed, issue a single atomic PATCH request
-    if (isMove && isRename) {
-        QString newParentId = "root";
-        if (!newParentPath.isEmpty() && newParentPath != "/") {
-            QString newParentLookup =
-                newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
-            FuseMetadata newParentMeta = drv->m_database->getFuseMetadataByPath(newParentLookup);
-            if (newParentMeta.fileId.isEmpty() || !newParentMeta.isFolder) {
-                return -ENOENT;
-            }
-            newParentId = newParentMeta.fileId;
-        }
-
-        QString oldParentId = meta.parentId;
-        if (oldParentId.isEmpty()) {
-            oldParentId = "root";
-        }
-
-        QString error;
-        DriveFile resultFile;
-        bool authFailure = false;
-        if (!waitForMoveAndRename(
-                drv->m_driveClient, meta.fileId, &resultFile,
-                [&]() {
-                    return invokeDriveCall(drv->m_driveClient, [&]() {
-                        drv->m_driveClient->moveAndRenameFile(meta.fileId, newParentId, oldParentId,
-                                                              remoteNewName);
-                    });
-                },
-                &error, &authFailure)) {
-            qWarning() << "FuseDriver: move+rename failed" << fromPath << "->" << toPath << ":"
-                       << error;
-            return authFailure ? -EACCES : -EIO;
-        }
-
-        meta.parentId = newParentId;
-        if (resultFile.modifiedTime.isValid()) {
-            meta.modifiedTime = resultFile.modifiedTime;
-        }
-    } else if (isMove) {
-        QString newParentId = "root";
-        if (!newParentPath.isEmpty() && newParentPath != "/") {
-            QString newParentLookup =
-                newParentPath.startsWith("/") ? newParentPath.mid(1) : newParentPath;
-            FuseMetadata newParentMeta = drv->m_database->getFuseMetadataByPath(newParentLookup);
-            if (newParentMeta.fileId.isEmpty() || !newParentMeta.isFolder) {
-                return -ENOENT;
-            }
-            newParentId = newParentMeta.fileId;
-        }
-
-        QString oldParentId = meta.parentId;
-        if (oldParentId.isEmpty()) {
-            oldParentId = "root";
-        }
-
-        QString error;
-        DriveFile movedFile;
-        bool authFailure = false;
-        if (!waitForMove(
-                drv->m_driveClient, meta.fileId, &movedFile,
-                [&]() {
-                    return invokeDriveCall(drv->m_driveClient, [&]() {
-                        drv->m_driveClient->moveFile(meta.fileId, newParentId, oldParentId);
-                    });
-                },
-                &error, &authFailure)) {
-            qWarning() << "FuseDriver: move failed" << fromPath << "->" << toPath << ":" << error;
-            return authFailure ? -EACCES : -EIO;
-        }
-
-        meta.parentId = newParentId;
-        if (movedFile.modifiedTime.isValid()) {
-            meta.modifiedTime = movedFile.modifiedTime;
-        }
-    } else if (isRename) {
-        QString error;
-        DriveFile renamedFile;
-        bool authFailure = false;
-        if (!waitForRename(
-                drv->m_driveClient, meta.fileId, &renamedFile,
-                [&]() {
-                    return invokeDriveCall(drv->m_driveClient, [&]() {
-                        drv->m_driveClient->renameFile(meta.fileId, remoteNewName);
-                    });
-                },
-                &error, &authFailure)) {
-            qWarning() << "FuseDriver: rename failed" << fromPath << "->" << toPath << ":" << error;
-            return authFailure ? -EACCES : -EIO;
-        }
-
-        if (renamedFile.modifiedTime.isValid()) {
-            meta.modifiedTime = renamedFile.modifiedTime;
-        }
-    }
-
-    const FuseMetadata previousMeta = meta;
-
-    // Update metadata
-    meta.name = newName;
-    meta.remoteName = remoteNewName;
-    meta.path = toLookup;
-    meta.cachedAt = QDateTime::currentDateTime();
-    meta.lastAccessed = QDateTime::currentDateTime();
-    if (!drv->reconcileMovedMetadata(previousMeta, meta)) {
+    if (!drv->applyLocalNodeRename(fromPath, toPath)) {
         return -EIO;
     }
-
-    drv->invalidateFusePaths({fromPath, toPath, oldParentPath, newParentPath});
 
     // Emit activity signal based on operation type
     if (isMove) {
@@ -2699,9 +2361,14 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
         return -EIO;
     }
 
+    FuseNode localNode = drv->m_database->getFuseNodeByPath(qpath);
     FuseMetadata meta = drv->m_database->getFuseMetadataByPath(lookupPath);
-    if (meta.fileId.isEmpty()) {
+    if (meta.fileId.isEmpty() && localNode.nodeId.isEmpty()) {
         return -ENOENT;
+    }
+
+    if (localNode.nodeId.isEmpty() && !meta.fileId.isEmpty()) {
+        localNode = drv->ensureLocalNodeForMetadata(qpath, meta);
     }
 
     // Native docs are read-only — reject truncate
@@ -2719,13 +2386,58 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
     FuseOpenFile openFile;
     if (fi) {
         auto openFileOpt = drv->getOpenFile(fi->fh);
-        if (openFileOpt && openFileOpt->fileId == meta.fileId) {
+        if (openFileOpt &&
+            ((!localNode.nodeId.isEmpty() && openFileOpt->nodeId == localNode.nodeId) ||
+             (!meta.fileId.isEmpty() && openFileOpt->fileId == meta.fileId))) {
             openFile = *openFileOpt;
             openedViaHandle = true;
         }
     }
 
     if (!openedViaHandle) {
+        if (!localNode.nodeId.isEmpty()) {
+            const QString contentPath = drv->authoritativeContentPathForNode(localNode);
+            if (contentPath.isEmpty()) {
+                return -EIO;
+            }
+
+            const int localFd = openLocalHandle(contentPath, true);
+            if (localFd < 0) {
+                return -EIO;
+            }
+
+            int result = 0;
+            if (::ftruncate(localFd, size) != 0) {
+                result = -EIO;
+            } else {
+                FuseOpenFile stagedOpenFile;
+                stagedOpenFile.nodeId = localNode.nodeId;
+                stagedOpenFile.fileId = localNode.remoteFileId;
+                stagedOpenFile.cacheKey =
+                    localNode.remoteFileId.isEmpty() ? localNode.nodeId : localNode.remoteFileId;
+                stagedOpenFile.path = qpath;
+                stagedOpenFile.contentPath = contentPath;
+                stagedOpenFile.localFd = localFd;
+                stagedOpenFile.writable = true;
+
+                if (!drv->commitNodeContentMutation(stagedOpenFile,
+                                                    FuseJournalOperationType::Truncate)) {
+                    result = -EIO;
+                } else if (!localNode.remoteFileId.isEmpty()) {
+                    drv->m_fileCache->markDirty(localNode.remoteFileId, lookupPath);
+                    if (!drv->stageDirtyFileForUpload(localNode.remoteFileId, qpath, localFd,
+                                                      localNode.nodeId, contentPath)) {
+                        result = -EIO;
+                    }
+                } else if (::fsync(localFd) != 0) {
+                    result = -EIO;
+                }
+            }
+
+            ::close(localFd);
+            return result;
+        }
+
         return drv->truncateWithoutHandle(meta.fileId, meta.size, qpath, size);
     }
 
@@ -2733,9 +2445,20 @@ int FuseDriver::fuseTruncate(const char* path, off_t size, struct fuse_file_info
         return -EIO;
     }
 
+    if (!openFile.nodeId.isEmpty() &&
+        !drv->commitNodeContentMutation(openFile, FuseJournalOperationType::Truncate)) {
+        return -EIO;
+    }
+
     // Mark as dirty for upload
     drv->markOpenFileDirty(fi->fh);
-    drv->m_fileCache->markDirty(meta.fileId, lookupPath);
+    if (!openFile.fileId.isEmpty()) {
+        drv->m_fileCache->markDirty(openFile.fileId, lookupPath);
+    }
+
+    if (::fsync(openFile.localFd) != 0) {
+        return -EIO;
+    }
 
     return 0;
 }
@@ -2746,20 +2469,13 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
 
     QString qpath = normalizePath(path);
     QString parentPath = getParentPath(qpath);
-    QString fileName = getFileName(qpath);
-    QString lookupPath = qpath.startsWith("/") ? qpath.mid(1) : qpath;
 
     if (drv && drv->isTrashFusePath(qpath)) {
         return drv->createTrashOverlay(qpath, fi);
     }
 
-    if (!drv || !drv->m_driveClient || !drv->m_fileCache) {
+    if (!drv || !drv->m_database || !drv->m_fileCache) {
         return -EIO;
-    }
-
-    if (!drv->isDriveApiAllowed()) {
-        drv->emitDriveOperationBlocked(QStringLiteral("create files"), qpath);
-        return drv->pausedMutationErrorCode();
     }
 
     const int syncModeError = drv->enforceSyncModeForRemoteMutation(
@@ -2767,103 +2483,12 @@ int FuseDriver::fuseCreate(const char* path, mode_t mode, struct fuse_file_info*
     if (syncModeError != 0) {
         return syncModeError;
     }
-
-    // Get parent folder ID
-    QString parentId = "root";
-    if (!parentPath.isEmpty() && parentPath != "/") {
-        QString parentLookup = parentPath.startsWith("/") ? parentPath.mid(1) : parentPath;
-        FuseMetadata parentMeta = drv->m_database->getFuseMetadataByPath(parentLookup);
-        if (parentMeta.fileId.isEmpty()) {
-            // GPT5.3 #5 fix: return ENOENT instead of silently falling back to root
-            return -ENOENT;
-        }
-        parentId = parentMeta.fileId;
-    }
-
-    // Create empty file in cache
-    QString tempId = QStringLiteral("temp_create_%1_%2")
-                         .arg(QDateTime::currentMSecsSinceEpoch())
-                         .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
-    QString tempCachePath = drv->m_fileCache->getCachePathForFile(tempId);
-    QDir().mkpath(QFileInfo(tempCachePath).path());
-    QFile tempFile(tempCachePath);
-    if (!tempFile.open(QIODevice::WriteOnly)) {
-        return -EIO;
-    }
-    tempFile.close();
-
-    // Create remote file immediately to obtain stable fileId for dirty tracking/retries
-    QString error;
-    DriveFile uploadedFile;
-    bool authFailure = false;
-    if (!waitForUpload(
-            drv->m_driveClient, tempCachePath, &uploadedFile,
-            [&]() {
-                return invokeDriveCall(drv->m_driveClient, [&]() {
-                    drv->m_driveClient->uploadFile(tempCachePath, parentId, fileName);
-                });
-            },
-            &error, &authFailure)) {
-        QFile::remove(tempCachePath);
-        qWarning() << "FuseDriver: create upload failed for" << qpath << ":" << error;
-        return authFailure ? -EACCES : -EIO;
-    }
-
-    if (!uploadedFile.isValid()) {
-        QFile::remove(tempCachePath);
-        return -EIO;
-    }
-
-    // Rename temp cache file to canonical fileId path
-    QString canonicalCachePath = drv->m_fileCache->getCachePathForFile(uploadedFile.id);
-    QDir().mkpath(QFileInfo(canonicalCachePath).path());
-    if (canonicalCachePath != tempCachePath) {
-        QFile::remove(canonicalCachePath);
-        if (!QFile::rename(tempCachePath, canonicalCachePath)) {
-            canonicalCachePath = tempCachePath;
-        }
-    }
-
-    drv->m_fileCache->recordCacheEntry(uploadedFile.id, canonicalCachePath,
-                                       QFileInfo(canonicalCachePath).size());
-
-    FuseMetadata newMeta;
-    newMeta.fileId = uploadedFile.id;
-    newMeta.path = lookupPath;
-    newMeta.name = fileName;
-    newMeta.remoteName = fileName;
-    newMeta.parentId = parentId;
-    newMeta.isFolder = false;
-    newMeta.size = 0;
-    newMeta.mimeType = uploadedFile.mimeType;
-    newMeta.createdTime = uploadedFile.createdTime;
-    newMeta.modifiedTime = uploadedFile.modifiedTime;
-    newMeta.cachedAt = QDateTime::currentDateTime();
-    newMeta.lastAccessed = QDateTime::currentDateTime();
-    if (!drv->saveMetadataEntry(newMeta)) {
-        // ROB-06: Clean up orphaned remote file since metadata save failed
-        qWarning() << "FuseDriver: saveFuseMetadata failed for" << newMeta.fileId
-                   << "- deleting orphaned remote file";
-        QMetaObject::invokeMethod(
-            drv->m_driveClient,
-            [fileId = newMeta.fileId, drv]() { drv->m_driveClient->deleteFile(fileId); },
-            Qt::QueuedConnection);
-        return -EIO;
-    }
-    drv->invalidateFusePaths({parentPath, qpath});
-
     FuseOpenFile openFile;
-    openFile.fileId = uploadedFile.id;
-    openFile.path = qpath;
-    openFile.size = 0;
-    openFile.writable = true;
-    openFile.dirty = false;
-    openFile.synthetic = false;
-    openFile.localFd = openLocalHandle(canonicalCachePath, true);
-    if (openFile.localFd < 0) {
+    if (!drv->createAuthoritativeLocalFile(qpath, &openFile)) {
         return -EIO;
     }
 
+    drv->invalidateFusePaths({parentPath, qpath});
     fi->fh = drv->registerOpenFile(openFile);
 
     QMetaObject::invokeMethod(
@@ -3005,6 +2630,580 @@ bool FuseDriver::saveMetadataEntry(const FuseMetadata& metadata) {
     }
 
     return true;
+}
+
+bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile* openFile) {
+    if (!m_database || !m_fileCache || !openFile || path.isEmpty() || path == QStringLiteral("/")) {
+        return false;
+    }
+
+    const QString parentPath = getParentPath(path);
+    const QString fileName = getFileName(path);
+    if (fileName.isEmpty()) {
+        return false;
+    }
+
+    const FuseNode existingNode = m_database->getFuseNodeByPath(path);
+    if (!existingNode.nodeId.isEmpty()) {
+        return false;
+    }
+
+    const QString relativePath = logicalPathFromFusePath(path);
+    const FuseMetadata existingMetadata = m_database->getFuseMetadataByPath(relativePath);
+    if (!existingMetadata.fileId.isEmpty()) {
+        return false;
+    }
+
+    QString parentRemoteId;
+
+    if (parentPath != QStringLiteral("/")) {
+        const FuseNode parentNode = m_database->getFuseNodeByPath(parentPath);
+        if (!parentNode.nodeId.isEmpty()) {
+            if (!parentNode.isFolder) {
+                return false;
+            }
+            parentRemoteId = parentNode.remoteFileId;
+        } else {
+            const QString parentRelative = parentPath.mid(1);
+            const FuseMetadata parentMeta = m_database->getFuseMetadataByPath(parentRelative);
+            if (parentMeta.fileId.isEmpty() || !parentMeta.isFolder) {
+                return false;
+            }
+            parentRemoteId = parentMeta.fileId;
+        }
+    }
+
+    const QString nodeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString contentPath = m_fileCache->getDirtyPathForFile(nodeId);
+    if (!QDir().mkpath(QFileInfo(contentPath).dir().absolutePath())) {
+        return false;
+    }
+
+    QFile localFile(contentPath);
+    if (!localFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    localFile.close();
+
+    FuseNode node;
+    node.nodeId = nodeId;
+    const FuseNode parentNode = m_database->getFuseNodeByPath(parentPath);
+    node.parentNodeId = parentNode.nodeId;
+    node.path = path;
+    node.name = fileName;
+    node.remoteName = fileName;
+    node.isFolder = false;
+    node.isPendingCreate = true;
+    node.size = 0;
+    node.mimeType = QStringLiteral("application/octet-stream");
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+
+    FuseNodeContentState state;
+    state.nodeId = nodeId;
+    state.localContentPath = contentPath;
+    state.localGeneration = 0;
+    state.remoteAckGeneration = 0;
+    state.size = 0;
+    state.lastLocalWrite = node.createdTime;
+
+    FuseMutationTransaction mutation;
+    mutation.nodesToUpsert.append(node);
+    mutation.contentStatesToUpsert.append(state);
+    mutation.journalEntry.idempotencyKey = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    mutation.journalEntry.operationType = FuseJournalOperationType::CreateFile;
+    mutation.journalEntry.nodeId = nodeId;
+    mutation.journalEntry.parentNodeId = node.parentNodeId;
+    mutation.journalEntry.path = path;
+
+    if (!mutation.journalEntry.parentNodeId.isEmpty()) {
+        const FuseNode persistedParent = m_database->getFuseNode(node.parentNodeId);
+        mutation.journalEntry.remoteParentId = persistedParent.remoteFileId;
+    } else if (parentPath != QStringLiteral("/")) {
+        mutation.journalEntry.remoteParentId = parentRemoteId;
+    }
+
+    qint64 journalEntryId = 0;
+    if (!m_database->commitFuseMutationTransaction(mutation, &journalEntryId)) {
+        QFile::remove(contentPath);
+        return false;
+    }
+
+    requestReplaySync();
+
+    const int localFd = openLocalHandle(contentPath, true);
+    if (localFd < 0) {
+        return false;
+    }
+
+    if (::fsync(localFd) != 0) {
+        ::close(localFd);
+        return false;
+    }
+
+    openFile->nodeId = nodeId;
+    openFile->fileId.clear();
+    openFile->cacheKey = nodeId;
+    openFile->path = path;
+    openFile->contentPath = contentPath;
+    openFile->localFd = localFd;
+    openFile->size = 0;
+    openFile->writable = true;
+    openFile->dirty = false;
+    openFile->synthetic = false;
+    Q_UNUSED(journalEntryId)
+    return true;
+}
+
+bool FuseDriver::createAuthoritativeLocalDirectory(const QString& path) {
+    if (!m_database || path.isEmpty() || path == QStringLiteral("/")) {
+        return false;
+    }
+
+    const QString parentPath = getParentPath(path);
+    const QString directoryName = getFileName(path);
+    if (directoryName.isEmpty()) {
+        return false;
+    }
+
+    if (!m_database->getFuseNodeByPath(path).nodeId.isEmpty()) {
+        return false;
+    }
+
+    const QString relativePath = logicalPathFromFusePath(path);
+    if (!m_database->getFuseMetadataByPath(relativePath).fileId.isEmpty()) {
+        return false;
+    }
+
+    QString parentRemoteId;
+    QString parentNodeId;
+    if (parentPath != QStringLiteral("/")) {
+        const FuseNode parentNode = m_database->getFuseNodeByPath(parentPath);
+        if (!parentNode.nodeId.isEmpty()) {
+            if (!parentNode.isFolder) {
+                return false;
+            }
+            parentNodeId = parentNode.nodeId;
+            parentRemoteId = parentNode.remoteFileId;
+        } else {
+            const FuseMetadata parentMeta =
+                m_database->getFuseMetadataByPath(logicalPathFromFusePath(parentPath));
+            if (parentMeta.fileId.isEmpty() || !parentMeta.isFolder) {
+                return false;
+            }
+            parentRemoteId = parentMeta.fileId;
+        }
+    }
+
+    FuseNode node;
+    node.nodeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    node.parentNodeId = parentNodeId;
+    node.path = path;
+    node.name = directoryName;
+    node.remoteName = directoryName;
+    node.isFolder = true;
+    node.isPendingCreate = true;
+    node.size = 0;
+    node.mimeType = QStringLiteral("application/vnd.google-apps.folder");
+    node.createdTime = QDateTime::currentDateTimeUtc();
+    node.modifiedTime = node.createdTime;
+    node.lastAccessed = node.createdTime;
+
+    FuseMutationTransaction mutation;
+    mutation.nodesToUpsert.append(node);
+    mutation.journalEntry.idempotencyKey = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    mutation.journalEntry.operationType = FuseJournalOperationType::CreateDirectory;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.parentNodeId = node.parentNodeId;
+    mutation.journalEntry.path = path;
+    mutation.journalEntry.remoteParentId = parentRemoteId;
+
+    const bool committed = m_database->commitFuseMutationTransaction(mutation, nullptr);
+    if (committed) {
+        requestReplaySync();
+    }
+    return committed;
+}
+
+FuseNode FuseDriver::ensureLocalNodeForMetadata(const QString& path, const FuseMetadata& metadata) {
+    if (!m_database || path.isEmpty() || metadata.fileId.isEmpty()) {
+        return {};
+    }
+
+    FuseNode node = m_database->getFuseNodeByPath(path);
+    if (!node.nodeId.isEmpty()) {
+        if (node.remoteFileId != metadata.fileId || node.remoteParentId != metadata.parentId ||
+            node.size != metadata.size || node.modifiedTime != metadata.modifiedTime) {
+            node.remoteFileId = metadata.fileId;
+            node.remoteParentId = metadata.parentId;
+            node.name = getFileName(path);
+            node.remoteName = metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName;
+            node.mimeType = metadata.mimeType;
+            node.remoteMimeType = metadata.remoteMimeType;
+            node.webViewLink = metadata.webViewLink;
+            node.nativeDocModeOverride = metadata.nativeDocModeOverride;
+            node.isFolder = metadata.isFolder;
+            node.isPendingCreate = false;
+            node.size = metadata.size;
+            node.createdTime = metadata.createdTime;
+            node.modifiedTime = metadata.modifiedTime;
+            node.lastAccessed = metadata.lastAccessed;
+            node.lastSyncedAt = QDateTime::currentDateTimeUtc();
+            if (!m_database->saveFuseNode(node)) {
+                return {};
+            }
+        }
+        return node;
+    }
+
+    node.nodeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString parentPath = getParentPath(path);
+    node.parentNodeId = m_database->getFuseNodeByPath(parentPath).nodeId;
+    node.remoteFileId = metadata.fileId;
+    node.remoteParentId = metadata.parentId;
+    node.path = path;
+    node.name = getFileName(path);
+    node.remoteName = metadata.remoteName.isEmpty() ? metadata.name : metadata.remoteName;
+    node.mimeType = metadata.mimeType;
+    node.remoteMimeType = metadata.remoteMimeType;
+    node.webViewLink = metadata.webViewLink;
+    node.nativeDocModeOverride = metadata.nativeDocModeOverride;
+    node.isFolder = metadata.isFolder;
+    node.isPendingCreate = false;
+    node.size = metadata.size;
+    node.createdTime = metadata.createdTime;
+    node.modifiedTime = metadata.modifiedTime;
+    node.lastAccessed = metadata.lastAccessed;
+    node.lastSyncedAt = QDateTime::currentDateTimeUtc();
+    if (!m_database->saveFuseNode(node)) {
+        return {};
+    }
+    return node;
+}
+
+QString FuseDriver::authoritativeContentPathForNode(const FuseNode& node) const {
+    if (!m_database || node.nodeId.isEmpty()) {
+        return QString();
+    }
+
+    const FuseNodeContentState state = m_database->getFuseNodeContentState(node.nodeId);
+    if (!state.nodeId.isEmpty() && !state.localContentPath.isEmpty()) {
+        return state.localContentPath;
+    }
+
+    if (!node.remoteFileId.isEmpty() && m_fileCache) {
+        return m_fileCache->getContentPath(node.remoteFileId);
+    }
+
+    return QString();
+}
+
+QString FuseDriver::contentIdentityForOpenFile(const FuseOpenFile& openFile) const {
+    if (!openFile.fileId.isEmpty()) {
+        return openFile.fileId;
+    }
+    return openFile.nodeId;
+}
+
+bool FuseDriver::commitNodeContentMutation(const FuseOpenFile& openFile,
+                                           FuseJournalOperationType operation) {
+    if (!m_database || openFile.nodeId.isEmpty() || openFile.localFd < 0) {
+        return false;
+    }
+
+    FuseNode node = m_database->getFuseNode(openFile.nodeId);
+    if (node.nodeId.isEmpty()) {
+        return false;
+    }
+
+    FuseNodeContentState state = m_database->getFuseNodeContentState(node.nodeId);
+    if (state.nodeId.isEmpty()) {
+        state.nodeId = node.nodeId;
+        state.remoteAckGeneration = 0;
+    }
+
+    const qint64 size = sizeForOpenHandle(openFile.localFd);
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    state.localContentPath = openFile.contentPath;
+    state.localGeneration += 1;
+    state.size = size;
+    state.lastLocalWrite = now;
+
+    node.size = size;
+    node.modifiedTime = now;
+    node.lastAccessed = now;
+
+    FuseMutationTransaction mutation;
+    mutation.nodesToUpsert.append(node);
+    mutation.contentStatesToUpsert.append(state);
+    mutation.journalEntry.idempotencyKey = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    mutation.journalEntry.operationType = operation;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.parentNodeId = node.parentNodeId;
+    mutation.journalEntry.path = node.path;
+    mutation.journalEntry.remoteFileId = node.remoteFileId;
+    mutation.journalEntry.remoteParentId = node.remoteParentId;
+    mutation.journalEntry.localGeneration = state.localGeneration;
+    mutation.journalEntry.payloadJson = QStringLiteral("{\"size\":%1,\"contentPath\":\"%2\"}")
+                                            .arg(size)
+                                            .arg(state.localContentPath);
+
+    const bool committed = m_database->commitFuseMutationTransaction(mutation, nullptr);
+    if (committed) {
+        requestReplaySync();
+    }
+    return committed;
+}
+
+bool FuseDriver::updateNodeContentPath(const QString& nodeId, const QString& contentPath) {
+    if (!m_database || nodeId.isEmpty() || contentPath.isEmpty()) {
+        return false;
+    }
+
+    FuseNodeContentState state = m_database->getFuseNodeContentState(nodeId);
+    if (state.nodeId.isEmpty()) {
+        state.nodeId = nodeId;
+    }
+    state.localContentPath = contentPath;
+    state.size = sizeForExistingPath(contentPath);
+    state.lastLocalWrite = QDateTime::currentDateTimeUtc();
+    return m_database->saveFuseNodeContentState(state);
+}
+
+bool FuseDriver::applyLocalNodeRename(const QString& fromPath, const QString& toPath) {
+    if (!m_database || fromPath.isEmpty() || toPath.isEmpty() || fromPath == toPath) {
+        return false;
+    }
+
+    const QString fromLookup = logicalPathFromFusePath(fromPath);
+    const QString toLookup = logicalPathFromFusePath(toPath);
+    FuseMetadata meta = m_database->getFuseMetadataByPath(fromLookup);
+    FuseNode node = m_database->getFuseNodeByPath(fromPath);
+    if (node.nodeId.isEmpty() && !meta.fileId.isEmpty()) {
+        node = ensureLocalNodeForMetadata(fromPath, meta);
+    }
+    if (node.nodeId.isEmpty()) {
+        return false;
+    }
+
+    const FuseNode existingDestinationNode = m_database->getFuseNodeByPath(toPath);
+    if (!existingDestinationNode.nodeId.isEmpty() &&
+        existingDestinationNode.nodeId != node.nodeId) {
+        return false;
+    }
+    const FuseMetadata existingDestinationMeta = m_database->getFuseMetadataByPath(toLookup);
+    if (!existingDestinationMeta.fileId.isEmpty() &&
+        existingDestinationMeta.fileId != node.remoteFileId) {
+        return false;
+    }
+
+    const QString destinationParentPath = getParentPath(toPath);
+    QString destinationParentNodeId;
+    QString destinationParentRemoteId;
+    if (destinationParentPath != QStringLiteral("/")) {
+        const FuseNode parentNode = m_database->getFuseNodeByPath(destinationParentPath);
+        if (!parentNode.nodeId.isEmpty()) {
+            if (!parentNode.isFolder) {
+                return false;
+            }
+            destinationParentNodeId = parentNode.nodeId;
+            destinationParentRemoteId = parentNode.remoteFileId;
+        } else {
+            const FuseMetadata parentMeta =
+                m_database->getFuseMetadataByPath(logicalPathFromFusePath(destinationParentPath));
+            if (parentMeta.fileId.isEmpty() || !parentMeta.isFolder) {
+                return false;
+            }
+            destinationParentRemoteId = parentMeta.fileId;
+        }
+    }
+
+    QList<FuseNode> updatedNodes;
+    const QList<FuseNode> allNodes = m_database->getAllFuseNodes();
+    for (const FuseNode& candidate : allNodes) {
+        if (!relativePathWithinSubtree(candidate.path, fromPath)) {
+            continue;
+        }
+
+        FuseNode updated = candidate;
+        updated.path = toPath + candidate.path.mid(fromPath.size());
+        updated.name = getFileName(updated.path);
+        if (candidate.nodeId == node.nodeId) {
+            updated.parentNodeId = destinationParentNodeId;
+            if (!updated.remoteFileId.isEmpty()) {
+                updated.remoteName = updated.name;
+            }
+        }
+        updated.modifiedTime = QDateTime::currentDateTimeUtc();
+        updated.lastAccessed = updated.modifiedTime;
+        updatedNodes.append(updated);
+    }
+
+    if (updatedNodes.isEmpty()) {
+        return false;
+    }
+
+    FuseMutationTransaction mutation;
+    mutation.nodesToUpsert = updatedNodes;
+    mutation.journalEntry.idempotencyKey = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    mutation.journalEntry.operationType = getParentPath(fromPath) == destinationParentPath
+                                              ? FuseJournalOperationType::Rename
+                                              : FuseJournalOperationType::Move;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.parentNodeId = node.parentNodeId;
+    mutation.journalEntry.destinationParentNodeId = destinationParentNodeId;
+    mutation.journalEntry.path = fromPath;
+    mutation.journalEntry.destinationPath = toPath;
+    mutation.journalEntry.remoteFileId = node.remoteFileId;
+    mutation.journalEntry.remoteParentId =
+        node.remoteParentId.isEmpty() ? destinationParentRemoteId : node.remoteParentId;
+
+    if (!m_database->commitFuseMutationTransaction(mutation, nullptr)) {
+        return false;
+    }
+
+    if (!meta.fileId.isEmpty()) {
+        const QString newName = getFileName(toPath);
+        const QString remoteNewName = remoteRenameTargetForMetadata(meta, newName);
+        meta.path = toLookup;
+        meta.name = newName;
+        meta.remoteName = remoteNewName;
+        if (!destinationParentRemoteId.isEmpty()) {
+            meta.parentId = destinationParentRemoteId;
+        }
+        meta.cachedAt = QDateTime::currentDateTimeUtc();
+        meta.lastAccessed = QDateTime::currentDateTimeUtc();
+        if (!saveMetadataEntry(meta)) {
+            return false;
+        }
+        if (meta.isFolder) {
+            m_database->updateFuseChildrenPaths(meta.fileId, fromLookup, toLookup);
+        }
+    }
+
+    invalidateFusePaths({fromPath, toPath, getParentPath(fromPath), destinationParentPath});
+    requestReplaySync();
+    return true;
+}
+
+int FuseDriver::applyLocalNodeRemoval(const QString& path, bool expectDirectory,
+                                      bool requireEmptyDirectory) {
+    if (!m_database || path.isEmpty() || path == QStringLiteral("/")) {
+        return -EIO;
+    }
+
+    const QString lookupPath = logicalPathFromFusePath(path);
+    FuseMetadata meta = m_database->getFuseMetadataByPath(lookupPath);
+    FuseNode node = m_database->getFuseNodeByPath(path);
+    if (node.nodeId.isEmpty() && !meta.fileId.isEmpty()) {
+        node = ensureLocalNodeForMetadata(path, meta);
+    }
+    if (node.nodeId.isEmpty()) {
+        return -ENOENT;
+    }
+
+    if (expectDirectory && !node.isFolder) {
+        return -ENOTDIR;
+    }
+    if (!expectDirectory && node.isFolder) {
+        return -EISDIR;
+    }
+
+    const QList<FuseNode> allNodes = m_database->getAllFuseNodes();
+    QList<QString> nodeIdsToDelete;
+    QList<QString> contentStatesToDelete;
+    QStringList contentPathsToDelete;
+    for (const FuseNode& candidate : allNodes) {
+        if (!relativePathWithinSubtree(candidate.path, path)) {
+            continue;
+        }
+        if (candidate.path != path && requireEmptyDirectory) {
+            return -ENOTEMPTY;
+        }
+        nodeIdsToDelete.append(candidate.nodeId);
+        const FuseNodeContentState contentState =
+            m_database->getFuseNodeContentState(candidate.nodeId);
+        if (!contentState.nodeId.isEmpty()) {
+            contentStatesToDelete.append(candidate.nodeId);
+            if (!contentState.localContentPath.isEmpty()) {
+                contentPathsToDelete.append(contentState.localContentPath);
+            }
+        }
+    }
+
+    if (nodeIdsToDelete.isEmpty()) {
+        nodeIdsToDelete.append(node.nodeId);
+    }
+
+    FuseMutationTransaction mutation;
+    mutation.nodeIdsToDelete = nodeIdsToDelete;
+    mutation.contentStateNodeIdsToDelete = contentStatesToDelete;
+    mutation.journalEntry.idempotencyKey = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    mutation.journalEntry.operationType = FuseJournalOperationType::Trash;
+    mutation.journalEntry.nodeId = node.nodeId;
+    mutation.journalEntry.parentNodeId = node.parentNodeId;
+    mutation.journalEntry.path = path;
+    mutation.journalEntry.remoteFileId = node.remoteFileId;
+    mutation.journalEntry.remoteParentId = node.remoteParentId;
+
+    if (!m_database->commitFuseMutationTransaction(mutation, nullptr)) {
+        return -EIO;
+    }
+
+    for (const QString& contentPath : contentPathsToDelete) {
+        QFile::remove(contentPath);
+    }
+
+    if (!meta.fileId.isEmpty()) {
+        if (meta.isFolder) {
+            deleteFuseMetadataSubtree(meta.path);
+        } else {
+            if (m_fileCache) {
+                m_fileCache->removeFromCache(meta.fileId);
+            }
+            m_database->deleteNativeDocState(meta.fileId);
+            m_database->deleteFuseMetadata(meta.fileId);
+            removeMetadataEntryFromCache(meta);
+        }
+    }
+
+    invalidateFusePaths({getParentPath(path), path});
+    requestReplaySync();
+    return 0;
+}
+
+void FuseDriver::appendLocalNodeChildrenToListing(const QString& path, void* buf,
+                                                  fuse_fill_dir_t filler,
+                                                  QSet<QString>& emittedNames) const {
+    if (!m_database) {
+        return;
+    }
+
+    const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+    for (const FuseNode& node : nodes) {
+        if (node.isTrashed) {
+            continue;
+        }
+
+        if (getParentPath(node.path) != path) {
+            continue;
+        }
+
+        if (emittedNames.contains(node.name)) {
+            continue;
+        }
+
+        filler(buf, node.name.toUtf8().constData(), nullptr, 0,
+               node.isFolder ? FUSE_FILL_DIR_PLUS : static_cast<enum fuse_fill_dir_flags>(0));
+        emittedNames.insert(node.name);
+    }
+}
+
+void FuseDriver::requestReplaySync() {
+    if (m_replayWorker) {
+        QMetaObject::invokeMethod(m_replayWorker, "syncNow", Qt::QueuedConnection);
+    }
 }
 
 QString FuseDriver::trashOverlayRoot() const {
@@ -3624,7 +3823,8 @@ void FuseDriver::invalidateFusePaths(const QList<QString>& paths) {
     }
 }
 
-bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd) {
+bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd,
+                                         const QString& nodeId, const QString& sourcePath) {
     if (fileId.isEmpty() || !m_fileCache) {
         return false;
     }
@@ -3633,7 +3833,20 @@ bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& p
         ::fsync(localFd);
     }
 
-    QString pendingPath = m_fileCache->moveToDirtyStore(fileId);
+    QString resolvedNodeId = nodeId;
+    if (resolvedNodeId.isEmpty() && m_database) {
+        const QString normalizedPath =
+            path.startsWith(QLatin1Char('/')) ? path : QStringLiteral("/") + path;
+        resolvedNodeId = m_database->getFuseNodeByPath(normalizedPath).nodeId;
+    }
+
+    QString authoritativeSourcePath = sourcePath;
+    if (authoritativeSourcePath.isEmpty() && !resolvedNodeId.isEmpty() && m_database) {
+        const FuseNodeContentState state = m_database->getFuseNodeContentState(resolvedNodeId);
+        authoritativeSourcePath = state.localContentPath;
+    }
+
+    QString pendingPath = m_fileCache->moveToDirtyStore(fileId, authoritativeSourcePath);
     if (pendingPath.isEmpty()) {
         return false;
     }
@@ -3658,8 +3871,12 @@ bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& p
 
             ::close(openFile.localFd);
             openFile.localFd = newFd;
+            openFile.contentPath = pendingPath;
             openFile.size = sizeForOpenHandle(newFd);
         }
+    }
+    if (!resolvedNodeId.isEmpty()) {
+        updateNodeContentPath(resolvedNodeId, pendingPath);
     }
 
     if (m_database) {
@@ -3721,7 +3938,7 @@ int FuseDriver::truncateWithoutHandle(const QString& fileId, qint64 expectedSize
         result = -EIO;
     } else {
         m_fileCache->markDirty(fileId, lookupPath);
-        if (!stageDirtyFileForUpload(fileId, path, localFd)) {
+        if (!stageDirtyFileForUpload(fileId, path, localFd, QString(), cachePath)) {
             result = -EIO;
         }
     }
@@ -3866,6 +4083,20 @@ void FuseDriver::startBackgroundWorkers() {
             QMetaObject::invokeMethod(m_metadataRefreshWorker, "pause", Qt::QueuedConnection);
         }
     }
+
+    if (m_database && m_driveClient && !m_replayThread && !m_replayWorker) {
+        m_replayThread = new QThread(this);
+        m_replayWorker = new FuseReplayWorker(m_database, m_driveClient);
+        m_replayWorker->moveToThread(m_replayThread);
+
+        connect(m_replayThread, &QThread::started, m_replayWorker, &FuseReplayWorker::start);
+        connect(m_replayThread, &QThread::finished, m_replayWorker, &QObject::deleteLater);
+
+        m_replayThread->start();
+        if (m_backgroundSyncPaused || !isDriveApiAllowed()) {
+            QMetaObject::invokeMethod(m_replayWorker, "pause", Qt::QueuedConnection);
+        }
+    }
 }
 
 void FuseDriver::stopBackgroundWorkers() {
@@ -3907,6 +4138,22 @@ void FuseDriver::stopBackgroundWorkers() {
         m_metadataRefreshWorker = nullptr;
         m_metadataRefreshThread = nullptr;
     }
+
+    if (m_replayWorker && m_replayThread && m_replayThread->isRunning()) {
+        QMetaObject::invokeMethod(m_replayWorker, "stop", Qt::QueuedConnection);
+    }
+
+    if (m_replayThread) {
+        m_replayThread->quit();
+        if (!m_replayThread->wait(3000)) {
+            qWarning() << "FuseDriver: FuseReplayWorker thread did not exit, terminating";
+            m_replayThread->terminate();
+            m_replayThread->wait(1000);
+        }
+        delete m_replayThread;
+        m_replayWorker = nullptr;
+        m_replayThread = nullptr;
+    }
 }
 
 QString FuseDriver::getParentPath(const QString& path) {
@@ -3943,8 +4190,9 @@ uint64_t FuseDriver::registerOpenFile(const FuseOpenFile& openFile) {
     }
     // Fix 2: Tell FileCache that this file has an active FUSE handle so it
     // will not be evicted or invalidated while the handle is open.
-    if (m_fileCache && !openFile.fileId.isEmpty()) {
-        m_fileCache->addOpenHandle(openFile.fileId, openFile.writable);
+    const QString contentId = contentIdentityForOpenFile(openFile);
+    if (m_fileCache && !contentId.isEmpty()) {
+        m_fileCache->addOpenHandle(contentId, openFile.writable);
     }
     return handle;
 }
@@ -3976,14 +4224,14 @@ bool FuseDriver::markOpenFileClean(uint64_t fh) {
 }
 
 void FuseDriver::unregisterOpenFile(uint64_t fh) {
-    QString fileId;
+    QString contentId;
     int localFd = -1;
     bool writable = false;
     {
         QMutexLocker locker(&m_openFilesMutex);
         auto it = m_openFiles.find(fh);
         if (it != m_openFiles.end()) {
-            fileId = it->fileId;
+            contentId = contentIdentityForOpenFile(*it);
             localFd = it->localFd;
             writable = it->writable;
             m_openFiles.erase(it);
@@ -3994,7 +4242,7 @@ void FuseDriver::unregisterOpenFile(uint64_t fh) {
     }
     // Fix 2: Decrement the open-handle count so the file becomes eligible
     // for eviction and invalidation once all handles are closed.
-    if (m_fileCache && !fileId.isEmpty()) {
-        m_fileCache->removeOpenHandle(fileId, writable);
+    if (m_fileCache && !contentId.isEmpty()) {
+        m_fileCache->removeOpenHandle(contentId, writable);
     }
 }

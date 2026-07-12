@@ -97,6 +97,7 @@ set(VIA_CORE_SOURCES
     src/sync/SyncSettings.cpp
     src/sync/TrashPolicy.cpp
     src/fuse/FuseDriver.cpp
+    src/fuse/FuseReplayWorker.cpp
     src/fuse/FileCache.cpp
     src/fuse/DirtySyncWorker.cpp
     src/fuse/MetadataCache.cpp
@@ -142,6 +143,7 @@ set(HEADERS
     src/sync/SyncSettings.h
     src/sync/TrashPolicy.h
     src/fuse/FuseDriver.h
+    src/fuse/FuseReplayWorker.h
     src/fuse/FileCache.h
     src/fuse/DirtySyncWorker.h
     src/fuse/MetadataCache.h
@@ -300,6 +302,7 @@ if(BUILD_TESTS)
     add_qt_test(test_CacheMaintenance tests/fuse/TestCacheMaintenance.cpp)
     add_qt_test(test_DirtySyncWorker tests/fuse/TestDirtySyncWorker.cpp)
     add_qt_test(test_FuseDriverLifecycle tests/fuse/TestFuseDriverLifecycle.cpp)
+    add_qt_test(test_FuseReplayWorker tests/fuse/TestFuseReplayWorker.cpp)
     add_qt_test(test_MetadataCache tests/fuse/TestMetadataCache.cpp)
     add_qt_test(test_MetadataRefreshWorker tests/fuse/TestMetadataRefreshWorker.cpp)
     add_qt_test(test_NativeDocShortcutHandler tests/fuse/TestNativeDocShortcutHandler.cpp)

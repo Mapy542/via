@@ -213,7 +213,9 @@ void FileCache::setPauseController(RuntimePauseController* pauseController) {
     m_pauseController = pauseController;
 }
 
-bool FileCache::isCached(const QString& fileId) const { return isCached(fileId, QString()); }
+bool FileCache::isCached(const QString& fileId) const {
+    return isCached(fileId, QString());
+}
 
 bool FileCache::isCached(const QString& fileId, const QString& exportMimeType) const {
     QMutexLocker locker(&m_mutex);
@@ -1475,23 +1477,32 @@ bool FileCache::isDriveApiAllowedLocked() const {
     return !m_pauseController || m_pauseController->isDriveApiAllowed();
 }
 
-QString FileCache::moveToDirtyStore(const QString& fileId) {
+QString FileCache::moveToDirtyStore(const QString& fileId, const QString& sourcePath) {
     QMutexLocker locker(&m_mutex);
 
-    // Nothing to move if not in cache
-    if (!m_cacheEntries.contains(fileId)) {
-        // File may already be in the pending store (re-entrant call guard)
-        QString pendingPath = generateDirtyPath(fileId);
-        if (QFile::exists(pendingPath)) {
-            qDebug() << "FileCache: File already in pending store for" << fileId;
-            return pendingPath;
-        }
-        qWarning() << "FileCache: moveToDirtyStore called but no cache entry for" << fileId;
-        return QString();
+    QString pendingPath = generateDirtyPath(fileId);
+
+    // File may already be in the pending store (re-entrant call guard)
+    if (QFile::exists(pendingPath)) {
+        qDebug() << "FileCache: File already in pending store for" << fileId;
+        return pendingPath;
     }
 
-    CacheEntry cacheEntry = m_cacheEntries[fileId];
-    QString pendingPath = generateDirtyPath(fileId);
+    const bool hasCacheEntry = m_cacheEntries.contains(fileId);
+    const CacheEntry cacheEntry = hasCacheEntry ? m_cacheEntries.value(fileId) : CacheEntry();
+
+    QString stagedSourcePath;
+    if (!sourcePath.isEmpty() && QFile::exists(sourcePath)) {
+        stagedSourcePath = sourcePath;
+    } else if (hasCacheEntry && QFile::exists(cacheEntry.cachePath)) {
+        stagedSourcePath = cacheEntry.cachePath;
+    }
+
+    if (stagedSourcePath.isEmpty()) {
+        qWarning() << "FileCache: moveToDirtyStore has no stageable local content for" << fileId
+                   << "sourcePath=" << sourcePath << "hasCacheEntry=" << hasCacheEntry;
+        return QString();
+    }
 
     // Ensure the pending-store subdirectory exists
     QFileInfo pendingInfo(pendingPath);
@@ -1504,25 +1515,29 @@ QString FileCache::moveToDirtyStore(const QString& fileId) {
     }
 
     // Rename (atomic on same filesystem; falls back to copy+delete cross-fs)
-    if (!QFile::rename(cacheEntry.cachePath, pendingPath)) {
+    if (!QFile::rename(stagedSourcePath, pendingPath)) {
         // Cross-filesystem: copy then remove
-        if (!QFile::copy(cacheEntry.cachePath, pendingPath)) {
+        if (!QFile::copy(stagedSourcePath, pendingPath)) {
             qWarning() << "FileCache: Could not move dirty file to pending store for" << fileId;
             return QString();
         }
-        QFile::remove(cacheEntry.cachePath);
+        QFile::remove(stagedSourcePath);
     }
 
-    // Remove from LRU cache accounting — it is no longer evictable
-    m_currentSize -= cacheEntry.size;
-    if (m_currentSize < 0) m_currentSize = 0;
-    m_cacheEntries.remove(fileId);
+    if (hasCacheEntry) {
+        // Remove from LRU cache accounting — it is no longer evictable
+        m_currentSize -= cacheEntry.size;
+        if (m_currentSize < 0)
+            m_currentSize = 0;
+        m_cacheEntries.remove(fileId);
 
-    if (m_database) {
-        m_database->evictFuseCacheEntry(fileId);
+        if (m_database) {
+            m_database->evictFuseCacheEntry(fileId);
+        }
     }
 
-    qDebug() << "FileCache: Moved dirty file to pending store" << pendingPath;
+    qDebug() << "FileCache: Moved dirty file to pending store" << pendingPath << "from"
+             << stagedSourcePath;
     return pendingPath;
 }
 

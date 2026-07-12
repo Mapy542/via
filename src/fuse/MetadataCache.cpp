@@ -185,6 +185,125 @@ FuseFileMetadata fromDbMetadata(const FuseMetadata& dbMeta) {
     return metadata;
 }
 
+FuseFileMetadata fromNodeRecord(const FuseNode& node, const SyncDatabase* database) {
+    FuseFileMetadata metadata;
+    metadata.fileId = node.remoteFileId;
+    metadata.path = normalizeMetadataPath(node.path);
+    metadata.name = node.name;
+    metadata.remoteName = node.remoteName.isEmpty() ? node.name : node.remoteName;
+    metadata.nativeDocModeOverride = node.nativeDocModeOverride;
+    metadata.parentId = node.remoteParentId.isEmpty() ? node.parentNodeId : node.remoteParentId;
+    metadata.isFolder = node.isFolder;
+    metadata.size = node.size;
+    metadata.mimeType = node.mimeType;
+    metadata.remoteMimeType = node.remoteMimeType;
+    metadata.webViewLink = node.webViewLink;
+    metadata.createdTime = node.createdTime;
+    metadata.modifiedTime = node.modifiedTime;
+    metadata.cachedAt = node.lastSyncedAt.isValid() ? node.lastSyncedAt : node.modifiedTime;
+    metadata.lastAccessed = node.lastAccessed;
+
+    if (database && !node.nodeId.isEmpty()) {
+        const FuseNodeContentState contentState = database->getFuseNodeContentState(node.nodeId);
+        if (!contentState.nodeId.isEmpty() && contentState.size > metadata.size) {
+            metadata.size = contentState.size;
+        }
+
+        if (!node.remoteFileId.isEmpty()) {
+            const FuseMetadata dbMeta = database->getFuseMetadata(node.remoteFileId);
+            if (!dbMeta.fileId.isEmpty()) {
+                if (metadata.mimeType.isEmpty()) {
+                    metadata.mimeType = dbMeta.mimeType;
+                }
+                if (metadata.remoteMimeType.isEmpty()) {
+                    metadata.remoteMimeType = dbMeta.remoteMimeType;
+                }
+                if (metadata.webViewLink.isEmpty()) {
+                    metadata.webViewLink = dbMeta.webViewLink;
+                }
+                if (!dbMeta.createdTime.isNull() && dbMeta.createdTime.isValid() &&
+                    !metadata.createdTime.isValid()) {
+                    metadata.createdTime = dbMeta.createdTime;
+                }
+            }
+        }
+    }
+
+    return metadata;
+}
+
+bool nodeHasPendingNamespaceMutation(const SyncDatabase* database, const QString& nodeId) {
+    if (!database || nodeId.isEmpty()) {
+        return false;
+    }
+
+    const QList<FuseJournalEntry> entries = database->getAllFuseJournalEntries();
+    for (const FuseJournalEntry& entry : entries) {
+        if (entry.nodeId != nodeId || entry.status == FuseJournalEntryStatus::Completed) {
+            continue;
+        }
+
+        switch (entry.operationType) {
+            case FuseJournalOperationType::CreateFile:
+            case FuseJournalOperationType::CreateDirectory:
+            case FuseJournalOperationType::Rename:
+            case FuseJournalOperationType::Move:
+            case FuseJournalOperationType::Trash:
+            case FuseJournalOperationType::Delete:
+            case FuseJournalOperationType::Restore:
+            case FuseJournalOperationType::UpdateNativeDocMetadata:
+            case FuseJournalOperationType::UpdateShortcutMetadata:
+                return true;
+            case FuseJournalOperationType::WriteGeneration:
+            case FuseJournalOperationType::Truncate:
+                break;
+        }
+    }
+
+    return false;
+}
+
+bool shouldPreferNodeProjection(const SyncDatabase* database, const FuseNode& node) {
+    if (!database) {
+        return false;
+    }
+
+    if (node.isTrashed || node.isPendingCreate || node.remoteFileId.isEmpty()) {
+        return true;
+    }
+
+    const FuseNodeContentState state = database->getFuseNodeContentState(node.nodeId);
+    if (!state.nodeId.isEmpty() && state.localGeneration > state.remoteAckGeneration) {
+        return true;
+    }
+
+    return nodeHasPendingNamespaceMutation(database, node.nodeId);
+}
+
+QList<FuseFileMetadata> localNodeChildrenForParent(const SyncDatabase* database,
+                                                   const QString& normalizedParent) {
+    QList<FuseFileMetadata> children;
+    if (!database) {
+        return children;
+    }
+
+    const QList<FuseNode> nodes = database->getAllFuseNodes();
+    for (const FuseNode& node : nodes) {
+        if (node.isTrashed) {
+            continue;
+        }
+
+        const FuseFileMetadata metadata = fromNodeRecord(node, database);
+        if (parentPathFor(metadata.path) != normalizedParent) {
+            continue;
+        }
+
+        children.append(metadata);
+    }
+
+    return children;
+}
+
 FuseMetadata toDbMetadata(const FuseFileMetadata& metadata) {
     FuseMetadata dbMeta;
     dbMeta.fileId = metadata.fileId;
@@ -391,12 +510,26 @@ bool MetadataCache::initialize() {
 // ========================================
 
 FuseFileMetadata MetadataCache::getMetadataByPath(const QString& path) const {
+    const QString normalizedPath = normalizeMetadataPath(path);
+
     QReadLocker locker(&m_lock);
 
-    auto it = m_pathToMetadata.constFind(path);
+    auto it = m_pathToMetadata.constFind(normalizedPath);
     if (it != m_pathToMetadata.constEnd()) {
         m_cacheHits++;
         return it.value();
+    }
+
+    locker.unlock();
+    if (m_database) {
+        const QString nodePath = normalizedPath.isEmpty() || normalizedPath == QStringLiteral("/")
+                                     ? QStringLiteral("/")
+                                     : QStringLiteral("/") + normalizedPath;
+        const FuseNode node = m_database->getFuseNodeByPath(nodePath);
+        if (!node.nodeId.isEmpty() && !node.isTrashed) {
+            m_cacheHits++;
+            return fromNodeRecord(node, m_database);
+        }
     }
 
     m_cacheMisses++;
@@ -406,6 +539,21 @@ FuseFileMetadata MetadataCache::getMetadataByPath(const QString& path) const {
 FuseFileMetadata MetadataCache::getOrFetchMetadataByPath(const QString& path, bool* fetched) {
     if (fetched) {
         *fetched = false;
+    }
+
+    if (m_database) {
+        const QString normalizedPath = normalizeMetadataPath(path);
+        const QString nodePath = normalizedPath.isEmpty() || normalizedPath == QStringLiteral("/")
+                                     ? QStringLiteral("/")
+                                     : QStringLiteral("/") + normalizedPath;
+        const FuseNode node = m_database->getFuseNodeByPath(nodePath);
+        if (!node.nodeId.isEmpty() && !node.isTrashed) {
+            if (fetched) {
+                *fetched = true;
+            }
+            m_cacheHits++;
+            return fromNodeRecord(node, m_database);
+        }
     }
 
     // First, try in-memory cache
@@ -447,8 +595,23 @@ FuseFileMetadata MetadataCache::getOrFetchMetadataByPath(const QString& path, bo
 }
 
 bool MetadataCache::hasPath(const QString& path) const {
-    QReadLocker locker(&m_lock);
-    return m_pathToMetadata.contains(path);
+    const QString normalizedPath = normalizeMetadataPath(path);
+    {
+        QReadLocker locker(&m_lock);
+        if (m_pathToMetadata.contains(normalizedPath)) {
+            return true;
+        }
+    }
+
+    if (!m_database) {
+        return false;
+    }
+
+    const QString nodePath = normalizedPath.isEmpty() || normalizedPath == QStringLiteral("/")
+                                 ? QStringLiteral("/")
+                                 : QStringLiteral("/") + normalizedPath;
+    const FuseNode node = m_database->getFuseNodeByPath(nodePath);
+    return !node.nodeId.isEmpty() && !node.isTrashed;
 }
 
 // ========================================
@@ -470,6 +633,16 @@ FuseFileMetadata MetadataCache::getMetadataByFileId(const QString& fileId) const
     }
 
     if (m_database) {
+        const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+        for (const FuseNode& node : nodes) {
+            if (node.remoteFileId == fileId && !node.isTrashed) {
+                m_cacheHits++;
+                return fromNodeRecord(node, m_database);
+            }
+        }
+    }
+
+    if (m_database) {
         const FuseMetadata dbMeta = m_database->getFuseMetadata(fileId);
         if (!dbMeta.fileId.isEmpty()) {
             m_cacheHits++;
@@ -482,17 +655,35 @@ FuseFileMetadata MetadataCache::getMetadataByFileId(const QString& fileId) const
 }
 
 QString MetadataCache::getFileIdByPath(const QString& path) const {
+    const QString normalizedPath = normalizeMetadataPath(path);
     QReadLocker locker(&m_lock);
 
-    auto it = m_pathToMetadata.constFind(path);
+    auto it = m_pathToMetadata.constFind(normalizedPath);
     if (it != m_pathToMetadata.constEnd()) {
         return it->fileId;
+    }
+
+    locker.unlock();
+    if (m_database) {
+        const QString nodePath = normalizedPath.isEmpty() || normalizedPath == QStringLiteral("/")
+                                     ? QStringLiteral("/")
+                                     : QStringLiteral("/") + normalizedPath;
+        return m_database->getFuseNodeByPath(nodePath).remoteFileId;
     }
 
     return QString();
 }
 
 QString MetadataCache::getPathByFileId(const QString& fileId) const {
+    if (m_database) {
+        const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+        for (const FuseNode& node : nodes) {
+            if (node.remoteFileId == fileId && !node.isTrashed) {
+                return normalizeMetadataPath(node.path);
+            }
+        }
+    }
+
     {
         QReadLocker locker(&m_lock);
 
@@ -517,10 +708,11 @@ QString MetadataCache::getPathByFileId(const QString& fileId) const {
 // ========================================
 
 QList<FuseFileMetadata> MetadataCache::getChildren(const QString& parentPath) const {
+    const QString normalizedParent = normalizeMetadataPath(parentPath);
     QReadLocker locker(&m_lock);
 
     QList<FuseFileMetadata> result;
-    auto childrenIt = m_parentToChildren.constFind(parentPath);
+    auto childrenIt = m_parentToChildren.constFind(normalizedParent);
     if (childrenIt != m_parentToChildren.constEnd()) {
         for (const QString& childPath : childrenIt.value()) {
             auto metaIt = m_pathToMetadata.constFind(childPath);
@@ -530,7 +722,42 @@ QList<FuseFileMetadata> MetadataCache::getChildren(const QString& parentPath) co
         }
     }
 
-    return result;
+    locker.unlock();
+
+    if (!m_database) {
+        return result;
+    }
+
+    QHash<QString, FuseFileMetadata> mergedByPath;
+    for (const FuseFileMetadata& child : result) {
+        mergedByPath.insert(child.path, child);
+    }
+
+    const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+    for (const FuseNode& node : nodes) {
+        if (node.isTrashed) {
+            continue;
+        }
+
+        const FuseFileMetadata nodeMetadata = fromNodeRecord(node, m_database);
+        if (parentPathFor(nodeMetadata.path) != normalizedParent) {
+            continue;
+        }
+
+        if (!node.remoteFileId.isEmpty()) {
+            for (auto it = mergedByPath.begin(); it != mergedByPath.end();) {
+                if (it->fileId == node.remoteFileId && it.key() != nodeMetadata.path) {
+                    it = mergedByPath.erase(it);
+                    continue;
+                }
+                ++it;
+            }
+        }
+
+        mergedByPath.insert(nodeMetadata.path, nodeMetadata);
+    }
+
+    return mergedByPath.values();
 }
 
 QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentPath,
@@ -539,12 +766,14 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
         *fetched = false;
     }
 
+    const QString normalizedParentPath = normalizeMetadataPath(parentPath);
+
     // Fresh warm listings can be served directly. If we already know a directory listing is stale,
     // let the caller decide whether it wants to refresh from the API instead of re-serving SQLite.
     bool hadDirectoryState = false;
     {
         QReadLocker locker(&m_lock);
-        auto timeIt = m_childrenCacheTime.constFind(parentPath);
+        auto timeIt = m_childrenCacheTime.constFind(normalizedParentPath);
         if (timeIt != m_childrenCacheTime.constEnd()) {
             hadDirectoryState = true;
             if (timeIt->secsTo(QDateTime::currentDateTime()) < m_maxCacheAgeSeconds) {
@@ -555,6 +784,17 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
 
     if (hadDirectoryState) {
         return QList<FuseFileMetadata>();
+    }
+
+    const QList<FuseFileMetadata> localChildren =
+        localNodeChildrenForParent(m_database, normalizedParentPath);
+    if (!localChildren.isEmpty()) {
+        if (fetched) {
+            *fetched = true;
+        }
+        QWriteLocker locker(&m_lock);
+        m_childrenCacheTime[normalizedParentPath] = QDateTime::currentDateTime();
+        return getChildren(parentPath);
     }
 
     // Cold directory lookup: try SQLite before asking Drive for a fresh listing.
@@ -621,9 +861,13 @@ QList<FuseFileMetadata> MetadataCache::getOrFetchChildren(const QString& parentP
 }
 
 bool MetadataCache::hasChildrenCached(const QString& parentPath) const {
+    if (!localNodeChildrenForParent(m_database, normalizeMetadataPath(parentPath)).isEmpty()) {
+        return true;
+    }
+
     QReadLocker locker(&m_lock);
 
-    auto timeIt = m_childrenCacheTime.constFind(parentPath);
+    auto timeIt = m_childrenCacheTime.constFind(normalizeMetadataPath(parentPath));
     if (timeIt != m_childrenCacheTime.constEnd()) {
         return timeIt->secsTo(QDateTime::currentDateTime()) < m_maxCacheAgeSeconds;
     }
@@ -1188,6 +1432,33 @@ void MetadataCache::loadFromDatabase() {
         m_database->deleteFuseMetadata(staleEntry.fileId);
     }
 
+    const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+    if (!nodes.isEmpty()) {
+        const QDateTime now = QDateTime::currentDateTime();
+        QWriteLocker locker(&m_lock);
+        for (const FuseNode& node : nodes) {
+            if (node.isTrashed) {
+                continue;
+            }
+
+            const FuseFileMetadata metadata = fromNodeRecord(node, m_database);
+            if (!metadata.isValid()) {
+                continue;
+            }
+
+            m_pathToMetadata[metadata.path] = metadata;
+            if (!metadata.fileId.isEmpty()) {
+                m_fileIdToPath[metadata.fileId] = metadata.path;
+            }
+
+            const QString parentPath = getParentPath(metadata.path);
+            if (!m_parentToChildren[parentPath].contains(metadata.path)) {
+                m_parentToChildren[parentPath].append(metadata.path);
+            }
+            m_childrenCacheTime[parentPath] = now;
+        }
+    }
+
     qDebug() << "MetadataCache: Deferred startup preload; pruned" << staleTrashEntries.size()
              << "stale trash entries";
 }
@@ -1264,6 +1535,27 @@ FuseFileMetadata MetadataCache::upsertRemoteMetadataInternal(const FuseFileMetad
         return FuseFileMetadata();
     }
 
+    if (m_database) {
+        const QList<FuseNode> nodes = m_database->getAllFuseNodes();
+        for (const FuseNode& node : nodes) {
+            if (node.remoteFileId != metadata.fileId) {
+                continue;
+            }
+            if (node.isTrashed) {
+                return FuseFileMetadata();
+            }
+
+            if (shouldPreferNodeProjection(m_database, node)) {
+                const FuseFileMetadata nodeMetadata = fromNodeRecord(node, m_database);
+                resolved.path = nodeMetadata.path;
+                resolved.name = nodeMetadata.name;
+                resolved.remoteName = nodeMetadata.remoteName;
+                resolved.size = nodeMetadata.size;
+            }
+            break;
+        }
+    }
+
     if (TrashPolicy::isTrashRelativePath(resolved.path)) {
         return FuseFileMetadata();
     }
@@ -1287,6 +1579,8 @@ QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
 
     QHash<QString, FuseFileMetadata> existingByFileId;
     QSet<QString> incomingIds;
+    const QList<FuseNode> localNodes =
+        m_database ? m_database->getAllFuseNodes() : QList<FuseNode>();
     for (const FuseMetadata& existingChild : existingChildren) {
         const FuseFileMetadata existing = fromDbMetadata(existingChild);
         existingByFileId.insert(existing.fileId, existing);
@@ -1300,11 +1594,39 @@ QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
             continue;
         }
 
+        bool skipRemoteChild = false;
+        FuseFileMetadata localOverride;
+        for (const FuseNode& node : localNodes) {
+            if (node.remoteFileId != child.fileId) {
+                continue;
+            }
+            if (node.isTrashed) {
+                skipRemoteChild = true;
+                break;
+            }
+
+            localOverride = fromNodeRecord(node, m_database);
+            if (parentPathFor(localOverride.path) != parentPath) {
+                skipRemoteChild = true;
+            }
+            break;
+        }
+        if (skipRemoteChild) {
+            continue;
+        }
+
         incomingIds.insert(child.fileId);
         FuseFileMetadata resolved = resolveRemoteMetadata(child, parentPath, existingByFileId,
                                                           &claimedPaths, m_duplicateNameStrategy);
         if (!resolved.isValid()) {
             continue;
+        }
+
+        if (localOverride.isValid()) {
+            resolved.path = localOverride.path;
+            resolved.name = localOverride.name;
+            resolved.remoteName = localOverride.remoteName;
+            resolved.size = localOverride.size;
         }
 
         if (TrashPolicy::isTrashRelativePath(resolved.path)) {
@@ -1352,6 +1674,25 @@ QList<FuseFileMetadata> MetadataCache::replaceRemoteChildrenInternal(
         for (const QString& staleFileId : staleFileIds) {
             removeByFileId(staleFileId);
         }
+    }
+
+    for (const FuseNode& node : localNodes) {
+        if (node.isTrashed) {
+            continue;
+        }
+
+        const FuseFileMetadata nodeMetadata = fromNodeRecord(node, m_database);
+        if (parentPathFor(nodeMetadata.path) != parentPath) {
+            continue;
+        }
+        if (!node.remoteFileId.isEmpty() && incomingIds.contains(node.remoteFileId)) {
+            continue;
+        }
+        if (TrashPolicy::isTrashRelativePath(nodeMetadata.path)) {
+            continue;
+        }
+
+        resolvedChildren.append(nodeMetadata);
     }
 
     setMetadataBatch(resolvedChildren);

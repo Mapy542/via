@@ -8,6 +8,7 @@
 #include "MetadataRefreshWorker.h"
 
 #include <QDebug>
+#include <QFile>
 #include <QMutexLocker>
 #include <QSettings>
 #include <QtGlobal>
@@ -100,6 +101,161 @@ bool resolvesToTrashRelativePath(const DriveFile& file, const MetadataCache* met
         parentPath == QStringLiteral("/") ? file.name : QDir(parentPath).filePath(file.name);
     return TrashPolicy::isTrashRelativePath(candidatePath);
 }
+
+bool pathWithinNodeSubtree(const QString& candidatePath, const QString& rootPath) {
+    const QString normalizedCandidate = QDir::cleanPath(candidatePath);
+    const QString normalizedRoot = QDir::cleanPath(rootPath);
+    if (normalizedCandidate.isEmpty() || normalizedRoot.isEmpty()) {
+        return false;
+    }
+    if (normalizedCandidate == normalizedRoot) {
+        return true;
+    }
+    return normalizedCandidate.startsWith(normalizedRoot + QLatin1Char('/'));
+}
+
+struct RemoteNodeSnapshot {
+    QList<FuseNode> nodes;
+    bool hasPendingNamespaceOp = false;
+    bool hasLocalGenerationAhead = false;
+};
+
+RemoteNodeSnapshot snapshotRemoteNodes(SyncDatabase* database, const QString& remoteFileId) {
+    RemoteNodeSnapshot snapshot;
+    if (!database || remoteFileId.isEmpty()) {
+        return snapshot;
+    }
+
+    const QList<FuseNode> nodes = database->getAllFuseNodes();
+    for (const FuseNode& node : nodes) {
+        if (node.remoteFileId == remoteFileId) {
+            snapshot.nodes.append(node);
+            const FuseNodeContentState state = database->getFuseNodeContentState(node.nodeId);
+            if (!state.nodeId.isEmpty() && state.localGeneration > state.remoteAckGeneration) {
+                snapshot.hasLocalGenerationAhead = true;
+            }
+        }
+    }
+
+    if (snapshot.nodes.isEmpty()) {
+        return snapshot;
+    }
+
+    const QList<FuseJournalEntry> journalEntries = database->getAllFuseJournalEntries();
+    for (const FuseJournalEntry& entry : journalEntries) {
+        if (entry.status == FuseJournalEntryStatus::Completed) {
+            continue;
+        }
+
+        for (const FuseNode& node : snapshot.nodes) {
+            if (entry.nodeId != node.nodeId) {
+                continue;
+            }
+
+            switch (entry.operationType) {
+                case FuseJournalOperationType::CreateFile:
+                case FuseJournalOperationType::CreateDirectory:
+                case FuseJournalOperationType::Rename:
+                case FuseJournalOperationType::Move:
+                case FuseJournalOperationType::Trash:
+                case FuseJournalOperationType::Delete:
+                case FuseJournalOperationType::Restore:
+                case FuseJournalOperationType::UpdateNativeDocMetadata:
+                case FuseJournalOperationType::UpdateShortcutMetadata:
+                    snapshot.hasPendingNamespaceOp = true;
+                    break;
+                case FuseJournalOperationType::WriteGeneration:
+                case FuseJournalOperationType::Truncate:
+                    break;
+            }
+        }
+
+        if (snapshot.hasPendingNamespaceOp) {
+            break;
+        }
+    }
+
+    return snapshot;
+}
+
+void deleteNodeSubtree(SyncDatabase* database, const QList<FuseNode>& subtreeNodes) {
+    if (!database || subtreeNodes.isEmpty()) {
+        return;
+    }
+
+    for (const FuseNode& node : subtreeNodes) {
+        const FuseNodeContentState state = database->getFuseNodeContentState(node.nodeId);
+        if (!state.nodeId.isEmpty()) {
+            if (!state.localContentPath.isEmpty()) {
+                QFile::remove(state.localContentPath);
+            }
+            database->deleteFuseNodeContentState(node.nodeId);
+        }
+
+        if (!node.remoteFileId.isEmpty()) {
+            database->deleteNativeDocState(node.remoteFileId);
+            database->deleteFuseMetadata(node.remoteFileId);
+        }
+
+        database->deleteFuseNode(node.nodeId);
+    }
+}
+
+void reconcileRemoteNodeMetadata(SyncDatabase* database, const FuseFileMetadata& metadata) {
+    if (!database || metadata.fileId.isEmpty() || !metadata.isValid()) {
+        return;
+    }
+
+    const QList<FuseNode> nodes = database->getAllFuseNodes();
+    for (const FuseNode& node : nodes) {
+        if (node.remoteFileId != metadata.fileId) {
+            continue;
+        }
+
+        const QString oldPath = node.path;
+        const QString newPath = QStringLiteral("/") + metadata.path;
+
+        FuseNode updated = node;
+        updated.path = newPath;
+        updated.name = metadata.name;
+        updated.remoteName = metadata.remoteName;
+        updated.remoteParentId = metadata.parentId;
+        updated.mimeType = metadata.mimeType;
+        updated.remoteMimeType = metadata.remoteMimeType;
+        updated.webViewLink = metadata.webViewLink;
+        updated.nativeDocModeOverride = metadata.nativeDocModeOverride;
+        updated.size = metadata.size;
+        updated.modifiedTime = metadata.modifiedTime;
+        updated.lastAccessed = metadata.lastAccessed;
+        updated.lastSyncedAt = QDateTime::currentDateTimeUtc();
+        database->saveFuseNode(updated);
+
+        const FuseNodeContentState state = database->getFuseNodeContentState(node.nodeId);
+        if (!state.nodeId.isEmpty()) {
+            FuseNodeContentState updatedState = state;
+            if (updatedState.remoteAckGeneration >= updatedState.localGeneration) {
+                updatedState.size = metadata.size;
+            }
+            database->saveFuseNodeContentState(updatedState);
+        }
+
+        if (!node.isFolder || oldPath == newPath) {
+            continue;
+        }
+
+        const QList<FuseNode> allNodes = database->getAllFuseNodes();
+        for (const FuseNode& candidate : allNodes) {
+            if (candidate.nodeId == node.nodeId ||
+                !pathWithinNodeSubtree(candidate.path, oldPath)) {
+                continue;
+            }
+
+            FuseNode descendant = candidate;
+            descendant.path = newPath + candidate.path.mid(oldPath.size());
+            database->saveFuseNode(descendant);
+        }
+    }
+}
 }  // namespace
 
 // Key used to store the FUSE change token in the fuse_sync_state table
@@ -114,13 +270,22 @@ MetadataRefreshWorker::MetadataRefreshWorker(MetadataCache* metadataCache, FileC
       m_database(database),
       m_driveClient(driveClient),
       m_pollingTimer(new QTimer(this)),
+      m_retryTimer(new QTimer(this)),
       m_state(State::Stopped),
       m_waitingForToken(false) {
     // Configure polling timer with default interval
     m_pollingTimer->setInterval(DEFAULT_POLL_INTERVAL_MS);
+    m_retryTimer->setSingleShot(true);
 
     // Connect timer
     connect(m_pollingTimer, &QTimer::timeout, this, &MetadataRefreshWorker::onPollingTimeout);
+    connect(m_retryTimer, &QTimer::timeout, this, [this]() {
+        {
+            QMutexLocker locker(&m_mutex);
+            m_retryScheduled = false;
+        }
+        checkNow();
+    });
 
     // Connect to Google Drive client signals
     if (m_driveClient) {
@@ -193,7 +358,9 @@ void MetadataRefreshWorker::start() {
         qDebug() << "MetadataRefreshWorker: No change token, requesting start page token";
         m_waitingForToken = true;
         m_changesRequestInFlight = true;
+        m_retryScheduled = false;
         m_pendingCheckRequested = false;
+        m_retryTimer->stop();
         locker.unlock();
         // Invoke on the drive client's thread (main thread) to avoid cross-thread
         // QNetworkAccessManager usage
@@ -202,6 +369,8 @@ void MetadataRefreshWorker::start() {
     }
 
     m_state = State::Running;
+    m_retryScheduled = false;
+    m_retryTimer->stop();
     m_pollingTimer->start();
     locker.unlock();
 
@@ -217,9 +386,11 @@ void MetadataRefreshWorker::stop() {
     QMutexLocker locker(&m_mutex);
 
     m_pollingTimer->stop();
+    m_retryTimer->stop();
     m_state = State::Stopped;
     m_waitingForToken = false;
     m_changesRequestInFlight = false;
+    m_retryScheduled = false;
     m_pendingCheckRequested = false;
     m_consecutiveTransientFailures = 0;
 
@@ -236,7 +407,10 @@ void MetadataRefreshWorker::pause() {
     }
 
     m_pollingTimer->stop();
+    m_retryTimer->stop();
     m_state = State::Paused;
+    m_retryScheduled = false;
+    m_pendingCheckRequested = false;
 
     locker.unlock();
     emit stateChanged(State::Paused);
@@ -251,6 +425,8 @@ void MetadataRefreshWorker::resume() {
     }
 
     m_state = State::Running;
+    m_retryTimer->stop();
+    m_retryScheduled = false;
     m_pollingTimer->start();
 
     locker.unlock();
@@ -268,7 +444,7 @@ void MetadataRefreshWorker::checkNow() {
         return;
     }
 
-    if (m_changesRequestInFlight) {
+    if (m_changesRequestInFlight || m_retryScheduled) {
         m_pendingCheckRequested = true;
         qDebug()
             << "MetadataRefreshWorker: Remote changes request already in flight; deferring check";
@@ -326,10 +502,12 @@ void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
         tokenUpdated = (m_changeToken != newToken);
         m_changeToken = newToken;
         m_changesRequestInFlight = false;
+        m_retryScheduled = false;
         runDeferredCheck = m_pendingCheckRequested;
         m_pendingCheckRequested = false;
         m_consecutiveTransientFailures = 0;
     }
+    m_retryTimer->stop();
     saveChangeToken(newToken);
 
     emit changeTokenUpdated(newToken);
@@ -350,10 +528,12 @@ void MetadataRefreshWorker::onStartPageTokenReceived(const QString& token) {
     const State stateBeforeUnlock = m_state;
     m_waitingForToken = false;
     m_changesRequestInFlight = false;
+    m_retryScheduled = false;
     m_pendingCheckRequested = false;
     m_consecutiveTransientFailures = 0;
 
     locker.unlock();
+    m_retryTimer->stop();
 
     // Save token to database
     saveChangeToken(token);
@@ -410,7 +590,9 @@ void MetadataRefreshWorker::onApiError(const QString& operation, const QString& 
                 shouldRetry = (m_state == State::Running || m_waitingForToken);
                 shouldSurface = m_consecutiveTransientFailures >= kTransientFailureSurfaceThreshold;
                 retryDelayMs = transientRetryDelayMs(m_consecutiveTransientFailures);
+                m_retryScheduled = shouldRetry;
             } else {
+                m_retryScheduled = false;
                 m_pendingCheckRequested = false;
                 m_consecutiveTransientFailures = 0;
             }
@@ -423,11 +605,14 @@ void MetadataRefreshWorker::onApiError(const QString& operation, const QString& 
                 emit error(QStringLiteral("API error: ") + errorMessage);
             }
             if (shouldRetry) {
-                QTimer::singleShot(retryDelayMs, this, &MetadataRefreshWorker::checkNow);
+                m_retryTimer->start(retryDelayMs);
+            } else {
+                m_retryTimer->stop();
             }
             return;
         }
 
+        m_retryTimer->stop();
         qWarning() << "MetadataRefreshWorker: API error in" << operation << "-" << errorMessage;
         emit error(QStringLiteral("API error: ") + errorMessage);
     }
@@ -441,9 +626,11 @@ void MetadataRefreshWorker::recoverExpiredChangeToken(const QString& errorMessag
         m_waitingForToken = (m_state == State::Running || m_waitingForToken);
         shouldRequestToken = m_waitingForToken && m_driveClient;
         m_changesRequestInFlight = false;
+        m_retryScheduled = false;
         m_pendingCheckRequested = false;
         m_consecutiveTransientFailures = 0;
     }
+    m_retryTimer->stop();
 
     saveChangeToken(QString());
 
@@ -468,12 +655,49 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
         return;
     }
 
+    const RemoteNodeSnapshot nodeSnapshot = snapshotRemoteNodes(m_database, change.fileId);
+
     // Deleted file (removed or trashed)
     if (change.removed || change.file.trashed) {
         qDebug() << "MetadataRefreshWorker: File deleted -" << change.fileId;
 
+        if (m_database) {
+            const FuseOperationAck ack =
+                m_database->getPendingFuseOperationAckByRemoteFileId(change.fileId);
+            if (ack.ackId > 0) {
+                m_database->markFuseOperationAckApplied(ack.ackId);
+            }
+        }
+
         // Capture display path before removeFromCaches wipes the metadata.
         const QString displayPath = resolveDisplayPath(change.fileId, change.file.name);
+
+        if (nodeSnapshot.hasPendingNamespaceOp || nodeSnapshot.hasLocalGenerationAhead) {
+            qDebug() << "MetadataRefreshWorker: Preserving local node state for remote delete"
+                     << change.fileId;
+            emit changeProcessed(change.fileId, QStringLiteral("deleted"));
+            if (!displayPath.isEmpty()) {
+                emit changeProcessedDetailed(displayPath, QStringLiteral("deleted"));
+            }
+            return;
+        }
+
+        if (!nodeSnapshot.nodes.isEmpty()) {
+            QList<FuseNode> subtreeNodes;
+            const QList<FuseNode> allNodes = m_database->getAllFuseNodes();
+            for (const FuseNode& rootNode : nodeSnapshot.nodes) {
+                for (const FuseNode& candidate : allNodes) {
+                    if (pathWithinNodeSubtree(candidate.path, rootNode.path)) {
+                        subtreeNodes.append(candidate);
+                    }
+                }
+            }
+
+            if (m_metadataCache && !displayPath.isEmpty()) {
+                m_metadataCache->dropSubtreeFromCache(displayPath);
+            }
+            deleteNodeSubtree(m_database, subtreeNodes);
+        }
 
         removeFromCaches(change.fileId);
         emit changeProcessed(change.fileId, QStringLiteral("deleted"));
@@ -493,6 +717,17 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
     // This forces a re-download on next access
     // Check if we already have this file in metadata cache
     bool isModification = false;
+    bool skipMetadataUpdate = false;
+    bool selfOriginatedAck = false;
+    if (m_database) {
+        const FuseOperationAck ack =
+            m_database->getPendingFuseOperationAckByRemoteFileId(change.fileId);
+        if (ack.ackId > 0) {
+            selfOriginatedAck = true;
+            m_database->markFuseOperationAckApplied(ack.ackId);
+        }
+    }
+
     if (m_metadataCache) {
         FuseFileMetadata existing = m_metadataCache->getMetadataByFileId(change.fileId);
         if (existing.isValid()) {
@@ -503,17 +738,34 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
             // the invalidation — the local cache already has the correct
             // content and invalidating would delete the file from under
             // any open FUSE handles.
-            if (m_fileCache && m_fileCache->consumeRecentlyUploaded(change.fileId)) {
+            if (selfOriginatedAck || (m_fileCache && !selfOriginatedAck &&
+                                      m_fileCache->consumeRecentlyUploaded(change.fileId))) {
                 qDebug() << "MetadataRefreshWorker: Skipping invalidation of self-uploaded file"
                          << change.fileId;
             } else {
-                invalidateFileCache(change.fileId);
+                if (nodeSnapshot.hasLocalGenerationAhead) {
+                    qDebug() << "MetadataRefreshWorker: Skipping invalidation of locally newer node"
+                             << change.fileId;
+                    skipMetadataUpdate = true;
+                } else if (nodeSnapshot.hasPendingNamespaceOp) {
+                    qDebug() << "MetadataRefreshWorker: Skipping metadata overwrite while local "
+                                "namespace op is pending"
+                             << change.fileId;
+                    skipMetadataUpdate = true;
+                } else {
+                    invalidateFileCache(change.fileId);
+                }
             }
         }
     }
 
     // Update metadata cache with new/modified file info
-    updateMetadataCache(change.file);
+    if (!skipMetadataUpdate) {
+        const FuseFileMetadata metadata = updateMetadataCache(change.file);
+        if (metadata.isValid()) {
+            reconcileRemoteNodeMetadata(m_database, metadata);
+        }
+    }
 
     QString changeType = isModification ? QStringLiteral("modified") : QStringLiteral("created");
     const QString displayPath = resolveDisplayPath(change.fileId, change.file.name);
@@ -523,9 +775,9 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
     }
 }
 
-void MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
+FuseFileMetadata MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
     if (!m_metadataCache) {
-        return;
+        return FuseFileMetadata();
     }
 
     const FuseFileMetadata metadata = m_metadataCache->upsertRemoteMetadata(file);
@@ -537,6 +789,8 @@ void MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {
         qDebug() << "MetadataRefreshWorker: Could not resolve path for" << file.name
                  << "(parent folder not in cache)";
     }
+
+    return metadata;
 }
 
 void MetadataRefreshWorker::removeFromCaches(const QString& fileId) {

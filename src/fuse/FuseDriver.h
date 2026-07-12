@@ -38,6 +38,7 @@
 #include <QThread>
 #include <optional>
 
+#include "sync/SyncDatabase.h"
 #include "sync/SyncSettings.h"
 #include "utils/NativeDocSupport.h"
 
@@ -46,15 +47,14 @@
 
 // Forward declarations
 class GoogleDriveClient;
-class SyncDatabase;
 class FileCache;
 class MetadataCache;
-struct FuseMetadata;
 struct DriveFile;
 
 // Forward declaration for internal worker classes
 class DirtySyncWorker;
 class MetadataRefreshWorker;
+class FuseReplayWorker;
 class RuntimePauseController;
 
 /**
@@ -214,9 +214,11 @@ class IFileCacheProvider {
  * The file handle (fi->fh) in FUSE callbacks maps to an entry in m_openFiles.
  */
 struct FuseOpenFile {
+    QString nodeId;          ///< Stable local node identity when known
     QString fileId;          ///< Google Drive file ID
     QString cacheKey;        ///< Cache identity used for LRU updates (raw or exported)
     QString path;            ///< Path in FUSE filesystem
+    QString contentPath;     ///< Authoritative local content path backing the open fd
     int localFd = -1;        ///< Stable local fd for regular files; -1 for synthetic stubs
     qint64 size = 0;         ///< File size
     bool writable = false;   ///< Whether opened for writing
@@ -755,6 +757,93 @@ class FuseDriver : public QObject {
     bool saveMetadataEntry(const FuseMetadata& metadata);
 
     /**
+     * @brief Create a durable local node-backed file without requiring a remote ID
+     * @param path Normalized FUSE path
+     * @param[out] openFile Created open-handle backing info
+     * @return true if the local file, node state, and journal entry were committed
+     */
+    bool createAuthoritativeLocalFile(const QString& path, FuseOpenFile* openFile);
+
+    /**
+     * @brief Create a durable local node-backed directory without requiring a remote ID
+     * @param path Normalized FUSE path
+     * @return true if the local directory node and journal entry were committed
+     */
+    bool createAuthoritativeLocalDirectory(const QString& path);
+
+    /**
+     * @brief Ensure a local node row exists for a visible path backed by remote metadata
+     * @param path Normalized FUSE path
+     * @param metadata Existing remote-backed FUSE metadata
+     * @return Local node row representing the path, or an empty node on failure
+     */
+    FuseNode ensureLocalNodeForMetadata(const QString& path, const FuseMetadata& metadata);
+
+    /**
+     * @brief Resolve the authoritative local content path for a node
+     * @param node Local node row
+     * @return Absolute path for the current authoritative content, or empty when unavailable
+     */
+    QString authoritativeContentPathForNode(const FuseNode& node) const;
+
+    /**
+     * @brief Resolve the local content identity used for FileCache handle protection
+     * @param openFile Open file info
+     * @return Node ID when available, otherwise the remote file ID
+     */
+    QString contentIdentityForOpenFile(const FuseOpenFile& openFile) const;
+
+    /**
+     * @brief Persist node size, generation, content path, and replay intent after a mutation
+     * @param openFile Open file info for the mutated file
+     * @param operation Journal operation to append
+     * @return true if the node/content update and journal append committed successfully
+     */
+    bool commitNodeContentMutation(const FuseOpenFile& openFile,
+                                   FuseJournalOperationType operation);
+
+    /**
+     * @brief Update persisted authoritative content path for a node after local relocation
+     * @param nodeId Stable local node identity
+     * @param contentPath New authoritative content path
+     * @return true if the database update succeeded
+     */
+    bool updateNodeContentPath(const QString& nodeId, const QString& contentPath);
+
+    /**
+     * @brief Apply a local-first rename or move to the authoritative node model
+     * @param fromPath Existing normalized FUSE path
+     * @param toPath Destination normalized FUSE path
+     * @return true if the local node model and journal were updated successfully
+     */
+    bool applyLocalNodeRename(const QString& fromPath, const QString& toPath);
+
+    /**
+     * @brief Apply a local-first trash/delete to the authoritative node model
+     * @param path Existing normalized FUSE path
+     * @param expectDirectory Whether the caller expects a directory target
+     * @param requireEmptyDirectory Whether non-empty directories should be rejected
+     * @return 0 on success, or a negative errno-style code on failure
+     */
+    int applyLocalNodeRemoval(const QString& path, bool expectDirectory,
+                              bool requireEmptyDirectory);
+
+    /**
+     * @brief Wake the dedicated replay worker after a new local journal mutation
+     */
+    void requestReplaySync();
+
+    /**
+     * @brief Merge locally created node-backed children into a directory listing
+     * @param path Normalized FUSE path of the directory being listed
+     * @param buf FUSE directory buffer
+     * @param filler FUSE filler callback
+     * @param emittedNames Names already emitted from remote metadata
+     */
+    void appendLocalNodeChildrenToListing(const QString& path, void* buf, fuse_fill_dir_t filler,
+                                          QSet<QString>& emittedNames) const;
+
+    /**
      * @brief Get the local overlay root used for FreeDesktop trash paths
      * @return Absolute path to the trash overlay root
      */
@@ -920,9 +1009,13 @@ class FuseDriver : public QObject {
      * @param fileId Google Drive file ID
      * @param path FUSE path for logging and metadata context
      * @param localFd Stable fd for the dirty content, or -1 if unavailable
+     * @param nodeId Optional node ID for authoritative local-content bookkeeping
+     * @param sourcePath Optional authoritative local content path to stage
      * @return true if the file is staged for background upload
      */
-    bool stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd = -1);
+    bool stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd = -1,
+                                 const QString& nodeId = QString(),
+                                 const QString& sourcePath = QString());
 
     /**
      * @brief Push all current dirty files into the persistent pending store
@@ -1055,8 +1148,10 @@ class FuseDriver : public QObject {
     // Background workers
     QThread* m_dirtySyncThread;                      ///< Dirty sync worker thread
     QThread* m_metadataRefreshThread;                ///< Metadata refresh worker thread
+    QThread* m_replayThread;                         ///< Replay worker thread
     DirtySyncWorker* m_dirtySyncWorker;              ///< Dirty file upload worker
     MetadataRefreshWorker* m_metadataRefreshWorker;  ///< Metadata refresh worker
+    FuseReplayWorker* m_replayWorker;                ///< Durable FUSE journal replay worker
     RuntimePauseController* m_pauseController;       ///< Shared runtime pause policy
     bool m_backgroundSyncPaused;                     ///< Whether background Drive work is paused
     mutable QMutex m_syncSettingsMutex;              ///< Guards shared sync settings reloads
