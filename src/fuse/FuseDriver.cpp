@@ -2113,13 +2113,6 @@ int FuseDriver::fuseFsync(const char* path, int datasync, struct fuse_file_info*
     return 0;
 }
 
-// TODO: Implement full hardened offline support
-// First, “accept dirty files while paused” is reasonable for existing cached files, but full
-// offline FUSE mutations are not currently in scope. FuseDriver.cpp:1847 still performs create,
-// mkdir, rename, move, trash, and delete as immediate Drive calls. If you want those to work
-// offline too, that becomes a separate durable operation-journal feature with replay and conflict
-// handling.
-
 int FuseDriver::fuseMkdir(const char* path, mode_t mode) {
     Q_UNUSED(mode)
     auto* drv = self();
@@ -2231,12 +2224,6 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
     }
 
     if (fromIsTrash && !toIsTrash) {
-        if (!drv->isDriveApiAllowed()) {
-            drv->emitDriveOperationBlocked(QStringLiteral("restore items from local trash"),
-                                           toPath);
-            return drv->pausedMutationErrorCode();
-        }
-
         const int syncModeError = drv->enforceSyncModeForRemoteMutation(
             RemoteMutationType::CreateFile, QStringLiteral("restore items from local trash"),
             toPath);
@@ -2244,7 +2231,8 @@ int FuseDriver::fuseRename(const char* from, const char* to, unsigned int flags)
             return syncModeError;
         }
 
-        if (!drv->m_database->getFuseMetadataByPath(toLookup).fileId.isEmpty()) {
+        if (!drv->m_database->getFuseMetadataByPath(toLookup).fileId.isEmpty() ||
+            !drv->m_database->getFuseNodeByPath(toPath).nodeId.isEmpty()) {
             return -EEXIST;
         }
 
@@ -2632,7 +2620,8 @@ bool FuseDriver::saveMetadataEntry(const FuseMetadata& metadata) {
     return true;
 }
 
-bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile* openFile) {
+bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile* openFile,
+                                              const QString& sourcePath) {
     if (!m_database || !m_fileCache || !openFile || path.isEmpty() || path == QStringLiteral("/")) {
         return false;
     }
@@ -2679,11 +2668,19 @@ bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile*
         return false;
     }
 
-    QFile localFile(contentPath);
-    if (!localFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        return false;
+    qint64 initialSize = 0;
+    if (!sourcePath.isEmpty()) {
+        if (!copyFileToPath(sourcePath, contentPath, nullptr)) {
+            return false;
+        }
+        initialSize = QFileInfo(sourcePath).size();
+    } else {
+        QFile localFile(contentPath);
+        if (!localFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            return false;
+        }
+        localFile.close();
     }
-    localFile.close();
 
     FuseNode node;
     node.nodeId = nodeId;
@@ -2694,7 +2691,7 @@ bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile*
     node.remoteName = fileName;
     node.isFolder = false;
     node.isPendingCreate = true;
-    node.size = 0;
+    node.size = initialSize;
     node.mimeType = QStringLiteral("application/octet-stream");
     node.createdTime = QDateTime::currentDateTimeUtc();
     node.modifiedTime = node.createdTime;
@@ -2705,7 +2702,7 @@ bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile*
     state.localContentPath = contentPath;
     state.localGeneration = 0;
     state.remoteAckGeneration = 0;
-    state.size = 0;
+    state.size = initialSize;
     state.lastLocalWrite = node.createdTime;
 
     FuseMutationTransaction mutation;
@@ -2748,7 +2745,7 @@ bool FuseDriver::createAuthoritativeLocalFile(const QString& path, FuseOpenFile*
     openFile->path = path;
     openFile->contentPath = contentPath;
     openFile->localFd = localFd;
-    openFile->size = 0;
+    openFile->size = initialSize;
     openFile->writable = true;
     openFile->dirty = false;
     openFile->synthetic = false;
@@ -3599,7 +3596,8 @@ bool FuseDriver::moveLiveEntryToTrash(const FuseMetadata& metadata, const QStrin
 
 bool FuseDriver::restoreTrashEntryToLive(const QString& fromPath, const QString& toPath,
                                          QString* errorOut) {
-    if (!m_driveClient || !m_database || !m_fileCache) {
+    const bool driveAllowed = isDriveApiAllowed();
+    if (!m_database || !m_fileCache || (driveAllowed && !m_driveClient)) {
         if (errorOut) {
             *errorOut = QStringLiteral("Fuse restore dependencies unavailable");
         }
@@ -3613,6 +3611,62 @@ bool FuseDriver::restoreTrashEntryToLive(const QString& fromPath, const QString&
             *errorOut = QStringLiteral("Trash overlay entry does not exist");
         }
         return false;
+    }
+
+    if (!driveAllowed) {
+        std::function<bool(const QFileInfo&, const QString&)> restoreTreeLocally;
+        restoreTreeLocally = [&](const QFileInfo& entryInfo,
+                                 const QString& destinationFusePath) -> bool {
+            if (entryInfo.isDir()) {
+                if (!createAuthoritativeLocalDirectory(destinationFusePath)) {
+                    if (errorOut) {
+                        *errorOut = QStringLiteral("Failed to restore local trash folder snapshot");
+                    }
+                    return false;
+                }
+
+                QDir dir(entryInfo.absoluteFilePath());
+                const QFileInfoList children = dir.entryInfoList(
+                    QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                    QDir::Name);
+                for (const QFileInfo& child : children) {
+                    if (!restoreTreeLocally(child,
+                                            joinFusePath(destinationFusePath, child.fileName()))) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            FuseOpenFile restoredFile;
+            if (!createAuthoritativeLocalFile(destinationFusePath, &restoredFile,
+                                              entryInfo.absoluteFilePath())) {
+                if (errorOut) {
+                    *errorOut = QStringLiteral("Failed to restore local trash file snapshot");
+                }
+                return false;
+            }
+
+            if (restoredFile.localFd >= 0) {
+                ::close(restoredFile.localFd);
+            }
+
+            return true;
+        };
+
+        if (!restoreTreeLocally(sourceInfo, toPath)) {
+            return false;
+        }
+
+        if (sourceInfo.isDir()) {
+            QDir(sourceOverlayPath).removeRecursively();
+        } else {
+            QFile::remove(sourceOverlayPath);
+        }
+
+        invalidateFusePaths({fromPath, toPath, getParentPath(fromPath), getParentPath(toPath)});
+        return true;
     }
 
     QString parentId = QStringLiteral("root");
@@ -3821,6 +3875,14 @@ void FuseDriver::invalidateFusePaths(const QList<QString>& paths) {
     for (const QString& path : uniquePaths) {
         invalidateFusePath(m_fuse, path);
     }
+}
+
+void FuseDriver::handleRemoteChangeProcessed(const QString& displayPath,
+                                             const QString& changeType) {
+    Q_UNUSED(changeType)
+
+    const QString fusePath = fusePathFromMetadataPath(displayPath);
+    invalidateFusePaths({fusePath, getParentPath(fusePath)});
 }
 
 bool FuseDriver::stageDirtyFileForUpload(const QString& fileId, const QString& path, int localFd,
@@ -4073,6 +4135,8 @@ void FuseDriver::startBackgroundWorkers() {
         // Relay path-aware remote change events for UI activity logging.
         connect(m_metadataRefreshWorker, &MetadataRefreshWorker::changeProcessedDetailed, this,
                 &FuseDriver::fuseRemoteChange);
+        connect(m_metadataRefreshWorker, &MetadataRefreshWorker::changeProcessedDetailed, this,
+                &FuseDriver::handleRemoteChangeProcessed);
         connect(m_metadataRefreshWorker, &MetadataRefreshWorker::refreshCompleted, this,
                 [this](int) { emit metadataRefreshed(); });
         connect(m_metadataRefreshWorker, &MetadataRefreshWorker::error, this,

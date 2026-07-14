@@ -169,6 +169,7 @@ class TestFuseDriverLifecycle : public QObject {
     void testMoveLiveEntryToTrash_SnapshotsFolderChildrenAndClearsSubtree();
     void testRestoreTrashEntryToLive_UploadsLocalFileAndRemovesOverlay();
     void testRestoreTrashEntryToLive_RecreatesFolderTreeAndCachesFiles();
+    void testRestoreTrashEntryToLive_OfflineRecreatesFolderTreeLocally();
     void testCreateAuthoritativeLocalFile_CommitsNodeAndJournal();
     void testCommitNodeContentMutation_AdvancesGenerationAndSize();
     void testApplyLocalNodeRename_UpdatesNodeAndJournal();
@@ -525,6 +526,65 @@ void TestFuseDriverLifecycle::testRestoreTrashEntryToLive_RecreatesFolderTreeAnd
     QVERIFY(cachedChild.open(QIODevice::ReadOnly));
     QCOMPARE(cachedChild.readAll(), childContent);
     cachedChild.close();
+}
+
+void TestFuseDriverLifecycle::testRestoreTrashEntryToLive_OfflineRecreatesFolderTreeLocally() {
+    QVERIFY(m_driver->initializeMetadataCache());
+
+    RuntimePauseController pauseController;
+    m_driver->setPauseController(&pauseController);
+    pauseController.requestManualPause();
+
+    const QString folderTrashPath = QStringLiteral("/.Trash-1000/files/project");
+    const QString folderOverlayPath = m_driver->trashOverlayPathForFusePath(folderTrashPath);
+    QVERIFY(QDir().mkpath(folderOverlayPath));
+
+    const QString childOverlayPath = folderOverlayPath + QStringLiteral("/board.kicad_pcb");
+    const QByteArray childContent("restored board offline");
+    QFile childFile(childOverlayPath);
+    QVERIFY(childFile.open(QIODevice::WriteOnly));
+    QCOMPARE(childFile.write(childContent), childContent.size());
+    childFile.close();
+
+    QString error;
+    QVERIFY(m_driver->restoreTrashEntryToLive(folderTrashPath, QStringLiteral("/project"), &error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QCOMPARE(m_driveClient->createFolderCallCount, 0);
+    QCOMPARE(m_driveClient->uploadCallCount, 0);
+
+    const FuseNode restoredFolder = m_db->getFuseNodeByPath(QStringLiteral("/project"));
+    QVERIFY(!restoredFolder.nodeId.isEmpty());
+    QVERIFY(restoredFolder.isPendingCreate);
+    QVERIFY(restoredFolder.isFolder);
+
+    const FuseNode restoredChild =
+        m_db->getFuseNodeByPath(QStringLiteral("/project/board.kicad_pcb"));
+    QVERIFY(!restoredChild.nodeId.isEmpty());
+    QVERIFY(restoredChild.isPendingCreate);
+    QVERIFY(!restoredChild.isFolder);
+
+    const FuseNodeContentState restoredChildState =
+        m_db->getFuseNodeContentState(restoredChild.nodeId);
+    QVERIFY(!restoredChildState.localContentPath.isEmpty());
+    QVERIFY(QFile::exists(restoredChildState.localContentPath));
+
+    QFile restoredFile(restoredChildState.localContentPath);
+    QVERIFY(restoredFile.open(QIODevice::ReadOnly));
+    QCOMPARE(restoredFile.readAll(), childContent);
+    restoredFile.close();
+
+    const QList<FuseFileMetadata> rootChildren =
+        m_driver->m_metadataCache->getChildren(QStringLiteral("/"));
+    QCOMPARE(rootChildren.size(), 1);
+    QCOMPARE(rootChildren.first().path, QStringLiteral("project"));
+
+    const QList<FuseFileMetadata> projectChildren =
+        m_driver->m_metadataCache->getChildren(QStringLiteral("project"));
+    QCOMPARE(projectChildren.size(), 1);
+    QCOMPARE(projectChildren.first().path, QStringLiteral("project/board.kicad_pcb"));
+
+    QVERIFY(!QDir(folderOverlayPath).exists());
 }
 
 void TestFuseDriverLifecycle::testCreateAuthoritativeLocalFile_CommitsNodeAndJournal() {

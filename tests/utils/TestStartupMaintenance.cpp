@@ -3,12 +3,11 @@
  * @brief Unit tests for startup compatibility policy helpers.
  */
 
-#include <QtTest/QtTest>
-
 #include <QDir>
 #include <QFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QtTest/QtTest>
 
 #include "utils/StartupMaintenance.h"
 
@@ -17,6 +16,7 @@ class TestStartupMaintenance : public QObject {
 
    private slots:
     void initTestCase();
+    void cleanupTestCase();
     void testFuseMaintenance_NoPurgeForOrdinaryStartup();
     void testFuseMaintenance_PurgesOnModeChange();
     void testFuseMaintenance_PurgesOnEpochBump();
@@ -28,12 +28,33 @@ class TestStartupMaintenance : public QObject {
     void testSyncReset_LegacySchemaRequestsFullRebuild();
     void testSyncReset_DirtyLegacySchemaRequiresExplicitDiscard();
     void testSyncReset_FutureSchemaBlocksStartup();
+
+   private:
+    QTemporaryDir* m_tempDir = nullptr;
+    QByteArray m_originalHome;
 };
 
 void TestStartupMaintenance::initTestCase() {
+    m_tempDir = new QTemporaryDir();
+    QVERIFY(m_tempDir->isValid());
+
+    m_originalHome = qgetenv("HOME");
+    qputenv("HOME", m_tempDir->path().toUtf8());
     QStandardPaths::setTestModeEnabled(true);
     QCoreApplication::setOrganizationName(QStringLiteral("ViaTests"));
     QCoreApplication::setApplicationName(QStringLiteral("TestStartupMaintenance"));
+}
+
+void TestStartupMaintenance::cleanupTestCase() {
+    QStandardPaths::setTestModeEnabled(false);
+    if (m_originalHome.isEmpty()) {
+        qunsetenv("HOME");
+    } else {
+        qputenv("HOME", m_originalHome);
+    }
+
+    delete m_tempDir;
+    m_tempDir = nullptr;
 }
 
 void TestStartupMaintenance::testFuseMaintenance_NoPurgeForOrdinaryStartup() {

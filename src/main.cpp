@@ -272,8 +272,8 @@ int main(int argc, char* argv[]) {
 
     // Initialize Google Drive API clients.
     // UI/FUSE traffic stays on the main-thread client while mirror sync uses a
-    // dedicated sibling client that MirrorSyncRuntime moves onto the mirror
-    // worker thread.
+    // dedicated sibling client that also stays on the main thread so the replay
+    // worker can post requests to it and wake on its completion signals.
     GoogleDriveClient driveClient(&authManager);
     GoogleDriveClient mirrorDriveClient(&authManager);
 

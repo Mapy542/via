@@ -760,9 +760,11 @@ class FuseDriver : public QObject {
      * @brief Create a durable local node-backed file without requiring a remote ID
      * @param path Normalized FUSE path
      * @param[out] openFile Created open-handle backing info
+     * @param sourcePath Optional existing file to seed into the new local content path
      * @return true if the local file, node state, and journal entry were committed
      */
-    bool createAuthoritativeLocalFile(const QString& path, FuseOpenFile* openFile);
+    bool createAuthoritativeLocalFile(const QString& path, FuseOpenFile* openFile,
+                                      const QString& sourcePath = QString());
 
     /**
      * @brief Create a durable local node-backed directory without requiring a remote ID
@@ -1003,6 +1005,13 @@ class FuseDriver : public QObject {
      * @param paths FUSE paths to invalidate
      */
     void invalidateFusePaths(const QList<QString>& paths);
+
+    /**
+     * @brief Invalidate the kernel cache for a remote metadata change
+     * @param displayPath Path reported by MetadataRefreshWorker
+     * @param changeType Change classification from MetadataRefreshWorker
+     */
+    void handleRemoteChangeProcessed(const QString& displayPath, const QString& changeType);
 
     /**
      * @brief Move dirty bytes into the pending store, refresh metadata, and wake uploads

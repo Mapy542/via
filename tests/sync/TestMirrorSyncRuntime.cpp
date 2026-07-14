@@ -98,7 +98,7 @@ class TestMirrorSyncRuntime : public QObject {
     void init();
     void cleanup();
 
-    void testMovesMirrorGraphToDedicatedWorkerThread();
+    void testMovesMirrorGraphWithoutMovingDriveClient();
     void testForwardsPendingCountsAndConflictResolution();
     void testForwardsProcessorSyncActionAndFullSyncSignals();
     void testInitialSyncDefersRemoteWatcherUntilFolderAuthorityReady();
@@ -200,16 +200,16 @@ void TestMirrorSyncRuntime::cleanup() {
     m_tempDir = nullptr;
 }
 
-void TestMirrorSyncRuntime::testMovesMirrorGraphToDedicatedWorkerThread() {
+void TestMirrorSyncRuntime::testMovesMirrorGraphWithoutMovingDriveClient() {
     QThread* const runtimeThread = m_runtime->thread();
 
     QCOMPARE(runtimeThread, QThread::currentThread());
-    QVERIFY(m_driveClient->thread() != runtimeThread);
-    QCOMPARE(m_localWatcher->thread(), m_driveClient->thread());
-    QCOMPARE(m_remoteWatcher->thread(), m_driveClient->thread());
-    QCOMPARE(m_changeProcessor->thread(), m_driveClient->thread());
-    QCOMPARE(m_syncActionThread->thread(), m_driveClient->thread());
-    QCOMPARE(m_fullSync->thread(), m_driveClient->thread());
+    QCOMPARE(m_driveClient->thread(), runtimeThread);
+    QVERIFY(m_localWatcher->thread() != runtimeThread);
+    QCOMPARE(m_remoteWatcher->thread(), m_localWatcher->thread());
+    QCOMPARE(m_changeProcessor->thread(), m_localWatcher->thread());
+    QCOMPARE(m_syncActionThread->thread(), m_localWatcher->thread());
+    QCOMPARE(m_fullSync->thread(), m_localWatcher->thread());
 
     QSignalSpy stateSpy(m_runtime, &MirrorSyncRuntime::processorStateChanged);
 

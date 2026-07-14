@@ -139,6 +139,7 @@ class TestMetadataRefreshWorker : public QObject {
     void cleanup();
 
     void testCreatedChange_EmitsResolvedPath();
+    void testCreatedChange_EmitsRootRelativePath();
     void testModifiedChange_EmitsResolvedPath();
     void testDeletedChange_EmitsStoredPathBeforeRemoval();
     void testCreatedChange_FallsBackToFileNameWhenPathUnavailable();
@@ -287,6 +288,27 @@ void TestMetadataRefreshWorker::testCreatedChange_EmitsResolvedPath() {
     const QList<QVariant> args = changeSpy.takeFirst();
     QCOMPARE(args.at(0).toString(), QStringLiteral("Projects/report.txt"));
     QCOMPARE(args.at(1).toString(), QStringLiteral("created"));
+}
+
+void TestMetadataRefreshWorker::testCreatedChange_EmitsRootRelativePath() {
+    QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+
+    m_driveClient->emitChangesBatch(
+        {makeChange(QStringLiteral("change-root-created"), QStringLiteral("file-root"),
+                    QStringLiteral("report.txt"), QStringLiteral("root"))});
+
+    QCOMPARE(changeSpy.count(), 1);
+    const QList<QVariant> args = changeSpy.takeFirst();
+    QCOMPARE(args.at(0).toString(), QStringLiteral("report.txt"));
+    QCOMPARE(args.at(1).toString(), QStringLiteral("created"));
+
+    const FuseFileMetadata metadata = m_cache->getMetadataByFileId(QStringLiteral("file-root"));
+    QVERIFY(metadata.isValid());
+    QCOMPARE(metadata.path, QStringLiteral("report.txt"));
+
+    const QList<FuseFileMetadata> rootChildren = m_cache->getChildren(QStringLiteral("/"));
+    QCOMPARE(rootChildren.size(), 1);
+    QCOMPARE(rootChildren.first().fileId, QStringLiteral("file-root"));
 }
 
 void TestMetadataRefreshWorker::testModifiedChange_EmitsResolvedPath() {

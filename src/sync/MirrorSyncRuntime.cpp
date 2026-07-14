@@ -387,7 +387,9 @@ void MirrorSyncRuntime::moveMirrorGraphToWorker() {
         return;
     }
 
-    moveObjectToThread(m_mirrorDriveClient, m_workerThread);
+    // Keep the shared Drive client on the owner thread.
+    // Replay workers block while waiting for completion signals, so the client
+    // must stay on a thread that can keep running its network event loop.
     moveObjectToThread(m_localWatcher, m_workerThread);
     moveObjectToThread(m_remoteWatcher, m_workerThread);
     moveObjectToThread(m_changeProcessor, m_workerThread);
@@ -406,5 +408,4 @@ void MirrorSyncRuntime::restoreMirrorGraphToOwnerThread() {
     moveObjectToThread(m_changeProcessor, m_ownerThread);
     moveObjectToThread(m_remoteWatcher, m_ownerThread);
     moveObjectToThread(m_localWatcher, m_ownerThread);
-    moveObjectToThread(m_mirrorDriveClient, m_ownerThread);
 }
