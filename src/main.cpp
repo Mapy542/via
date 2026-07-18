@@ -805,15 +805,20 @@ int main(int argc, char* argv[]) {
 
     QObject::connect(
         &suspendMonitor, &SuspendMonitor::resumed, &app,
-        [&authManager, &fuseDriver, &trayManager, &notificationManager, &statusCoordinator,
-         &wakeRefreshNotificationGate, &pauseController, mirrorEnabled, fuseEnabled,
-         queueMirrorRestartAfterWake]() {
+        [&authManager, &fuseDriver, &statusCoordinator, &wakeRefreshNotificationGate,
+         &pauseController, mirrorEnabled, fuseEnabled, queueMirrorRestartAfterWake]() {
             qInfo() << "Resume handler: refreshing auth and restarting components";
             statusCoordinator.updateMirrorStatus("Recovering from sleep...");
 
-            const auto hasUsableAccessToken = [&authManager]() {
-                return authManager.isAuthenticated() && !authManager.accessToken().isEmpty() &&
-                       !authManager.isTokenExpiringSoon(0);
+            auto* authManagerPtr = &authManager;
+            auto* fuseDriverPtr = &fuseDriver;
+            auto* statusCoordinatorPtr = &statusCoordinator;
+            auto* pauseControllerPtr = &pauseController;
+
+            const auto hasUsableAccessToken = [authManagerPtr]() {
+                return authManagerPtr->isAuthenticated() &&
+                       !authManagerPtr->accessToken().isEmpty() &&
+                       !authManagerPtr->isTokenExpiringSoon(0);
             };
 
             struct ResumeRestartState {
@@ -826,8 +831,9 @@ int main(int argc, char* argv[]) {
 
             // After the refresh completes (or fails), restart workers that may
             // be stuck on dead connections.
-            auto doRestart =
-                [&, restartState]() {
+            const auto doRestart =
+                [authManagerPtr, fuseDriverPtr, pauseControllerPtr, mirrorEnabled, fuseEnabled,
+                 queueMirrorRestartAfterWake, restartState]() {
                     if (restartState->restartIssued) {
                         return;
                     }
@@ -840,7 +846,7 @@ int main(int argc, char* argv[]) {
                         QObject::disconnect(restartState->refreshErrorConnection);
                     }
 
-                    if (!authManager.isAuthenticated()) {
+                    if (!authManagerPtr->isAuthenticated()) {
                         qWarning()
                             << "Resume handler: not authenticated after refresh, skipping restart";
                         return;
@@ -848,21 +854,22 @@ int main(int argc, char* argv[]) {
 
                     // 3. Restart mirror sync components — they may be waiting on
                     //    dead network sockets inside polling loops.
-                    if (mirrorEnabled && !pauseController.isEffectivelyPaused()) {
+                    if (mirrorEnabled && !pauseControllerPtr->isEffectivelyPaused()) {
                         queueMirrorRestartAfterWake();
                     }
 
                     // 4. Kick FUSE background workers.  Stopping and starting them
                     //    resets their QTimers and clears any stalled API calls.
-                    if (fuseEnabled && fuseDriver.isMounted() &&
-                        !pauseController.isEffectivelyPaused()) {
-                        fuseDriver.refreshMetadata();
+                    if (fuseEnabled && fuseDriverPtr->isMounted() &&
+                        !pauseControllerPtr->isEffectivelyPaused()) {
+                        fuseDriverPtr->refreshMetadata();
                     }
 
                     qInfo() << "Resume handler: recovery restart scheduled";
                 };
 
-            auto handleRefreshFailure = [&, restartState, hasUsableAccessToken]() {
+            const auto handleRefreshFailure = [restartState, doRestart, hasUsableAccessToken,
+                                               statusCoordinatorPtr](const QString&) {
                 if (restartState->restartIssued) {
                     return;
                 }
@@ -882,33 +889,33 @@ int main(int argc, char* argv[]) {
 
                 qWarning() << "Resume handler: token refresh failed and no usable access token"
                               "is available; deferring restart";
-                statusCoordinator.updateMirrorStatus("Authentication unavailable");
+                statusCoordinatorPtr->updateMirrorStatus("Authentication unavailable");
             };
 
-            if (authManager.refreshToken().isEmpty()) {
+            if (authManagerPtr->refreshToken().isEmpty()) {
                 if (hasUsableAccessToken()) {
                     doRestart();
                 } else {
                     qWarning() << "Resume handler: no refresh token and no usable access token;"
                                   "deferring restart";
-                    statusCoordinator.updateMirrorStatus("Authentication unavailable");
+                    statusCoordinatorPtr->updateMirrorStatus("Authentication unavailable");
                 }
                 return;
             }
 
             // Connect to both success and failure so we always resume.
             restartState->refreshedConnection =
-                QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshed, &authManager,
-                                 doRestart, Qt::SingleShotConnection);
-            restartState->refreshErrorConnection =
-                QObject::connect(&authManager, &GoogleAuthManager::tokenRefreshError, &authManager,
-                                 handleRefreshFailure, Qt::SingleShotConnection);
+                QObject::connect(authManagerPtr, &GoogleAuthManager::tokenRefreshed,
+                                 statusCoordinatorPtr, doRestart, Qt::SingleShotConnection);
+            restartState->refreshErrorConnection = QObject::connect(
+                authManagerPtr, &GoogleAuthManager::tokenRefreshError, statusCoordinatorPtr,
+                handleRefreshFailure, Qt::SingleShotConnection);
 
             // Force a token refresh after the wake handlers are armed.
             // Connections are likely stale and the access token may have
             // expired while the machine was asleep.
             wakeRefreshNotificationGate.beginWakeRefreshAttempt();
-            authManager.refreshTokens();
+            authManagerPtr->refreshTokens();
         });
 
     // Connect signals for application-wide coordination
