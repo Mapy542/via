@@ -42,6 +42,7 @@
 #include "sync/SyncActionQueue.h"
 #include "sync/SyncActionThread.h"
 #include "sync/SyncDatabase.h"
+#include "sync/WakeResumeNotificationSuppressor.h"
 #include "ui/ConflictDialog.h"
 #include "ui/MainWindow.h"
 #include "ui/SystemTrayManager.h"
@@ -757,14 +758,19 @@ int main(int argc, char* argv[]) {
 
     const auto pauseState =
         std::make_shared<RuntimePauseController::Snapshot>(pauseController.snapshot());
+    const auto wakeResumeNotificationSuppressor =
+        std::make_shared<WakeResumeNotificationSuppressor>();
     const auto lastBlockedNoticeMs = std::make_shared<qint64>(0);
 
     QObject::connect(
         &pauseController, &RuntimePauseController::stateChanged, &app,
         [&pauseController, &notificationManager, &fuseDriver, &authManager, mirrorEnabled,
-         fuseEnabled, pauseState, queueMirrorPause, queueMirrorResume]() {
+         fuseEnabled, pauseState, wakeResumeNotificationSuppressor, queueMirrorPause,
+         queueMirrorResume]() {
             const RuntimePauseController::Snapshot previous = *pauseState;
             const RuntimePauseController::Snapshot current = pauseController.snapshot();
+            wakeResumeNotificationSuppressor->observePauseTransition(
+                previous, current, QDateTime::currentMSecsSinceEpoch());
             *pauseState = current;
 
             if (previous.effectivePause == current.effectivePause) {
@@ -779,7 +785,13 @@ int main(int argc, char* argv[]) {
                 if (fuseEnabled) {
                     fuseDriver.pauseSync();
                 }
-                if (authManager.isAuthenticated()) {
+                const bool suppressWakePauseNotification =
+                    wakeResumeNotificationSuppressor->consumePauseNotificationSuppression(previous,
+                                                                                          current);
+                if (suppressWakePauseNotification) {
+                    qInfo() << "Runtime pause engaged during sleep; suppressed offline "
+                               "notification";
+                } else if (authManager.isAuthenticated()) {
                     notificationManager.showWarning(pauseController.pauseNotificationTitle(),
                                                     pauseController.pauseNotificationMessage());
                 }
@@ -793,7 +805,12 @@ int main(int argc, char* argv[]) {
             if (fuseEnabled) {
                 fuseDriver.resumeSync();
             }
-            if (authManager.isAuthenticated()) {
+            const bool suppressWakeResumeNotification =
+                wakeResumeNotificationSuppressor->consumeResumeNotificationSuppression(previous,
+                                                                                       current);
+            if (suppressWakeResumeNotification) {
+                qInfo() << "Runtime pause cleared after wake; suppressed resume notification";
+            } else if (authManager.isAuthenticated()) {
                 notificationManager.showInfo(QStringLiteral("Sync Resumed"),
                                              pauseController.resumeNotificationMessage());
             }
@@ -804,11 +821,20 @@ int main(int argc, char* argv[]) {
     WakeRefreshNotificationGate wakeRefreshNotificationGate;
 
     QObject::connect(
+        &suspendMonitor, &SuspendMonitor::aboutToSuspend, &app,
+        [&pauseController, wakeResumeNotificationSuppressor]() {
+            wakeResumeNotificationSuppressor->recordPreSuspendState(pauseController.snapshot());
+        });
+
+    QObject::connect(
         &suspendMonitor, &SuspendMonitor::resumed, &app,
         [&authManager, &fuseDriver, &statusCoordinator, &wakeRefreshNotificationGate,
-         &pauseController, mirrorEnabled, fuseEnabled, queueMirrorRestartAfterWake]() {
+         &pauseController, wakeResumeNotificationSuppressor, mirrorEnabled, fuseEnabled,
+         queueMirrorRestartAfterWake]() {
             qInfo() << "Resume handler: refreshing auth and restarting components";
             statusCoordinator.updateMirrorStatus("Recovering from sleep...");
+            wakeResumeNotificationSuppressor->noteWake(pauseController.snapshot(),
+                                                       QDateTime::currentMSecsSinceEpoch());
 
             auto* authManagerPtr = &authManager;
             auto* fuseDriverPtr = &fuseDriver;

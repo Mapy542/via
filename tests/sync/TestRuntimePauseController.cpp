@@ -6,6 +6,7 @@
 #include <QtTest/QtTest>
 
 #include "sync/RuntimePauseController.h"
+#include "sync/WakeResumeNotificationSuppressor.h"
 
 class TestRuntimePauseController : public QObject {
     Q_OBJECT
@@ -16,6 +17,15 @@ class TestRuntimePauseController : public QObject {
     void testManualResumeSuppressesActiveAutoReasons();
     void testAdditionalAutoPauseReasonsUseControllerStatusText();
     void testDisablingAutoPauseIgnoresActiveReasons();
+    void testWakeResumeSuppressionSuppresssPauseNotificationDuringSuspend();
+    void testWakeResumeSuppressionForSleepIntroducedOfflinePause();
+    void testWakeResumeSuppressionSuppresssPauseNotificationAfterWake();
+    void testWakeResumeSuppressionTracksOfflinePauseEngagedAfterWake();
+    void testWakeResumeSuppressionDoesNotHidePreExistingOfflineRecovery();
+    void testWakeResumeSuppressionDoesNotHidePowerSaverRecovery();
+    void testWakeResumeSuppressionDoesNotSuppressPowerSaverPauseNotification();
+    void testWakeResumeSuppressionDoesNotHideManualOfflineOverride();
+    void testWakeResumeSuppressionExpiresObservationWindow();
 };
 
 void TestRuntimePauseController::testManualPauseAndResume() {
@@ -126,6 +136,180 @@ void TestRuntimePauseController::testDisablingAutoPauseIgnoresActiveReasons() {
     manualController.requestManualResume();
     QVERIFY(manualController.isDriveApiAllowed());
     QVERIFY(manualController.effectiveStatusText().isEmpty());
+}
+
+void TestRuntimePauseController::
+    testWakeResumeSuppressionSuppresssPauseNotificationDuringSuspend() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    const RuntimePauseController::Snapshot preSuspend = controller.snapshot();
+    suppressor.recordPreSuspendState(preSuspend);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+
+    suppressor.observePauseTransition(preSuspend, paused, 999);
+
+    QVERIFY(suppressor.consumePauseNotificationSuppression(preSuspend, paused));
+    QVERIFY(!suppressor.consumePauseNotificationSuppression(preSuspend, paused));
+
+    suppressor.noteWake(paused, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionForSleepIntroducedOfflinePause() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    const RuntimePauseController::Snapshot preSuspend = controller.snapshot();
+    suppressor.recordPreSuspendState(preSuspend);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+
+    suppressor.observePauseTransition(preSuspend, paused, 999);
+    suppressor.noteWake(paused, 1000);
+
+    QVERIFY(suppressor.consumePauseNotificationSuppression(preSuspend, paused));
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(suppressor.consumeResumeNotificationSuppression(paused, resumed));
+    QVERIFY(!suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionSuppresssPauseNotificationAfterWake() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    const RuntimePauseController::Snapshot preWake = controller.snapshot();
+    suppressor.recordPreSuspendState(preWake);
+    suppressor.noteWake(preWake, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+    suppressor.observePauseTransition(preWake, paused, 1001);
+
+    QVERIFY(suppressor.consumePauseNotificationSuppression(preWake, paused));
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionTracksOfflinePauseEngagedAfterWake() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    const RuntimePauseController::Snapshot preWake = controller.snapshot();
+    suppressor.recordPreSuspendState(preWake);
+    suppressor.noteWake(preWake, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+    suppressor.observePauseTransition(preWake, paused, 1001);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionDoesNotHidePreExistingOfflineRecovery() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+
+    suppressor.recordPreSuspendState(paused);
+    suppressor.noteWake(paused, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(!suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionDoesNotHidePowerSaverRecovery() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    suppressor.recordPreSuspendState(controller.snapshot());
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::PowerSaver, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+
+    suppressor.noteWake(paused, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::PowerSaver, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(!suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::
+    testWakeResumeSuppressionDoesNotSuppressPowerSaverPauseNotification() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    const RuntimePauseController::Snapshot preWake = controller.snapshot();
+    suppressor.recordPreSuspendState(preWake);
+    suppressor.noteWake(preWake, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::PowerSaver, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+    suppressor.observePauseTransition(preWake, paused, 1001);
+
+    QVERIFY(!suppressor.consumePauseNotificationSuppression(preWake, paused));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionDoesNotHideManualOfflineOverride() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    suppressor.recordPreSuspendState(controller.snapshot());
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+
+    suppressor.noteWake(paused, 1000);
+
+    controller.requestManualResume();
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(resumed.suppressedAutoPauseReasons.testFlag(
+        RuntimePauseController::AutoPauseReason::Offline));
+    QVERIFY(!suppressor.consumeResumeNotificationSuppression(paused, resumed));
+}
+
+void TestRuntimePauseController::testWakeResumeSuppressionExpiresObservationWindow() {
+    RuntimePauseController controller;
+    WakeResumeNotificationSuppressor suppressor;
+
+    const RuntimePauseController::Snapshot preWake = controller.snapshot();
+    suppressor.recordPreSuspendState(preWake);
+    suppressor.noteWake(preWake, 1000);
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, true);
+    const RuntimePauseController::Snapshot paused = controller.snapshot();
+    suppressor.observePauseTransition(
+        preWake, paused,
+        1000 + WakeResumeNotificationSuppressor::kWakePauseObservationWindowMs + 1);
+
+    QVERIFY(!suppressor.consumePauseNotificationSuppression(preWake, paused));
+
+    controller.setAutoPauseReasonActive(RuntimePauseController::AutoPauseReason::Offline, false);
+    const RuntimePauseController::Snapshot resumed = controller.snapshot();
+
+    QVERIFY(!suppressor.consumeResumeNotificationSuppression(paused, resumed));
 }
 
 QTEST_MAIN(TestRuntimePauseController)
