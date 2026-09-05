@@ -248,7 +248,7 @@ class MetadataRefreshWorker : public QObject {
      * - Modified: Invalidate FileCache + update MetadataCache
      * - Deleted: Remove from MetadataCache (FileCache auto-handles)
      */
-    void processChange(const DriveChange& change);
+    bool processChange(const DriveChange& change);
 
     /**
      * @brief Update MetadataCache with file information

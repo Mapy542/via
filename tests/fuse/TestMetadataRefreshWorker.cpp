@@ -140,6 +140,7 @@ class TestMetadataRefreshWorker : public QObject {
 
     void testCreatedChange_EmitsResolvedPath();
     void testCreatedChange_EmitsRootRelativePath();
+    void testCreatedChanges_RetryChildAfterParent();
     void testModifiedChange_EmitsResolvedPath();
     void testDeletedChange_EmitsStoredPathBeforeRemoval();
     void testCreatedChange_FallsBackToFileNameWhenPathUnavailable();
@@ -311,6 +312,29 @@ void TestMetadataRefreshWorker::testCreatedChange_EmitsRootRelativePath() {
     QCOMPARE(rootChildren.first().fileId, QStringLiteral("file-root"));
 }
 
+void TestMetadataRefreshWorker::testCreatedChanges_RetryChildAfterParent() {
+    DriveChange parentChange =
+        makeChange(QStringLiteral("change-parent"), QStringLiteral("folder-new"),
+                   QStringLiteral("Projects"), QStringLiteral("root"));
+    parentChange.file.isFolder = true;
+    parentChange.file.mimeType = QStringLiteral("application/vnd.google-apps.folder");
+
+    const DriveChange childChange =
+        makeChange(QStringLiteral("change-child"), QStringLiteral("file-nested"),
+                   QStringLiteral("report.txt"), QStringLiteral("folder-new"));
+    QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+
+    m_driveClient->emitChangesBatch({childChange, parentChange});
+
+    QCOMPARE(changeSpy.count(), 2);
+    QVERIFY(m_cache->getMetadataByPath(QStringLiteral("Projects")).isValid());
+    const FuseFileMetadata child = m_cache->getMetadataByFileId(QStringLiteral("file-nested"));
+    QVERIFY(child.isValid());
+    QCOMPARE(child.path, QStringLiteral("Projects/report.txt"));
+    QCOMPARE(m_db->getFuseMetadataByPath(QStringLiteral("Projects/report.txt")).fileId,
+             QStringLiteral("file-nested"));
+}
+
 void TestMetadataRefreshWorker::testModifiedChange_EmitsResolvedPath() {
     m_cache->setMetadata(makeFolder(QStringLiteral("folder-1"), QStringLiteral("Projects")));
     m_cache->setMetadata(makeFile(QStringLiteral("file-modified"),
@@ -350,15 +374,16 @@ void TestMetadataRefreshWorker::testDeletedChange_EmitsStoredPathBeforeRemoval()
 
 void TestMetadataRefreshWorker::testCreatedChange_FallsBackToFileNameWhenPathUnavailable() {
     QSignalSpy changeSpy(m_worker, &MetadataRefreshWorker::changeProcessedDetailed);
+    QSignalSpy errorSpy(m_worker, &MetadataRefreshWorker::error);
 
     m_driveClient->emitChangesBatch(
         {makeChange(QStringLiteral("change-fallback"), QStringLiteral("file-fallback"),
                     QStringLiteral("orphan.txt"), QStringLiteral("missing-parent"))});
 
-    QCOMPARE(changeSpy.count(), 1);
-    const QList<QVariant> args = changeSpy.takeFirst();
-    QCOMPARE(args.at(0).toString(), QStringLiteral("orphan.txt"));
-    QCOMPARE(args.at(1).toString(), QStringLiteral("created"));
+    QCOMPARE(changeSpy.count(), 0);
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(m_worker->changeToken(), QString());
+    QVERIFY(!m_cache->getMetadataByFileId(QStringLiteral("file-fallback")).isValid());
 }
 
 void TestMetadataRefreshWorker::testTrashChange_IsIgnored() {

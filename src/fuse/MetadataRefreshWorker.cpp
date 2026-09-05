@@ -489,9 +489,41 @@ void MetadataRefreshWorker::onChangesReceived(const QList<DriveChange>& changes,
     // - Deleted --> DELETE_META_DB
     // - Created --> UPDATE_META_CACHE
     int processedCount = 0;
-    for (const DriveChange& change : changes) {
-        processChange(change);
-        processedCount++;
+    QList<DriveChange> pendingChanges = changes;
+    bool madeProgress = true;
+    while (!pendingChanges.isEmpty() && madeProgress) {
+        madeProgress = false;
+        QList<DriveChange> unresolvedChanges;
+        for (const DriveChange& change : pendingChanges) {
+            if (processChange(change)) {
+                processedCount++;
+                madeProgress = true;
+            } else {
+                unresolvedChanges.append(change);
+            }
+        }
+        pendingChanges = unresolvedChanges;
+    }
+
+    if (!pendingChanges.isEmpty()) {
+        qWarning() << "MetadataRefreshWorker: Could not resolve" << pendingChanges.size()
+                   << "remote changes; retaining change token for retry";
+        emit error(
+            QStringLiteral("Remote changes could not be applied because their parent "
+                           "folders are not available yet"));
+
+        {
+            QMutexLocker locker(&m_mutex);
+            m_changesRequestInFlight = false;
+            m_retryScheduled = (m_state == State::Running);
+        }
+        if (m_state == State::Running) {
+            m_retryTimer->start(kTransientRetryBaseDelayMs);
+        } else {
+            m_retryTimer->stop();
+        }
+        emit refreshCompleted(processedCount);
+        return;
     }
 
     // Update and save the change token
@@ -649,10 +681,10 @@ void MetadataRefreshWorker::recoverExpiredChangeToken(const QString& errorMessag
 // Private Methods
 // ============================================================================
 
-void MetadataRefreshWorker::processChange(const DriveChange& change) {
+bool MetadataRefreshWorker::processChange(const DriveChange& change) {
     if (!change.isValid()) {
         qDebug() << "MetadataRefreshWorker: Skipping invalid change";
-        return;
+        return true;
     }
 
     const RemoteNodeSnapshot nodeSnapshot = snapshotRemoteNodes(m_database, change.fileId);
@@ -679,7 +711,7 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
             if (!displayPath.isEmpty()) {
                 emit changeProcessedDetailed(displayPath, QStringLiteral("deleted"));
             }
-            return;
+            return true;
         }
 
         if (!nodeSnapshot.nodes.isEmpty()) {
@@ -704,13 +736,13 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
         if (!displayPath.isEmpty()) {
             emit changeProcessedDetailed(displayPath, QStringLiteral("deleted"));
         }
-        return;
+        return true;
     }
 
     // Check if we should process this file
     if (!shouldProcess(change.file)) {
         qDebug() << "MetadataRefreshWorker: Skipping file -" << change.file.name;
-        return;
+        return true;
     }
 
     // For modified files, we need to invalidate the file cache
@@ -760,10 +792,14 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
     }
 
     // Update metadata cache with new/modified file info
+    FuseFileMetadata metadata;
     if (!skipMetadataUpdate) {
-        const FuseFileMetadata metadata = updateMetadataCache(change.file);
+        metadata = updateMetadataCache(change.file);
         if (metadata.isValid()) {
             reconcileRemoteNodeMetadata(m_database, metadata);
+        }
+        if (!metadata.isValid()) {
+            return false;
         }
     }
 
@@ -773,6 +809,7 @@ void MetadataRefreshWorker::processChange(const DriveChange& change) {
     if (!displayPath.isEmpty()) {
         emit changeProcessedDetailed(displayPath, changeType);
     }
+    return true;
 }
 
 FuseFileMetadata MetadataRefreshWorker::updateMetadataCache(const DriveFile& file) {

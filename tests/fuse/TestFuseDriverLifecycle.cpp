@@ -30,6 +30,8 @@ class FakeDriveClientFDL : public GoogleDriveClient {
    public:
     explicit FakeDriveClientFDL(QObject* parent = nullptr) : GoogleDriveClient(nullptr, parent) {}
 
+    QString getRootFolderId() override { return QStringLiteral("root"); }
+
     QByteArray exportPayload = QByteArray("exported native doc");
     int exportCallCount = 0;
     int uploadCallCount = 0;

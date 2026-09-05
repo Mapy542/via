@@ -2575,7 +2575,12 @@ bool FuseDriver::initializeMetadataCache() {
     }
 
     if (m_metadataCache->rootFolderId().isEmpty()) {
-        m_metadataCache->setRootFolderId("root");
+        QString rootFolderId;
+        if (m_driveClient) {
+            rootFolderId = m_driveClient->getRootFolderId();
+        }
+        m_metadataCache->setRootFolderId(rootFolderId.isEmpty() ? QStringLiteral("root")
+                                                                : rootFolderId);
     }
 
     qDebug() << "FuseDriver: Metadata cache initialized";
@@ -3882,6 +3887,9 @@ void FuseDriver::handleRemoteChangeProcessed(const QString& displayPath,
     Q_UNUSED(changeType)
 
     const QString fusePath = fusePathFromMetadataPath(displayPath);
+    if (m_metadataCache) {
+        m_metadataCache->invalidateChildren(getParentPath(displayPath));
+    }
     invalidateFusePaths({fusePath, getParentPath(fusePath)});
 }
 

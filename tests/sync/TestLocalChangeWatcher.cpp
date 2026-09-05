@@ -20,6 +20,7 @@
  */
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -280,33 +281,24 @@ QList<ChangeQueueItem> TestLocalChangeWatcher::collectChanges(int timeoutMs) {
     QList<ChangeQueueItem> changes;
     QElapsedTimer timer;
     timer.start();
+    QElapsedTimer quietTimer;
 
-    // Process events and wait for debounce timer (500ms) + buffer
-    // The watcher uses debouncing, so we need to wait for that
-    while (timer.elapsed() < 800) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-        QThread::msleep(50);
-    }
-
-    // Now collect all queued changes
     while (timer.elapsed() < timeoutMs) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-
-        if (m_changeQueue->isEmpty()) {
-            // Wait a bit more for potential incoming changes
-            QThread::msleep(100);
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-            if (m_changeQueue->isEmpty()) {
-                break;  // No more items after waiting
-            }
-        }
 
         while (!m_changeQueue->isEmpty()) {
             ChangeQueueItem item = m_changeQueue->dequeue();
             if (item.isValid()) {
                 changes.append(item);
+                quietTimer.start();
             }
         }
+
+        if (!changes.isEmpty() && quietTimer.isValid() && quietTimer.elapsed() >= 100) {
+            break;
+        }
+
+        QThread::msleep(10);
     }
     return changes;
 }
@@ -344,7 +336,8 @@ void TestLocalChangeWatcher::testDetectFileCreate_MultipleFiles() {
     createFile("file3.txt", "content3");
 
     auto changes = collectChanges();
-    QVERIFY2(changes.size() >= 3, qPrintable(QString("Expected 3+ changes, got %1").arg(changes.size())));
+    QVERIFY2(changes.size() >= 3,
+             qPrintable(QString("Expected 3+ changes, got %1").arg(changes.size())));
 
     QSet<QString> createdFiles;
     for (const auto& change : changes) {
@@ -675,7 +668,8 @@ void TestLocalChangeWatcher::testDetectFileRename_SimpleRename() {
                 foundCreate = true;
             }
         }
-        QVERIFY2(foundDelete && foundCreate, "Rename not detected as Rename or as Delete+Create pair");
+        QVERIFY2(foundDelete && foundCreate,
+                 "Rename not detected as Rename or as Delete+Create pair");
     }
 }
 
@@ -754,7 +748,8 @@ void TestLocalChangeWatcher::testDetectFileMove_SameVolume() {
         // Check for delete+create pattern
         bool foundDelete = false, foundCreate = false;
         for (const auto& change : changes) {
-            if (change.changeType == ChangeType::Delete && change.localPath.contains("moveme.txt")) {
+            if (change.changeType == ChangeType::Delete &&
+                change.localPath.contains("moveme.txt")) {
                 foundDelete = true;
             }
             if (change.changeType == ChangeType::Create && change.localPath.contains("dest") &&
@@ -840,7 +835,8 @@ void TestLocalChangeWatcher::testDetectFolderCreate_EmptyFolder() {
     auto changes = collectChanges();
     bool foundCreate = false;
     for (const auto& change : changes) {
-        if (change.changeType == ChangeType::Create && change.localPath == "newfolder" && change.isDirectory) {
+        if (change.changeType == ChangeType::Create && change.localPath == "newfolder" &&
+            change.isDirectory) {
             foundCreate = true;
             break;
         }
@@ -906,7 +902,8 @@ void TestLocalChangeWatcher::testDetectFolderDelete_EmptyFolder() {
     auto changes = collectChanges();
     bool foundDelete = false;
     for (const auto& change : changes) {
-        if (change.changeType == ChangeType::Delete && change.localPath == "todelete" && change.isDirectory) {
+        if (change.changeType == ChangeType::Delete && change.localPath == "todelete" &&
+            change.isDirectory) {
             foundDelete = true;
             break;
         }
@@ -981,8 +978,10 @@ void TestLocalChangeWatcher::testDetectFolderRename_EmptyFolder() {
         // Accept delete+create as valid detection
         bool del = false, create = false;
         for (const auto& c : changes) {
-            if (c.changeType == ChangeType::Delete && c.localPath == "oldfoldername") del = true;
-            if (c.changeType == ChangeType::Create && c.localPath == "newfoldername") create = true;
+            if (c.changeType == ChangeType::Delete && c.localPath == "oldfoldername")
+                del = true;
+            if (c.changeType == ChangeType::Create && c.localPath == "newfoldername")
+                create = true;
         }
         QVERIFY2(del && create, "Folder rename not detected");
     }
@@ -1103,11 +1102,13 @@ void TestLocalChangeWatcher::testDebounceRapidChanges() {
     // Should coalesce into fewer events than 20
     int modifyCount = 0;
     for (const auto& c : changes) {
-        if (c.changeType == ChangeType::Modify) modifyCount++;
+        if (c.changeType == ChangeType::Modify)
+            modifyCount++;
     }
 
     // Debouncing should reduce the count significantly
-    QVERIFY2(modifyCount < 20, qPrintable(QString("Expected debouncing, got %1 modify events").arg(modifyCount)));
+    QVERIFY2(modifyCount < 20,
+             qPrintable(QString("Expected debouncing, got %1 modify events").arg(modifyCount)));
 }
 
 void TestLocalChangeWatcher::testDebounceTimeout() {
@@ -1145,9 +1146,12 @@ void TestLocalChangeWatcher::testDebounceMoveDetectionWindow() {
     int deleteCount = 0, createCount = 0;
 
     for (const auto& c : changes) {
-        if (c.changeType == ChangeType::Move) foundMove = true;
-        if (c.changeType == ChangeType::Delete) deleteCount++;
-        if (c.changeType == ChangeType::Create) createCount++;
+        if (c.changeType == ChangeType::Move)
+            foundMove = true;
+        if (c.changeType == ChangeType::Delete)
+            deleteCount++;
+        if (c.changeType == ChangeType::Create)
+            createCount++;
     }
 
     // Either detected as move OR as correlated delete+create (both acceptable)
@@ -1169,8 +1173,10 @@ void TestLocalChangeWatcher::testIgnoreHiddenFiles() {
     bool foundHidden = false;
     bool foundVisible = false;
     for (const auto& c : changes) {
-        if (c.localPath == ".hiddenfile") foundHidden = true;
-        if (c.localPath == "visible.txt") foundVisible = true;
+        if (c.localPath == ".hiddenfile")
+            foundHidden = true;
+        if (c.localPath == "visible.txt")
+            foundVisible = true;
     }
 
     // Hidden files might or might not be ignored depending on ignore patterns
@@ -1189,8 +1195,10 @@ void TestLocalChangeWatcher::testIgnorePatterns_TempFiles() {
     bool foundTmp = false;
     bool foundTxt = false;
     for (const auto& c : changes) {
-        if (c.localPath == "document.tmp") foundTmp = true;
-        if (c.localPath == "document.txt") foundTxt = true;
+        if (c.localPath == "document.tmp")
+            foundTmp = true;
+        if (c.localPath == "document.txt")
+            foundTxt = true;
     }
 
     QVERIFY2(foundTxt, "Real file not detected");
@@ -1209,8 +1217,10 @@ void TestLocalChangeWatcher::testIgnorePatterns_GitDirectory() {
     bool foundGit = false;
     bool foundTracked = false;
     for (const auto& c : changes) {
-        if (c.localPath.startsWith(".git")) foundGit = true;
-        if (c.localPath == "tracked.txt") foundTracked = true;
+        if (c.localPath.startsWith(".git"))
+            foundGit = true;
+        if (c.localPath == "tracked.txt")
+            foundTracked = true;
     }
 
     QVERIFY2(foundTracked, "Tracked file not detected");
@@ -1231,9 +1241,12 @@ void TestLocalChangeWatcher::testIgnorePatterns_Custom() {
     bool foundCache = false;
     bool foundImportant = false;
     for (const auto& c : changes) {
-        if (c.localPath == "app.log") foundLog = true;
-        if (c.localPath.startsWith("cache/")) foundCache = true;
-        if (c.localPath == "important.txt") foundImportant = true;
+        if (c.localPath == "app.log")
+            foundLog = true;
+        if (c.localPath.startsWith("cache/"))
+            foundCache = true;
+        if (c.localPath == "important.txt")
+            foundImportant = true;
     }
 
     QVERIFY2(foundImportant, "Important file not detected");
@@ -1253,7 +1266,8 @@ void TestLocalChangeWatcher::testStart_ValidPath() {
 
     QCOMPARE(m_watcher->state(), LocalChangeWatcher::State::Running);
     QCOMPARE(stateSpy.count(), 1);
-    QCOMPARE(stateSpy.at(0).at(0).value<LocalChangeWatcher::State>(), LocalChangeWatcher::State::Running);
+    QCOMPARE(stateSpy.at(0).at(0).value<LocalChangeWatcher::State>(),
+             LocalChangeWatcher::State::Running);
 }
 
 void TestLocalChangeWatcher::testStart_InvalidPath() {
@@ -1280,7 +1294,8 @@ void TestLocalChangeWatcher::testStop() {
 
     bool found = false;
     for (const auto& c : changes) {
-        if (c.localPath == "afterstop.txt") found = true;
+        if (c.localPath == "afterstop.txt")
+            found = true;
     }
     QVERIFY2(!found, "Change detected after stop");
 }
@@ -1315,7 +1330,8 @@ void TestLocalChangeWatcher::testResume_DetectsChangesDuringPause() {
     auto changes = collectChanges();
 
     // Should detect changes made during pause on resume
-    QVERIFY2(!changes.isEmpty() || QFile::exists(absolutePath("duringpause.txt")), "Changes during pause not handled");
+    QVERIFY2(!changes.isEmpty() || QFile::exists(absolutePath("duringpause.txt")),
+             "Changes during pause not handled");
 }
 
 void TestLocalChangeWatcher::testRestartAfterError() {
@@ -1331,7 +1347,8 @@ void TestLocalChangeWatcher::testRestartAfterError() {
 
     bool found = false;
     for (const auto& c : changes) {
-        if (c.localPath == "afterrestart.txt") found = true;
+        if (c.localPath == "afterrestart.txt")
+            found = true;
     }
     QVERIFY2(found, "Changes not detected after restart");
 }
@@ -1366,7 +1383,8 @@ void TestLocalChangeWatcher::testWatchPermissionDenied() {
     m_watcher->watchDirectory(restrictedPath);
 
     // Restore permissions for cleanup
-    QFile::setPermissions(restrictedPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    QFile::setPermissions(restrictedPath,
+                          QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 }
 
 void TestLocalChangeWatcher::testSymlinkHandling() {
@@ -1505,7 +1523,8 @@ void TestLocalChangeWatcher::testIgnoreTrashDirectory_FileModification() {
     auto changes = collectChanges();
 
     for (const auto& change : changes) {
-        QVERIFY2(!change.localPath.contains(".Trash-"), qPrintable("Trash modification leaked: " + change.localPath));
+        QVERIFY2(!change.localPath.contains(".Trash-"),
+                 qPrintable("Trash modification leaked: " + change.localPath));
     }
 }
 
@@ -1522,7 +1541,8 @@ void TestLocalChangeWatcher::testIgnoreTrashDirectory_FileDeletion() {
     auto changes = collectChanges();
 
     for (const auto& change : changes) {
-        QVERIFY2(!change.localPath.contains(".Trash-"), qPrintable("Trash deletion leaked: " + change.localPath));
+        QVERIFY2(!change.localPath.contains(".Trash-"),
+                 qPrintable("Trash deletion leaked: " + change.localPath));
     }
 }
 
@@ -1542,7 +1562,8 @@ void TestLocalChangeWatcher::testIgnoreTrashDirectory_MultipleUids() {
     auto changes = collectChanges();
 
     for (const auto& change : changes) {
-        QVERIFY2(!change.localPath.contains(".Trash-"), qPrintable("Multi-UID trash leaked: " + change.localPath));
+        QVERIFY2(!change.localPath.contains(".Trash-"),
+                 qPrintable("Multi-UID trash leaked: " + change.localPath));
     }
 }
 
@@ -1563,12 +1584,14 @@ void TestLocalChangeWatcher::testMoveToTrashBecomesDelete() {
     // We should see a Delete for the original file
     bool foundDelete = false;
     for (const auto& change : changes) {
-        if (change.changeType == ChangeType::Delete && change.localPath.contains("live_document.txt")) {
+        if (change.changeType == ChangeType::Delete &&
+            change.localPath.contains("live_document.txt")) {
             foundDelete = true;
         }
         // Must NOT see a Move or Create for the trash destination
         if (change.changeType == ChangeType::Move || change.changeType == ChangeType::Rename) {
-            QVERIFY2(!change.localPath.contains(".Trash-"), "Move-to-trash should not produce a Move/Rename change");
+            QVERIFY2(!change.localPath.contains(".Trash-"),
+                     "Move-to-trash should not produce a Move/Rename change");
         }
     }
 
@@ -1576,7 +1599,8 @@ void TestLocalChangeWatcher::testMoveToTrashBecomesDelete() {
     // timing, but if there ARE changes, none should reference .Trash- as
     // a destination.
     if (!changes.isEmpty()) {
-        QVERIFY2(foundDelete || changes.isEmpty(), "File moved to trash should produce Delete, not Move");
+        QVERIFY2(foundDelete || changes.isEmpty(),
+                 "File moved to trash should produce Delete, not Move");
     }
 }
 
